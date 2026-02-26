@@ -233,16 +233,17 @@ class SessionPersister:
 
         Returns the new session_id.
         """
+        old_session_id = self._session_id  # capture BEFORE update
         new_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         if self._session_db:
             try:
-                self._session_db.end_session(self._session_id, "compression")
+                self._session_db.end_session(old_session_id, "compression")
                 self.session_id = new_id  # Atomic update via setter
                 self._session_db.create_session(
                     session_id=self._session_id,
                     source=platform or self._platform or "cli",
                     model=model or self._model,
-                    parent_session_id=parent_session_id or self._session_id,
+                    parent_session_id=parent_session_id or old_session_id,
                 )
             except Exception as e:
                 logger.debug("Session DB compression split failed: %s", e)

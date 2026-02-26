@@ -347,6 +347,25 @@ class TestDelegateTaskGuard:
         assert "error" in parsed
 
 
+class TestSessionSearchNoDB:
+    """session_search without session_db must return an error, not fall through."""
+
+    @patch("model_tools.handle_function_call")
+    def test_session_search_no_db_returns_error(self, mock_hfc):
+        """When session_db is None, session_search must return explicit error JSON."""
+        config = _make_config(session_db=None)
+        tc = MockToolCall("tc_ss", "session_search", '{"query": "test"}')
+        messages, _, _ = _run([tc], config=config)
+
+        assert len(messages) == 1
+        content = messages[0]["content"]
+        parsed = json.loads(content)
+        assert "error" in parsed
+        assert "session_search unavailable" in parsed["error"]
+        # Must NOT have dispatched through the registry
+        mock_hfc.assert_not_called()
+
+
 class TestToolExecConfigFrozen:
     """ToolExecConfig must be frozen (immutable)."""
 

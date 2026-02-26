@@ -178,6 +178,11 @@ def execute_tool_calls(
                     f"  {_get_cute_tool_message_impl('session_search', function_args, tool_duration, result=function_result)}"
                 )
 
+        elif function_name == "session_search":
+            # session_db not available -- return explicit error
+            function_result = json.dumps({"error": "session_search unavailable: no session database configured"})
+            tool_duration = time.time() - tool_start_time
+
         elif function_name == "memory":
             from tools.memory_tool import memory_tool as _memory_tool
 
@@ -234,6 +239,7 @@ def execute_tool_calls(
                         f"{face} {spinner_label}", spinner_type="dots"
                     )
                     spinner.start()
+                    parent_agent._delegate_spinner = spinner
                 _delegate_result = None
                 try:
                     function_result = _delegate_task(
@@ -256,6 +262,7 @@ def execute_tool_calls(
                     )
                     if spinner:
                         spinner.stop(cute_msg)
+                        parent_agent._delegate_spinner = None
                     elif config.quiet_mode:
                         print(f"  {cute_msg}")
 

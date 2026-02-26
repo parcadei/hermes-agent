@@ -350,8 +350,6 @@ class AIAgent:
         hermes_home = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
         self.logs_dir = hermes_home / "sessions"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
-        self.session_log_file = self.logs_dir / f"session_{_initial_session_id}.json"
-        
         # Track conversation messages for session logging
         self._session_messages: List[Dict[str, Any]] = []
         
@@ -476,6 +474,10 @@ class AIAgent:
     @session_id.setter
     def session_id(self, value):
         self._persister.session_id = value
+
+    @property
+    def session_log_file(self):
+        return self._persister.session_log_file
 
     def _on_tool_executed(self, tool_name: str):
         """Reset nudge counters when relevant tools are used."""
@@ -2126,9 +2128,9 @@ def main(
         sample_filename = f"sample_{sample_id}.json"
         
         # Convert messages to trajectory format (same as batch_runner)
-        trajectory = agent._convert_to_trajectory_format(
-            result['messages'], 
-            user_query, 
+        trajectory = agent._persister._convert_to_trajectory_format(
+            result['messages'],
+            user_query,
             result['completed']
         )
         

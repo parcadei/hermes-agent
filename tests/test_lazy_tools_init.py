@@ -61,21 +61,25 @@ def test_file_tools_check_reqs_imports_directly():
     source = file_tools_path.read_text()
     tree = ast.parse(source)
 
-    # Find the _check_file_reqs function
+    # Find the _check_file_reqs function and verify its imports
+    found_expected_import = False
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "_check_file_reqs":
             # Walk the function body to find import statements
             for child in ast.walk(node):
                 if isinstance(child, ast.ImportFrom):
                     assert child.module != "tools", (
-                        "_check_file_reqs should not import from 'tools' package "
-                        "(was: 'from tools import check_file_requirements'). "
-                        "Should import directly from tools.terminal_tool instead."
+                        "_check_file_reqs should NOT import from 'tools' package root"
                     )
+                    if child.module == "tools.terminal_tool":
+                        found_expected_import = True
             break
     else:
         # _check_file_reqs function not found at all -- that's a problem
         raise AssertionError("_check_file_reqs function not found in tools/file_tools.py")
+    assert found_expected_import, (
+        "_check_file_reqs should import check_terminal_requirements from tools.terminal_tool"
+    )
 
 
 def test_tool_discovery_still_works():

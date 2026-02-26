@@ -155,6 +155,8 @@ class TestSaveSessionLogOverwrites:
         ]
         persister.save_session_log(msgs2)
         content2 = persister.session_log_file.read_text()
+        # Second write should have overwritten the first
+        assert content2 != content1
         # Second write should have more messages
         data2 = json.loads(content2)
         assert data2["message_count"] == 2
@@ -290,6 +292,9 @@ class TestCreateCompressionSession:
         assert create_kw["session_id"] == new_id
         assert create_kw["source"] == "cli"
         assert create_kw["model"] == "anthropic/claude-opus-4.6"
+        # parent_session_id must be the OLD id, not the new one (Bug 2 regression)
+        assert create_kw["parent_session_id"] == old_id
+        assert create_kw["parent_session_id"] != new_id
         # Return value is the new ID
         assert new_id != old_id
         assert isinstance(new_id, str)
