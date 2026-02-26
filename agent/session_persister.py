@@ -193,7 +193,7 @@ class SessionPersister:
         if not self._session_db:
             return
         try:
-            start_idx = (len(conversation_history) if conversation_history else 0) + 1
+            start_idx = len(conversation_history) if conversation_history else 0
             # Skip messages already appended incrementally by log_message()
             start_idx += self._flushed_msg_count
             for msg in messages[start_idx:]:
@@ -261,14 +261,15 @@ class SessionPersister:
         if self._session_db:
             try:
                 self._session_db.end_session(old_session_id, "compression")
-                self.session_id = new_id  # Atomic update via setter
-                self._flushed_msg_count = 0  # Reset for new session
                 self._session_db.create_session(
-                    session_id=self._session_id,
+                    session_id=new_id,
                     source=platform or self._platform or "cli",
                     model=model or self._model,
                     parent_session_id=parent_session_id or old_session_id,
                 )
+                # State updates AFTER both DB operations succeed
+                self.session_id = new_id  # Atomic update via setter
+                self._flushed_msg_count = 0  # Reset for new session
             except Exception as e:
                 logger.debug("Session DB compression split failed: %s", e)
         else:

@@ -350,9 +350,6 @@ class AIAgent:
         hermes_home = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
         self.logs_dir = hermes_home / "sessions"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
-        # Track conversation messages for session logging
-        self._session_messages: List[Dict[str, Any]] = []
-        
         # Cached system prompt -- built once per session, only rebuilt on compression
         self._cached_system_prompt: Optional[str] = None
         
@@ -905,8 +902,8 @@ class AIAgent:
         strips all flush artifacts from the message list.
 
         Args:
-            messages: The current conversation messages. If None, uses
-                      self._session_messages (last run_conversation state).
+            messages: The current conversation messages. All callers must
+                      provide this explicitly. If None, flush is a no-op.
             min_turns: Minimum user turns required to trigger the flush.
                        None = use config value (flush_min_turns).
                        0 = always flush (used for compression).
@@ -919,8 +916,6 @@ class AIAgent:
         if self._user_turn_count < effective_min:
             return
 
-        if messages is None:
-            messages = getattr(self, '_session_messages', None)
         if not messages or len(messages) < 3:
             return
 

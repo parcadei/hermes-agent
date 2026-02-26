@@ -131,9 +131,8 @@ class TestPersistWritesJsonAndDB:
         # JSON file should exist
         assert persister.session_log_file.exists()
         # DB should have been called (flush_to_db path)
-        # start_idx = 0 + 1 = 1 when no conversation_history
-        # So messages[1:] = [assistant msg] => 1 call
-        assert mock_session_db.append_message.call_count >= 1
+        # start_idx = 0 when no conversation_history, so all messages flushed
+        assert mock_session_db.append_message.call_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -193,21 +192,25 @@ class TestSaveSessionLogMetadata:
 
 class TestFlushToDBSkipsLogged:
     def test_flush_to_db_skips_logged(self, persister, mock_session_db):
-        """start_idx = len(conversation_history) + 1 skips pre-logged messages."""
+        """start_idx = len(conversation_history) skips pre-existing messages.
+
+        Production pattern: messages list does NOT contain a system message
+        (the system prompt is passed as a separate API parameter in run_agent.py).
+        conversation_history messages appear at the start of the messages list.
+        """
         conversation_history = [
             {"role": "user", "content": "earlier turn 1"},
             {"role": "assistant", "content": "earlier turn 2"},
         ]
         messages = [
-            {"role": "system", "content": "system prompt"},  # idx 0
-            {"role": "user", "content": "earlier turn 1"},  # idx 1
-            {"role": "assistant", "content": "earlier turn 2"},  # idx 2
-            {"role": "user", "content": "new turn"},  # idx 3 -- should be logged
-            {"role": "assistant", "content": "new reply"},  # idx 4 -- should be logged
+            {"role": "user", "content": "earlier turn 1"},      # idx 0 (from history)
+            {"role": "assistant", "content": "earlier turn 2"},  # idx 1 (from history)
+            {"role": "user", "content": "new turn"},             # idx 2 -- should be logged
+            {"role": "assistant", "content": "new reply"},       # idx 3 -- should be logged
         ]
         persister.flush_to_db(messages, conversation_history)
-        # start_idx = len(conversation_history) + 1 = 2 + 1 = 3
-        # messages[3:] has 2 items
+        # start_idx = len(conversation_history) = 2
+        # messages[2:] has 2 items
         assert mock_session_db.append_message.call_count == 2
         roles = [
             c.kwargs["role"] for c in mock_session_db.append_message.call_args_list
@@ -215,14 +218,17 @@ class TestFlushToDBSkipsLogged:
         assert roles == ["user", "assistant"]
 
     def test_flush_to_db_no_conversation_history(self, persister, mock_session_db):
-        """When conversation_history is None, start_idx = 0 + 1 = 1."""
+        """When conversation_history is None, start_idx = 0 -- all messages flushed."""
         messages = [
-            {"role": "system", "content": "system prompt"},  # idx 0, skipped
-            {"role": "user", "content": "hello"},  # idx 1
+            {"role": "user", "content": "hello"},      # idx 0
+            {"role": "assistant", "content": "world"},  # idx 1
         ]
         persister.flush_to_db(messages, conversation_history=None)
-        assert mock_session_db.append_message.call_count == 1
-        assert mock_session_db.append_message.call_args.kwargs["role"] == "user"
+        assert mock_session_db.append_message.call_count == 2
+        roles = [
+            c.kwargs["role"] for c in mock_session_db.append_message.call_args_list
+        ]
+        assert roles == ["user", "assistant"]
 
 
 # ---------------------------------------------------------------------------
@@ -433,11 +439,13 @@ class TestPersistDoesNotDuplicateIncrementallyLoggedMessages:
     def test_persist_does_not_duplicate_incrementally_logged_messages(
         self, persister, mock_session_db
     ):
-        """persist() should not re-append messages already written by log_message()."""
-        # Build up a messages list as the conversation progresses
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-        ]
+        """persist() should not re-append messages already written by log_message().
+
+        Production pattern: messages list does NOT contain a system message
+        (the system prompt is passed as a separate API parameter in run_agent.py).
+        """
+        # Build up a messages list as the conversation progresses (no system prefix)
+        messages = []
 
         # Simulate: user sends a message, log_message is called incrementally
         user_msg = {"role": "user", "content": "Hello"}
@@ -481,10 +489,11 @@ class TestPersistDoesNotDuplicateIncrementallyLoggedMessages:
         self, persister, mock_session_db
     ):
         """If some messages were logged incrementally and new ones were added
-        without log_message(), persist() should only flush the new ones."""
-        messages = [
-            {"role": "system", "content": "You are a helpful assistant."},
-        ]
+        without log_message(), persist() should only flush the new ones.
+
+        Production pattern: no system message in the messages list.
+        """
+        messages = []
 
         # Log first two messages incrementally
         user_msg = {"role": "user", "content": "Hello"}
@@ -520,24 +529,27 @@ class TestPersistDoesNotDuplicateIncrementallyLoggedMessages:
         self, persister, mock_session_db
     ):
         """When both conversation_history and incremental logging exist,
-        flush_to_db uses whichever skip count is higher."""
+        flush_to_db skips conversation_history + already-flushed messages.
+
+        Production pattern: no system message in the messages list.
+        messages starts with conversation_history, then new messages are appended.
+        """
         conversation_history = [
             {"role": "user", "content": "old turn 1"},
             {"role": "assistant", "content": "old reply 1"},
         ]
 
         messages = [
-            {"role": "system", "content": "system prompt"},     # idx 0
-            {"role": "user", "content": "old turn 1"},          # idx 1
-            {"role": "assistant", "content": "old reply 1"},    # idx 2
-            {"role": "user", "content": "new turn"},            # idx 3
-            {"role": "assistant", "content": "new reply"},      # idx 4
-            {"role": "user", "content": "newest turn"},         # idx 5
-            {"role": "assistant", "content": "newest reply"},   # idx 6
+            {"role": "user", "content": "old turn 1"},          # idx 0 (from history)
+            {"role": "assistant", "content": "old reply 1"},    # idx 1 (from history)
+            {"role": "user", "content": "new turn"},            # idx 2
+            {"role": "assistant", "content": "new reply"},      # idx 3
+            {"role": "user", "content": "newest turn"},         # idx 4
+            {"role": "assistant", "content": "newest reply"},   # idx 5
         ]
 
-        # Incrementally log messages at idx 3, 4, 5, 6
-        for msg in messages[3:]:
+        # Incrementally log messages at idx 2, 3, 4, 5
+        for msg in messages[2:]:
             persister.log_message(msg)
 
         assert mock_session_db.append_message.call_count == 4
@@ -545,9 +557,8 @@ class TestPersistDoesNotDuplicateIncrementallyLoggedMessages:
         mock_session_db.append_message.reset_mock()
         persister.flush_to_db(messages, conversation_history)
 
-        # conversation_history gives start_idx=3 (len(2)+1)
-        # but incremental logging already covered idx 3,4,5,6
-        # so nothing should be re-appended
+        # start_idx = len(conversation_history) + _flushed_msg_count = 2 + 4 = 6
+        # messages[6:] is empty, so nothing should be re-appended
         assert mock_session_db.append_message.call_count == 0, (
             f"Expected 0 calls but got {mock_session_db.append_message.call_count}. "
             f"flush_to_db did not respect incremental log count."
@@ -584,16 +595,16 @@ class TestPersistDoesNotDuplicateIncrementallyLoggedMessages:
             persister.log_message(msg)
         assert persister._flushed_msg_count == 2
 
-        # flush_to_db should NOT skip these new messages
+        # flush_to_db should NOT re-flush these new messages (already logged)
+        # Production pattern: no system message in the messages list
         mock_session_db.reset_mock()
         new_msgs = [
-            {"role": "system", "content": "sys"},
             {"role": "assistant", "content": "new-msg-0"},
             {"role": "assistant", "content": "new-msg-1"},
         ]
         persister.flush_to_db(new_msgs, conversation_history=None)
-        # Messages at idx 1,2 already logged; idx 0 is system (start_idx=1 + flushed=2 = 3, skip all)
-        # So no additional append_message calls expected
+        # start_idx = 0 + _flushed_msg_count(2) = 2
+        # messages[2:] is empty, so no additional append_message calls expected
         assert mock_session_db.append_message.call_count == 0
 
 
@@ -675,7 +686,6 @@ class TestCallerSitesUsePublicAPI:
     def test_batch_runner_no_agent_convert_to_trajectory(self):
         """batch_runner.py must NOT call agent._convert_to_trajectory_format (crashes post-refactor)."""
         import ast
-        from pathlib import Path
 
         batch_runner_path = Path(__file__).resolve().parents[2] / "batch_runner.py"
         assert batch_runner_path.exists(), f"batch_runner.py not found at {batch_runner_path}"
@@ -698,7 +708,6 @@ class TestCallerSitesUsePublicAPI:
     def test_run_agent_no_private_persister_convert(self):
         """run_agent.py must NOT call _persister._convert_to_trajectory_format (double-private)."""
         import ast
-        from pathlib import Path
 
         run_agent_path = Path(__file__).resolve().parents[2] / "run_agent.py"
         assert run_agent_path.exists(), f"run_agent.py not found at {run_agent_path}"
@@ -718,3 +727,213 @@ class TestCallerSitesUsePublicAPI:
                                 f"(line {node.lineno}). Use _persister.convert_to_trajectory_format() "
                                 f"(public API) instead."
                             )
+
+
+# ---------------------------------------------------------------------------
+# 16. BUG FIX: flush_to_db off-by-one (no hardcoded +1)
+# ---------------------------------------------------------------------------
+
+
+class TestFlushToDBOffByOne:
+    """The original flush_to_db computed start_idx with a hardcoded +1 to skip
+    an assumed system message at messages[0].  But run_agent.py does NOT prepend
+    a system message to the messages list (the system prompt is sent as a
+    separate API parameter).  The +1 causes one real message to be silently
+    skipped on every flush.
+
+    The correct formula is:
+        start_idx = len(conversation_history or []) + _flushed_msg_count
+    """
+
+    def test_flush_no_system_prefix_all_messages_flushed(self, persister, mock_session_db):
+        """When messages have NO system prefix (production pattern), ALL messages
+        should be flushed to the DB on the first call."""
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+        ]
+        persister.flush_to_db(messages, conversation_history=None)
+        # Both messages must be flushed -- not just 1
+        assert mock_session_db.append_message.call_count == 2, (
+            f"Expected 2 append_message calls for 2 messages without system prefix, "
+            f"but got {mock_session_db.append_message.call_count}. "
+            f"The +1 in start_idx is skipping a real message."
+        )
+        roles = [
+            c.kwargs["role"] for c in mock_session_db.append_message.call_args_list
+        ]
+        assert roles == ["user", "assistant"]
+
+    def test_flush_no_system_prefix_with_conversation_history(
+        self, persister, mock_session_db
+    ):
+        """With conversation_history but no system prefix, only new messages
+        beyond the history should be flushed."""
+        conversation_history = [
+            {"role": "user", "content": "old question"},
+            {"role": "assistant", "content": "old answer"},
+        ]
+        messages = [
+            {"role": "user", "content": "old question"},      # idx 0 (from history)
+            {"role": "assistant", "content": "old answer"},    # idx 1 (from history)
+            {"role": "user", "content": "new question"},       # idx 2 (new)
+            {"role": "assistant", "content": "new answer"},    # idx 3 (new)
+        ]
+        persister.flush_to_db(messages, conversation_history)
+        assert mock_session_db.append_message.call_count == 2, (
+            f"Expected 2 new messages flushed, got {mock_session_db.append_message.call_count}"
+        )
+        roles = [
+            c.kwargs["role"] for c in mock_session_db.append_message.call_args_list
+        ]
+        assert roles == ["user", "assistant"]
+
+    def test_flush_no_system_prefix_with_incremental_logging(
+        self, persister, mock_session_db
+    ):
+        """Messages already logged via log_message() should not be re-flushed,
+        even without a system prefix."""
+        # Simulate incremental logging of 2 messages
+        msg1 = {"role": "user", "content": "Hello"}
+        msg2 = {"role": "assistant", "content": "Hi"}
+        persister.log_message(msg1)
+        persister.log_message(msg2)
+        assert persister._flushed_msg_count == 2
+
+        messages = [msg1, msg2]
+        mock_session_db.append_message.reset_mock()
+        persister.flush_to_db(messages, conversation_history=None)
+        # Both messages already logged -- nothing to flush
+        assert mock_session_db.append_message.call_count == 0, (
+            f"Expected 0 re-flushed messages, got {mock_session_db.append_message.call_count}"
+        )
+
+    def test_flush_no_system_prefix_partial_incremental(
+        self, persister, mock_session_db
+    ):
+        """Only the un-logged tail should be flushed when some messages were
+        logged incrementally and no system prefix exists."""
+        msg1 = {"role": "user", "content": "Hello"}
+        persister.log_message(msg1)
+        assert persister._flushed_msg_count == 1
+
+        messages = [
+            msg1,
+            {"role": "assistant", "content": "Hi"},       # not yet logged
+            {"role": "user", "content": "Follow-up"},     # not yet logged
+        ]
+        mock_session_db.append_message.reset_mock()
+        persister.flush_to_db(messages, conversation_history=None)
+        # Only idx 1 and 2 should be flushed
+        assert mock_session_db.append_message.call_count == 2, (
+            f"Expected 2 un-logged messages, got {mock_session_db.append_message.call_count}"
+        )
+
+    def test_flush_empty_messages(self, persister, mock_session_db):
+        """Flushing an empty messages list should be a no-op."""
+        persister.flush_to_db([], conversation_history=None)
+        assert mock_session_db.append_message.call_count == 0
+
+    def test_flush_single_message_no_system(self, persister, mock_session_db):
+        """A single non-system message should be flushed (not skipped by +1)."""
+        messages = [{"role": "user", "content": "solo message"}]
+        persister.flush_to_db(messages, conversation_history=None)
+        assert mock_session_db.append_message.call_count == 1
+        assert mock_session_db.append_message.call_args.kwargs["role"] == "user"
+
+
+# ---------------------------------------------------------------------------
+# 17. BUG FIX: create_compression_session atomicity
+# ---------------------------------------------------------------------------
+
+
+class TestCompressionSessionAtomicity:
+    """If create_session() throws after session_id and _flushed_msg_count have
+    been updated, the persister is in a corrupted state: it believes it's on
+    the new session but the DB doesn't know about it.
+
+    FIX: Move session_id and _flushed_msg_count updates AFTER all DB
+    operations succeed.
+    """
+
+    def test_state_unchanged_when_create_session_fails(self, logs_dir):
+        """If create_session() raises, session_id and _flushed_msg_count must
+        remain at their old values."""
+        mock_db = MagicMock()
+        mock_db.end_session = MagicMock()  # succeeds
+        mock_db.create_session = MagicMock(
+            side_effect=RuntimeError("DB write failed")
+        )
+
+        persister = SessionPersister(
+            session_id="original-session",
+            session_db=mock_db,
+            logs_dir=logs_dir,
+            model="test-model",
+            base_url="http://localhost",
+        )
+        # Simulate some prior incremental logging
+        persister._flushed_msg_count = 5
+
+        old_id = persister.session_id
+        old_log_file = persister.session_log_file
+        old_flushed = persister._flushed_msg_count
+
+        # create_compression_session should handle the error gracefully
+        new_id = persister.create_compression_session()
+
+        # The critical check: state must NOT have been partially updated
+        # Either both updated (success) or neither (failure)
+        assert persister.session_id == old_id, (
+            f"session_id changed to '{persister.session_id}' despite create_session() "
+            f"failure. Expected it to remain '{old_id}'."
+        )
+        assert persister._flushed_msg_count == old_flushed, (
+            f"_flushed_msg_count changed to {persister._flushed_msg_count} despite "
+            f"create_session() failure. Expected it to remain {old_flushed}."
+        )
+        assert persister.session_log_file == old_log_file, (
+            "session_log_file changed despite create_session() failure"
+        )
+
+    def test_state_updated_when_both_db_ops_succeed(self, logs_dir):
+        """When both end_session and create_session succeed, state must update."""
+        mock_db = MagicMock()
+        persister = SessionPersister(
+            session_id="old-session",
+            session_db=mock_db,
+            logs_dir=logs_dir,
+            model="test-model",
+            base_url="http://localhost",
+        )
+        persister._flushed_msg_count = 3
+
+        new_id = persister.create_compression_session()
+
+        assert persister.session_id == new_id
+        assert persister._flushed_msg_count == 0
+        assert persister.session_log_file == logs_dir / f"session_{new_id}.json"
+
+    def test_state_unchanged_when_end_session_fails(self, logs_dir):
+        """If end_session() raises, nothing should be updated."""
+        mock_db = MagicMock()
+        mock_db.end_session = MagicMock(
+            side_effect=RuntimeError("DB connection lost")
+        )
+
+        persister = SessionPersister(
+            session_id="keep-this",
+            session_db=mock_db,
+            logs_dir=logs_dir,
+            model="test-model",
+            base_url="http://localhost",
+        )
+        persister._flushed_msg_count = 7
+
+        new_id = persister.create_compression_session()
+
+        # end_session failed, so create_session should not have been called
+        mock_db.create_session.assert_not_called()
+        # State must remain unchanged
+        assert persister.session_id == "keep-this"
+        assert persister._flushed_msg_count == 7
