@@ -63,6 +63,7 @@ def test_file_tools_check_reqs_imports_directly():
 
     # Find the _check_file_reqs function and verify its imports
     found_expected_import = False
+    found_check_terminal_requirements = False
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == "_check_file_reqs":
             # Walk the function body to find import statements
@@ -73,12 +74,22 @@ def test_file_tools_check_reqs_imports_directly():
                     )
                     if child.module == "tools.terminal_tool":
                         found_expected_import = True
+                        imported_names = [alias.name for alias in child.names]
+                        assert "check_terminal_requirements" in imported_names, (
+                            f"_check_file_reqs should import check_terminal_requirements "
+                            f"from tools.terminal_tool, found: {imported_names}"
+                        )
+                        found_check_terminal_requirements = True
             break
     else:
         # _check_file_reqs function not found at all -- that's a problem
         raise AssertionError("_check_file_reqs function not found in tools/file_tools.py")
     assert found_expected_import, (
         "_check_file_reqs should import check_terminal_requirements from tools.terminal_tool"
+    )
+    assert found_check_terminal_requirements, (
+        "_check_file_reqs must import the specific name 'check_terminal_requirements' "
+        "from tools.terminal_tool"
     )
 
 

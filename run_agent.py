@@ -2128,7 +2128,7 @@ def main(
         sample_filename = f"sample_{sample_id}.json"
         
         # Convert messages to trajectory format (same as batch_runner)
-        trajectory = agent._persister._convert_to_trajectory_format(
+        trajectory = agent._persister.convert_to_trajectory_format(
             result['messages'],
             user_query,
             result['completed']

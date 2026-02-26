@@ -76,6 +76,7 @@ class SessionPersister:
         self._quiet_mode = quiet_mode
         self._save_interval = save_interval
         self._save_counter = 0
+        self._flushed_msg_count: int = 0  # Messages already appended via log_message()
         # Atomic: session_log_file always matches session_id
         self._session_log_file = self._logs_dir / f"session_{session_id}.json"
         self._session_messages: List[Dict[str, Any]] = []  # Last known messages state
@@ -125,6 +126,7 @@ class SessionPersister:
                 tool_call_id=msg.get("tool_call_id"),
                 finish_reason=msg.get("finish_reason"),
             )
+            self._flushed_msg_count += 1
         except Exception as e:
             logger.debug("Session DB log_msg failed: %s", e)
 
@@ -192,6 +194,8 @@ class SessionPersister:
             return
         try:
             start_idx = (len(conversation_history) if conversation_history else 0) + 1
+            # Skip messages already appended incrementally by log_message()
+            start_idx += self._flushed_msg_count
             for msg in messages[start_idx:]:
                 role = msg.get("role", "unknown")
                 content = msg.get("content")
@@ -217,6 +221,25 @@ class SessionPersister:
 
     # -- Trajectory -----------------------------------------------------------
 
+    def convert_to_trajectory_format(
+        self, messages: List[Dict[str, Any]], user_query: str, completed: bool
+    ) -> List[Dict[str, Any]]:
+        """Convert internal message format to trajectory format for saving.
+
+        Public API wrapper around ``_convert_to_trajectory_format``.  Callers
+        outside this class (e.g. ``run_agent.py``, ``batch_runner.py``) should
+        use this method instead of reaching into the private implementation.
+
+        Args:
+            messages: Internal message history.
+            user_query: Original user query.
+            completed: Whether the conversation completed successfully.
+
+        Returns:
+            Messages in trajectory format (ShareGPT-style).
+        """
+        return self._convert_to_trajectory_format(messages, user_query, completed)
+
     def save_trajectory(self, messages: List[Dict], user_query: str, completed: bool):
         """Save conversation trajectory to JSONL file."""
         if not self._save_trajectories:
@@ -239,6 +262,7 @@ class SessionPersister:
             try:
                 self._session_db.end_session(old_session_id, "compression")
                 self.session_id = new_id  # Atomic update via setter
+                self._flushed_msg_count = 0  # Reset for new session
                 self._session_db.create_session(
                     session_id=self._session_id,
                     source=platform or self._platform or "cli",
@@ -249,6 +273,7 @@ class SessionPersister:
                 logger.debug("Session DB compression split failed: %s", e)
         else:
             self.session_id = new_id  # Still update even without DB
+            self._flushed_msg_count = 0  # Reset for new session
         return self._session_id
 
     def update_system_prompt(self, prompt: str):
