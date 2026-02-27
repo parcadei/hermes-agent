@@ -2126,7 +2126,6 @@ def main(
         trajectory = agent._persister.convert_to_trajectory_format(
             result['messages'],
             user_query,
-            result['completed']
         )
         
         entry = {

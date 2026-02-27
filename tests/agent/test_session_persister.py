@@ -230,6 +230,37 @@ class TestFlushToDBSkipsLogged:
         ]
         assert roles == ["user", "assistant"]
 
+    def test_flush_to_db_without_system_prefix(self, persister, mock_session_db):
+        """No leading system message — all messages should still be flushed correctly.
+
+        Production run_agent.py passes messages without a system prefix.
+        This regression test ensures flush_to_db index math works without one.
+        """
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "world"},
+            {"role": "user", "content": "follow-up"},
+        ]
+        persister.flush_to_db(messages, conversation_history=None)
+        assert mock_session_db.append_message.call_count == 3
+        roles = [
+            c.kwargs["role"] for c in mock_session_db.append_message.call_args_list
+        ]
+        assert roles == ["user", "assistant", "user"]
+
+    def test_flush_to_db_incremental_without_system_prefix(self, persister, mock_session_db):
+        """Incremental flushing with no system prefix skips already-flushed messages."""
+        messages = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+        ]
+        # Simulate 1 message already flushed
+        persister._flushed_msg_count = 1
+        persister.flush_to_db(messages, conversation_history=None)
+        # Only the second message should be flushed
+        assert mock_session_db.append_message.call_count == 1
+        assert mock_session_db.append_message.call_args.kwargs["role"] == "assistant"
+
 
 # ---------------------------------------------------------------------------
 # 7. save_trajectory is no-op when disabled
@@ -642,13 +673,12 @@ class TestConvertToTrajectoryFormatPublicAPI:
             {"role": "assistant", "content": "hi there"},
         ]
         user_query = "hello"
-        completed = True
 
         private_result = persister._convert_to_trajectory_format(
-            messages, user_query, completed
+            messages, user_query
         )
         public_result = persister.convert_to_trajectory_format(
-            messages, user_query, completed
+            messages, user_query
         )
         assert public_result == private_result
 
@@ -659,7 +689,7 @@ class TestConvertToTrajectoryFormatPublicAPI:
             {"role": "assistant", "content": "4"},
         ]
         result = persister.convert_to_trajectory_format(
-            messages, "What is 2+2?", True
+            messages, "What is 2+2?"
         )
         assert isinstance(result, list)
         assert len(result) >= 2

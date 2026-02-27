@@ -1092,6 +1092,7 @@ class HermesCLI:
             desc = desc.split("\n")[0]
             if ". " in desc:
                 desc = desc[:desc.index(". ") + 1]
+            desc = desc[:60]
             toolsets[toolset].append((name, desc))
         
         # Display by toolset

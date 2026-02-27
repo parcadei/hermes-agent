@@ -94,7 +94,7 @@ if _config_path.exists():
                 _host_prefixes = ('/Users/', 'C:\\', 'C:/')
                 _cur_cwd = os.environ.get('TERMINAL_CWD', '')
                 if any(_cur_cwd.startswith(p) for p in _host_prefixes):
-                    os.environ['TERMINAL_CWD'] = '~'
+                    os.environ['TERMINAL_CWD'] = _mcwd
     except Exception:
         pass  # Non-fatal; gateway can still run with .env values
 

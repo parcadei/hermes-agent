@@ -292,7 +292,6 @@ def _process_single_prompt(
         trajectory = agent._persister.convert_to_trajectory_format(
             result["messages"],
             prompt,
-            result["completed"]
         )
         
         return {

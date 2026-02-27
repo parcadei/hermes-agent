@@ -222,7 +222,7 @@ class SessionPersister:
     # -- Trajectory -----------------------------------------------------------
 
     def convert_to_trajectory_format(
-        self, messages: List[Dict[str, Any]], user_query: str, completed: bool
+        self, messages: List[Dict[str, Any]], user_query: str
     ) -> List[Dict[str, Any]]:
         """Convert internal message format to trajectory format for saving.
 
@@ -233,19 +233,18 @@ class SessionPersister:
         Args:
             messages: Internal message history.
             user_query: Original user query.
-            completed: Whether the conversation completed successfully.
 
         Returns:
             Messages in trajectory format (ShareGPT-style).
         """
-        return self._convert_to_trajectory_format(messages, user_query, completed)
+        return self._convert_to_trajectory_format(messages, user_query)
 
     def save_trajectory(self, messages: List[Dict], user_query: str, completed: bool):
         """Save conversation trajectory to JSONL file."""
         if not self._save_trajectories:
             return
 
-        trajectory = self._convert_to_trajectory_format(messages, user_query, completed)
+        trajectory = self._convert_to_trajectory_format(messages, user_query)
         _save_trajectory_to_file(trajectory, self._model, completed)
 
     # -- Compression session split --------------------------------------------
@@ -320,14 +319,13 @@ class SessionPersister:
         return json.dumps(formatted_tools, ensure_ascii=False)
 
     def _convert_to_trajectory_format(
-        self, messages: List[Dict[str, Any]], user_query: str, completed: bool
+        self, messages: List[Dict[str, Any]], user_query: str
     ) -> List[Dict[str, Any]]:
         """Convert internal message format to trajectory format for saving.
 
         Args:
             messages: Internal message history.
             user_query: Original user query.
-            completed: Whether the conversation completed successfully.
 
         Returns:
             Messages in trajectory format (ShareGPT-style).
