@@ -107,8 +107,10 @@ os.environ["HERMES_EXEC_ASK"] = "1"
 # Set terminal working directory for messaging platforms
 # Uses MESSAGING_CWD if set, otherwise defaults to home directory
 # This is separate from CLI which uses the directory where `hermes` is run
-messaging_cwd = os.getenv("MESSAGING_CWD") or str(Path.home())
-os.environ["TERMINAL_CWD"] = messaging_cwd
+# Only set if not already configured by the sandbox CWD override above
+if "TERMINAL_CWD" not in os.environ:
+    messaging_cwd = os.getenv("MESSAGING_CWD") or str(Path.home())
+    os.environ["TERMINAL_CWD"] = messaging_cwd
 
 from gateway.config import (
     Platform,
