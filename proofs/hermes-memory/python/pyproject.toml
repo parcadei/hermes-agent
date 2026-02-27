@@ -1,0 +1,18 @@
+[project]
+name = "hermes-memory"
+version = "0.1.0"
+description = "Computational verification of the Hermes memory system formalization"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "hypothesis>=6.0",
+    "pytest>=7.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
