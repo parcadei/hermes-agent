@@ -32,7 +32,7 @@ class TestSessionMessagesRemoved:
                     f"run_agent.py still references _session_messages at line {node.lineno}. "
                     f"This attribute was always empty after __init__ and should be removed."
                 )
-            if isinstance(node, ast.Str) and "_session_messages" in node.s:
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and "_session_messages" in node.value:
                 pytest.fail(
                     f"run_agent.py still mentions '_session_messages' in a string literal "
                     f"at line {node.lineno}."

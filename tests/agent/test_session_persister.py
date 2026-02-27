@@ -880,7 +880,7 @@ class TestCompressionSessionAtomicity:
         old_flushed = persister._flushed_msg_count
 
         # create_compression_session should handle the error gracefully
-        new_id = persister.create_compression_session()
+        persister.create_compression_session()
 
         # The critical check: state must NOT have been partially updated
         # Either both updated (success) or neither (failure)
@@ -930,7 +930,7 @@ class TestCompressionSessionAtomicity:
         )
         persister._flushed_msg_count = 7
 
-        new_id = persister.create_compression_session()
+        persister.create_compression_session()
 
         # end_session failed, so create_session should not have been called
         mock_db.create_session.assert_not_called()
