@@ -19,3 +19,6 @@ import HermesNLCDM.Dynamics
 
 -- Phase 3
 import HermesNLCDM.Coupling
+
+-- Phase 4
+import HermesNLCDM.Capacity
