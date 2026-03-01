@@ -16,3 +16,6 @@ import HermesNLCDM.LocalMinima
 
 -- Phase 2
 import HermesNLCDM.Dynamics
+
+-- Phase 3
+import HermesNLCDM.Coupling
