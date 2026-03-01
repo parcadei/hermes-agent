@@ -274,4 +274,72 @@ theorem energy_descent {d N : ℕ} [NeZero N]
   -- Chain: E(ξ_new) ≤ Q̃(ξ_new) ≤ Q̃(ξ_old) = E(ξ_old)
   linarith
 
+/-! ## Strict Surrogate Minimizer -/
+
+/-- Strict surrogate minimizer: Q(c) < Q(ξ) when ξ ≠ c -/
+theorem surrogate_minimizer_strict {d N : ℕ}
+    (patterns : Fin N → Fin d → ℝ) (p : Fin N → ℝ)
+    (ξ : Fin d → ℝ)
+    (hne : (fun k => ∑ μ, p μ * patterns μ k) ≠ ξ) :
+    let c : Fin d → ℝ := fun k => ∑ μ, p μ * patterns μ k
+    (-(∑ μ, p μ * ∑ i, patterns μ i * c i) + (1/2) * ∑ i, c i ^ 2) <
+    (-(∑ μ, p μ * ∑ i, patterns μ i * ξ i) + (1/2) * ∑ i, ξ i ^ 2) := by
+  intro c
+  have hswap : ∀ v : Fin d → ℝ, ∑ μ, p μ * ∑ i, patterns μ i * v i =
+      ∑ i, c i * v i := by
+    intro v; simp_rw [Finset.mul_sum]; rw [Finset.sum_comm]
+    congr 1; ext i
+    simp_rw [show ∀ x, p x * (patterns x i * v i) = (p x * patterns x i) * v i from fun x => by ring]
+    rw [← Finset.sum_mul]
+  rw [hswap ξ, hswap c]
+  -- c ≠ ξ → ∃ i, c i ≠ ξ i → ∑ (ξ - c)² > 0
+  have hne_pt : ∃ i, c i ≠ ξ i := Function.ne_iff.mp hne
+  have hsq_pos : 0 < ∑ i, (ξ i - c i) ^ 2 := by
+    obtain ⟨i, hi⟩ := hne_pt
+    have hi_sq : 0 < (ξ i - c i) ^ 2 :=
+      sq_pos_of_ne_zero (sub_ne_zero.mpr (Ne.symm hi))
+    calc 0 < (ξ i - c i) ^ 2 := hi_sq
+      _ ≤ ∑ j : Fin d, (ξ j - c j) ^ 2 :=
+        Finset.single_le_sum (f := fun j => (ξ j - c j) ^ 2)
+          (fun j _ => sq_nonneg _) (Finset.mem_univ i)
+  have hexp : ∑ i, (ξ i - c i) ^ 2 = ∑ i, ξ i ^ 2 - 2 * ∑ i, c i * ξ i + ∑ i, c i ^ 2 := by
+    have : ∀ i, (ξ i - c i) ^ 2 = ξ i ^ 2 - 2 * (c i * ξ i) + c i ^ 2 := fun i => by ring
+    simp_rw [this, Finset.sum_add_distrib, Finset.sum_sub_distrib, Finset.mul_sum]
+  have hcc : ∑ i, c i * c i = ∑ i, c i ^ 2 := by congr 1; ext i; ring
+  nlinarith
+
+/-! ## Strict Energy Descent -/
+
+/-- STRICT DESCENT: If ξ is not a fixed point, energy strictly decreases.
+    E(hopfieldUpdate(ξ)) < E(ξ) when hopfieldUpdate(ξ) ≠ ξ -/
+theorem energy_descent_strict {d N : ℕ} [NeZero N]
+    (cfg : SystemConfig d N) (ξ : Fin d → ℝ)
+    (hne : ¬isFixedPoint cfg ξ) :
+    localEnergy cfg (hopfieldUpdate cfg ξ) < localEnergy cfg ξ := by
+  unfold isFixedPoint at hne
+  show -logSumExp cfg.β (fun μ => ∑ i, cfg.patterns μ i * hopfieldUpdate cfg ξ i) +
+    (1/2) * ∑ i, hopfieldUpdate cfg ξ i ^ 2 <
+    -logSumExp cfg.β (fun μ => ∑ i, cfg.patterns μ i * ξ i) +
+    (1/2) * ∑ i, ξ i ^ 2
+  set sim : Fin N → ℝ := fun μ => ∑ i, cfg.patterns μ i * ξ i
+  set p : Fin N → ℝ := softmax cfg.β sim
+  have hξ_new_eq : ∀ k, hopfieldUpdate cfg ξ k = ∑ μ, p μ * cfg.patterns μ k := by
+    intro k; unfold hopfieldUpdate; simp only [sim, p]
+  set ξ_new : Fin d → ℝ := fun k => ∑ μ, p μ * cfg.patterns μ k
+  have hupd : hopfieldUpdate cfg ξ = ξ_new := funext hξ_new_eq
+  rw [hupd]
+  set sim_new : Fin N → ℝ := fun μ => ∑ i, cfg.patterns μ i * ξ_new i
+  have hp_pos : ∀ μ, 0 < p μ := fun μ => softmax_pos sim μ
+  have hp_sum : ∑ μ, p μ = 1 := softmax_sum_one sim
+  -- Step 2: Full FY at ξ_new gives E(ξ_new) ≤ Q̃(ξ_new)
+  have step2 : -logSumExp cfg.β sim_new + (1/2) * ∑ i, ξ_new i ^ 2 ≤
+      -(∑ μ, p μ * sim_new μ) + cfg.β⁻¹ * ∑ μ, p μ * Real.log (p μ) +
+      (1/2) * ∑ i, ξ_new i ^ 2 := by
+    linarith [lse_ge_weighted_sum_plus_entropy cfg.β_pos sim_new p hp_pos hp_sum]
+  -- Step 3: Q̃(ξ_new) < Q̃(ξ_old) STRICTLY because ξ_new ≠ ξ
+  have hne' : ξ_new ≠ ξ := by rwa [← hupd]
+  have step3 := surrogate_minimizer_strict cfg.patterns p ξ hne'
+  -- Chain: E(ξ_new) ≤ Q̃(ξ_new) < Q̃(ξ_old) = E(ξ_old)
+  linarith [lse_eq_softmax_sum cfg.β_pos sim]
+
 end HermesNLCDM
