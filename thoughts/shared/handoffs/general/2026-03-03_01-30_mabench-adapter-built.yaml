@@ -1,0 +1,174 @@
+root_span_id: mabench-adapter-session
+session_id: mabench-adapter-session
+---
+session: general
+date: 2026-03-03
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "Build MABench adapter for Hermes memory systems. Clone MemoryAgentBench (ICLR 2026), write HermesMemoryAgent wrapping V1+V2, commit."
+now: "Adapter built, imports verified, committed. Need to install MABench deps and run on FactConsolidation + EventQA."
+test: |
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_wiring_discriminative.py test_coupled_engine.py test_bridge_integration.py test_dream_ops.py test_strength_decay_dream.py test_longitudinal_eval.py -v --tb=short
+  # Expect: 142 passed
+
+done_this_session:
+  - task: "Cloned MemoryAgentBench (ICLR 2026, 237 stars)"
+    files: [MemoryAgentBench/]
+    details: |
+      github.com/HUST-AI-HYZ/MemoryAgentBench
+      4 competencies: AR (Accurate Retrieval), TTL (Test-Time Learning),
+      LRU (Long-Range Understanding), CR (Conflict Resolution)
+      Datasets: EventQA, FactConsolidation, RULER, LongMemEval, InfBench, DetectiveQA
+      Uses GPT-4o as judge for open-ended metrics
+
+  - task: "Built HermesMemoryAgent adapter"
+    files: [proofs/hermes-NLCDM/python/mabench/hermes_agent.py]
+    details: |
+      EmbeddingRelevanceScorer: Qwen3-0.6B cosine similarity, replaces JaccardRelevance
+        via RelevanceScorer protocol. Caches embeddings per text string.
+      HermesMemoryAgent: wraps MemoryOrchestrator (V1) + CoupledEngine (V2)
+        - store: V1 text contradiction → orchestrator.store() + V2 embed → coupled_engine.store()
+        - query: V2 spreading activation top-k + V1 text recall → merge/dedup → LLM answer
+        - reset: clears both systems for new context
+        - dream_interval: configurable dream cycle every N stores
+      ParameterSet uses validated baseline: alpha=0.1, beta=0.1, delta_t=1.0,
+        s_max=10.0, s0=1.0, temperature=5.0, novelty_start=0.5, etc.
+
+  - task: "Built run_hermes.py standalone runner"
+    files: [proofs/hermes-NLCDM/python/mabench/run_hermes.py]
+    details: |
+      Reuses MABench ConversationCreator for data loading and metrics_summarization.
+      Loops over contexts, memorizes chunks, queries, computes metrics, saves JSON.
+      CLI args: --model, --retrieve_num, --contradiction_threshold, --dream_interval
+
+  - task: "Committed NLCDM Phase 12 + Python runtime + specs"
+    details: |
+      278ce43: Phase 12 Lean proof, full Python runtime (coupled_engine, dream_ops,
+      142-test suite), memory system specs, handoffs. 181 files, 55944 insertions.
+
+  - task: "Committed MABench adapter"
+    details: |
+      0db338d: mabench/ directory with hermes_agent.py, run_hermes.py, config.
+      4 files, 548 insertions.
+
+decisions:
+  adapter_not_subclass: |
+    HermesMemoryAgent is NOT a subclass of MABench's AgentWrapper because
+    AgentWrapper has heavy coupling to specific LLM clients (OpenAI, Anthropic,
+    Google), tokenizers, and internal state. Our agent provides the same
+    send_message(message, memorizing) interface without inheriting that baggage.
+  dual_retrieval: |
+    V2 (embedding-ranked via spreading activation) as primary retrieval,
+    V1 (text-based recall with tiered rendering) as supplement. Merged with
+    prefix-based deduplication. This gives both semantic relevance (V2) and
+    text-heuristic matches (V1).
+  adapter_in_nlcdm_tree: |
+    MABench is a cloned repo with its own .git, so our adapter files live in
+    proofs/hermes-NLCDM/python/mabench/ (our project tree). The runner adds
+    MABench to sys.path at runtime.
+  baseline_params: |
+    Used validated ParameterSet from test_engine.py:make_baseline_params().
+    Satisfies contraction condition K < 1. Previous attempt with custom params
+    failed the contraction check.
+
+findings:
+  competency_mapping: |
+    MABench 4 competencies vs our system:
+    - AR (Accurate Retrieval): direct match — CoupledEngine.query() + P@1
+    - TTL (Test-Time Learning): partial — our emotional tagging learns at ingest,
+      not LLM in-context learning
+    - LRU (Long-Range Understanding): weak — tests narrative comprehension,
+      our bridges are geometric
+    - CR (Conflict Resolution): DIRECT MATCH — our v2_contradiction system
+  factconsolidation_format: |
+    FactConsolidation has facts with serial numbers. Newer facts (higher serial)
+    override older facts. Template: "find the newest fact with larger serial number"
+    This directly tests contradiction-aware store's ability to replace old facts.
+  v1_text_contradiction_gap: |
+    V1 detect_contradictions didn't fire on "CEO of Acme is Alice" vs
+    "CEO of Acme is now Bob Jones" — text heuristics may need tuning for
+    this specific pattern. V2 cosine threshold would catch it if embeddings
+    are close enough.
+
+worked:
+  - "ParameterSet from test_engine baseline passes all validation"
+  - "EmbeddingRelevanceScorer imports and constructs without model load"
+  - "HermesMemoryAgent send_message interface matches MABench AgentWrapper"
+  - "Integration test: orchestrator store/query + CoupledEngine store/query both work"
+
+failed:
+  - "Custom ParameterSet with w_r/w_t/w_i/w_a/w_s — wrong field names"
+  - "ParameterSet with temperature=1.0 — violates contraction condition"
+  - "git add inside MemoryAgentBench/ — nested .git prevents parent tracking"
+
+next:
+  - step: "Install MABench dependencies in NLCDM venv"
+    details: |
+      cd proofs/hermes-NLCDM/python && .venv/bin/pip install \
+        python-dotenv pyyaml tqdm nltk rouge-score editdistance tiktoken \
+        openai datasets huggingface_hub
+      May also need: langchain, langchain-openai, langchain-community, faiss-cpu
+      Check if HuggingFace datasets download works.
+
+  - step: "Run FactConsolidation_sh_6k (smallest CR dataset)"
+    details: |
+      proofs/hermes-NLCDM/python/.venv/bin/python \
+        proofs/hermes-NLCDM/python/mabench/run_hermes.py \
+        --dataset_config MemoryAgentBench/configs/data_conf/Conflict_Resolution/Factconsolidation_sh_6k.yaml \
+        --model gpt-4o-mini
+      Needs OPENAI_API_KEY in .env. context_max_length=6000, max_test_samples=1.
+      This is the minimal test of contradiction resolution.
+
+  - step: "Run EventQA (smallest AR dataset)"
+    details: |
+      proofs/hermes-NLCDM/python/.venv/bin/python \
+        proofs/hermes-NLCDM/python/mabench/run_hermes.py \
+        --dataset_config MemoryAgentBench/configs/data_conf/Accurate_Retrieval/EventQA/eventqa_65536.yaml \
+        --model gpt-4o-mini
+
+  - step: "Compare results against published baselines"
+    details: |
+      MABench paper has results for: Mem0, Letta, Cognee, HippoRAG, BM25 RAG,
+      embedding RAG (text-embedding-3-small, Contriever, Qwen3-4B).
+      Our results should be compared on EM/F1 for CR, EM/F1 for AR.
+
+  - step: "Tune V1 text contradiction for FactConsolidation patterns"
+    details: |
+      FactConsolidation uses serial-numbered facts with explicit contradictions.
+      V1 detect_contradictions may need pattern tuning for "serial number"
+      override semantics. V2 cosine should handle it geometrically.
+
+  - step: "Consider dream cycles between context chunks"
+    details: |
+      dream_interval=0 (disabled) by default. For long contexts with many chunks,
+      periodic dream cycles could improve consolidation and retrieval.
+      Try dream_interval=50 or 100.
+
+files:
+  created:
+    - proofs/hermes-NLCDM/python/mabench/__init__.py
+    - proofs/hermes-NLCDM/python/mabench/hermes_agent.py
+    - proofs/hermes-NLCDM/python/mabench/hermes_config.yaml
+    - proofs/hermes-NLCDM/python/mabench/run_hermes.py
+    - MemoryAgentBench/ (cloned, not tracked in our git)
+
+background_state:
+  - "21 Lean modules (Phases 1-12), build clean, 0 sorry"
+  - "142/142 Python tests passing"
+  - "MABench adapter committed (0db338d)"
+  - "MemoryAgentBench cloned at MemoryAgentBench/ (own .git)"
+  - "MABench deps NOT yet installed in NLCDM venv"
+  - "OPENAI_API_KEY needed in .env for LLM answer generation"
+  - "embeddings_170k.npy available (Qwen3-0.6B, 1024-dim)"
+
+key_references:
+  - "proofs/hermes-NLCDM/python/mabench/hermes_agent.py — full adapter"
+  - "proofs/hermes-NLCDM/python/mabench/run_hermes.py — standalone runner"
+  - "proofs/hermes-memory/python/hermes_memory/orchestrator.py — V1 orchestrator"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py — V2 engine"
+  - "MemoryAgentBench/agent.py:258-280 — send_message interface contract"
+  - "MemoryAgentBench/utils/templates.py:76-105 — factconsolidation templates"
+  - "MemoryAgentBench/configs/data_conf/Conflict_Resolution/ — CR dataset configs"
+  - "MemoryAgentBench/configs/data_conf/Accurate_Retrieval/EventQA/ — AR dataset configs"
