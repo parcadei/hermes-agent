@@ -1,0 +1,16 @@
+# Hermes Memory Agent configuration
+agent_name: hermes_rag_gpt-4o-mini
+model: gpt-4o-mini
+temperature: 0.0
+
+# Memory configuration
+input_length_limit: 128000
+buffer_length: 1000
+
+# Hermes-specific
+retrieve_num: 10
+agent_chunk_size: null
+chunk_size: 4096
+
+# Output
+output_dir: output/hermes
