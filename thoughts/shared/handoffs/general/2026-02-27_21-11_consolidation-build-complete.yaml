@@ -1,0 +1,85 @@
+root_span_id: b2285e19-187f-4e3f-a90e-a838e8a8f844
+turn_span_id: 
+session_id: b2285e19-187f-4e3f-a90e-a838e8a8f844
+---
+session: general
+date: 2026-02-27
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Piece 4/5 consolidation.py — full build complete (all 4 phases), 292 tests, 1056 baseline"
+now: "Audit consolidation.py via critic agent, then start piece 5/5"
+
+test: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/test_consolidation.py -q --tb=short
+baseline: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/ -q --tb=short
+
+done_this_session:
+  - task: "Resumed from handoff — verified Phase A (Kraken aaddca1) complete: 503L code, 120 tests"
+    files: []
+  - task: "Phase A.5: Added 6 missing config fields (recency_guard, high_activation_threshold, severe_pressure_multiplier, mild_pressure_retention, max_candidates_per_batch, consolidation_decay) with validation"
+    files: [proofs/hermes-memory/python/hermes_memory/consolidation.py]
+  - task: "Phase A.5: Added extraction pattern constants (PREFERENCE/FACT/INSTRUCTION/REASONING_EXTRACTION_PATTERNS, EXTRACTION_PATTERNS dict, SEMANTIC_TEMPLATES dict)"
+    files: [proofs/hermes-memory/python/hermes_memory/consolidation.py]
+  - task: "Phase B (Kraken a4d408c): Core logic — _content_is_correction, _passes_inhibitors, _compute_semantic_value, should_consolidate, compute_affinity — 73 tests"
+    files: [proofs/hermes-memory/python/hermes_memory/consolidation.py, proofs/hermes-memory/python/tests/test_consolidation.py]
+  - task: "Phase C (Kraken a35bd5c): Extraction — _get_extraction_patterns, _truncate_to_sentences, _extract_by_sentence_scoring, extract_semantic, archive_episodic — 59 tests"
+    files: [proofs/hermes-memory/python/hermes_memory/consolidation.py, proofs/hermes-memory/python/tests/test_consolidation.py]
+  - task: "Phase D (Kraken a6a1af2): Pipeline — _next_level, consolidate_memory, select_consolidation_candidates — 40 tests"
+    files: [proofs/hermes-memory/python/hermes_memory/consolidation.py, proofs/hermes-memory/python/tests/test_consolidation.py]
+  - task: "Full baseline verification: 1056 passed, 2 xfailed, 0 failures"
+    files: []
+
+blockers: []
+
+questions: []
+
+decisions:
+  - config_field_mapping: "Mapped spec names to Phase A names: temporal_weight=0.3 (beta=1-temporal_weight=0.7), temporal_decay_rate=0.01 (used as temporal_decay_lambda), importance_decay_factor=0.1 (used as consolidation_decay). Added consolidation_decay as separate field for clarity."
+  - correction_in_non_consolidatable: "Added 'correction' to NON_CONSOLIDATABLE_CATEGORIES (was only greeting/transactional). Per AP3-F3, corrections must be blocked at inhibitor level."
+  - b_and_c_parallel: "Launched Kraken B (core logic) and Kraken C (extraction) in parallel. No conflicts because B wrote to 'Phase B' section and C to 'Phase C' section of same file."
+  - retention_threshold_per_level: "should_consolidate uses LEVEL_RETENTION_THRESHOLDS[candidate.level] (not a single config threshold). SEMANTIC_INSIGHT has no threshold → always returns False."
+
+findings:
+  - final_file_sizes: "consolidation.py: 1206 lines, test_consolidation.py: 2795 lines, total: 4001 lines"
+  - total_tests: "292 consolidation tests (120 A + 73 B + 59 C + 40 D), 1056 baseline total"
+  - public_api: "6 public functions: should_consolidate, extract_semantic, consolidate_memory, compute_affinity, select_consolidation_candidates, archive_episodic"
+  - private_helpers: "7 private functions: _content_is_correction, _passes_inhibitors, _compute_semantic_value, _next_level, _truncate_to_sentences, _extract_by_sentence_scoring, _get_extraction_patterns"
+  - config_fields: "24 total config fields after Phase A.5 additions"
+  - secondary_trigger_note: "should_consolidate secondary trigger fires for old+infrequent memories even with high retention, if semantic_value is high. Tests must set both high strength AND high access_count to make candidates truly ineligible."
+  - pieces_status: "encoding(1/5 done), recall(2/5 done), contradiction(3/5 done), consolidation(4/5 DONE), piece5 TBD"
+
+worked:
+  - "Phase A.5 prep step: adding missing config fields + extraction patterns before launching B+C prevented concurrent modification conflicts"
+  - "Parallel Kraken B+C with clear section markers ('Phase B' / 'Phase C') — no conflicts"
+  - "Detailed prompts with exact algorithms, field names from Phase A, and behavioral contracts"
+
+failed: []
+
+next:
+  - "Audit consolidation.py via critic agent — check spec compliance, edge cases, behavioral contracts"
+  - "Run full baseline one more time after audit fixes (if any)"
+  - "Create handoff for piece 5/5 (optimizer.py — the final piece)"
+  - "Start piece 5/5 implementation following same pattern: spec → adversarial passes → multi-kraken build"
+
+files:
+  created:
+    - thoughts/shared/handoffs/general/2026-02-27_21-11_consolidation-build-complete.yaml
+  modified:
+    - proofs/hermes-memory/python/hermes_memory/consolidation.py
+    - proofs/hermes-memory/python/tests/test_consolidation.py
+
+# Key spec reference: thoughts/shared/plans/memory-system/consolidation/spec.md (2596 lines)
+# Adversarial passes: thoughts/shared/plans/memory-system/consolidation/adversarial-pass{1,2,3}.md
+#
+# Imports added in this session:
+#   from hermes_memory.core import clamp01, retention
+#   from hermes_memory.encoding import CATEGORY_IMPORTANCE, VALID_CATEGORIES
+#
+# Config fields added in Phase A.5:
+#   recency_guard: float = 1.0
+#   high_activation_threshold: int = 10
+#   severe_pressure_multiplier: float = 1.2
+#   mild_pressure_retention: float = 0.5
+#   max_candidates_per_batch: int = 50
+#   consolidation_decay: float = 0.1

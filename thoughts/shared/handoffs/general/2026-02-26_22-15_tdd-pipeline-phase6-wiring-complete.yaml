@@ -1,0 +1,83 @@
+root_span_id: 8eb70e5f-42df-4301-803c-fde4fdd29bb5
+turn_span_id: 
+session_id: 8eb70e5f-42df-4301-803c-fde4fdd29bb5
+---
+session: general
+date: 2026-02-26
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: TDD pipeline Phase 6 complete — all 3 extracted components wired into AIAgent, 11 methods deleted, 234 tests passing
+now: Phase 7 — smoke test protocol (3 real conversations), then commit all Phases 1-7
+test: /Users/cosimo/.hermes/hermes-agent/venv/bin/python3 -m pytest tests/ -q --tb=short
+
+done_this_session:
+  - task: "Phase 6: Wire PromptAssembler, SessionPersister, ToolExecConfig into AIAgent.__init__"
+    files: [run_agent.py]
+  - task: "Phase 6: Replace session_id with property delegating to SessionPersister (atomic update)"
+    files: [run_agent.py]
+  - task: "Phase 6: Replace ~25 call sites in run_conversation and _compress_context"
+    files: [run_agent.py]
+  - task: "Phase 6: Add _on_tool_executed callback for nudge counter resets"
+    files: [run_agent.py]
+  - task: "Phase 6: Delete 11 extracted methods from AIAgent (~400 lines removed)"
+    files: [run_agent.py]
+  - task: "Phase 6: Clean up 9 unused imports (45 → 36)"
+    files: [run_agent.py]
+  - task: "Phase 6: Update test_interrupt.py to use standalone execute_tool_calls()"
+    files: [tests/tools/test_interrupt.py]
+
+blockers: []
+
+questions:
+  - "Phase 7.2 smoke test protocol — should it be automated (script) or manual (3 conversations)?"
+  - "Should all 7 phases be committed as one commit or per-phase?"
+
+decisions:
+  - session_id_property_pattern: "session_id computed as local var _initial_session_id in __init__, passed to persister. Property delegates to persister after init. Avoids property-before-persister-exists issue."
+  - persister_format_tools_fn: "Passed self._format_tools_for_system_message as format_tools_fn to SessionPersister for trajectory conversion, then deleted the method from AIAgent"
+  - maybe_save_not_save: "Replaced self._save_session_log(messages) at incremental save point (L2321) with self._persister.maybe_save_session_log(messages) — supports save_interval"
+  - test_interrupt_update: "tests/tools/test_interrupt.py patched to call standalone execute_tool_calls() instead of deleted AIAgent._execute_tool_calls()"
+
+findings:
+  - method_count_reduction: "AIAgent methods: 34 → 24 (including property getter/setter + new _on_tool_executed)"
+  - line_count_reduction: "run_agent.py: ~2560 → 2155 lines (~400 lines removed)"
+  - import_cleanup: "9 unused imports removed (prompt_builder constants, display helpers, trajectory functions now imported by components)"
+  - zero_dead_code: "tldr dead run_agent.py → 0% dead code after deletion"
+  - all_imports_clean: "All 5 import validations pass (AIAgent, PromptAssembler, SessionPersister, ToolExecutor, tools package)"
+
+worked:
+  - "Giving kraken agent the exact wiring spec with line numbers for every call site replacement"
+  - "Including tldr commands in agent prompt for post-change verification"
+  - "Running full 234-test suite before and after — caught any regressions immediately"
+  - "Computing session_id as local var in __init__ to avoid property-before-persister chicken-and-egg"
+
+failed: []
+
+next:
+  - "Phase 7.1: Full test suite verification (already done — 234 passed)"
+  - "Phase 7.2: Smoke test protocol — run 3 conversations: (1) CLI short session 2-3 tool calls, (2) CLI long session triggering compression, (3) Gateway single-message. Diff session JSON metadata structure."
+  - "Phase 7.3: Import validation (already done — all 5 pass)"
+  - "Commit all changes from Phases 1-7 as a single commit or per-phase commits"
+  - "Future: Consider cleaning up tools/send_message_tool.py:134 deferred 'from model_tools import _run_async' (works via re-export but could import from agent.async_bridge directly)"
+
+files:
+  created:
+    - agent/async_bridge.py
+    - agent/prompt_assembler.py
+    - agent/session_persister.py
+    - agent/tool_executor.py
+    - tests/test_import_structure.py
+    - tests/test_lazy_tools_init.py
+    - tests/agent/__init__.py
+    - tests/agent/test_prompt_assembler.py
+    - tests/agent/test_session_persister.py
+    - tests/agent/test_tool_executor.py
+  modified:
+    - run_agent.py
+    - model_tools.py
+    - tools/__init__.py
+    - tools/file_tools.py
+    - tools/registry.py
+    - tests/tools/test_interrupt.py

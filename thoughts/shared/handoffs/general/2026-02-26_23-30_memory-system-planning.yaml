@@ -1,0 +1,71 @@
+root_span_id: 6606fa84-1859-439f-ba6c-166e8dafd539
+turn_span_id: 
+session_id: 6606fa84-1859-439f-ba6c-166e8dafd539
+session: general
+date: 2026-02-26
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: Complete AIAgent decomposition (commit + PR), plan memory system architecture
+now: Memory system architecture doc written — ready for discriminative validation then Phase 1 build
+test: /Users/cosimo/.hermes/hermes-agent/venv/bin/python3 -m pytest tests/ -q --tb=short
+
+done_this_session:
+  - task: "Commit all 7 phases of AIAgent decomposition (20 files, +2417/-1030)"
+    files: [run_agent.py, agent/async_bridge.py, agent/prompt_assembler.py, agent/session_persister.py, agent/tool_executor.py, model_tools.py, tools/__init__.py, tools/file_tools.py, tools/registry.py, tools/terminal_tool.py, tests/]
+  - task: "Update docs/architecture.md with new component structure"
+    files: [docs/architecture.md]
+  - task: "Create PR to parcadei/hermes-agent (not upstream)"
+    result: "https://github.com/parcadei/hermes-agent/pull/1"
+  - task: "Add git remotes rule to .claude/CLAUDE.md (never PR to NousResearch)"
+    files: [.claude/CLAUDE.md]
+  - task: "Research Modal embedding deployment patterns"
+    result: "CPU-only Arctic Embed S, ~5-20ms/text, $30/mo free tier covers millions of embeddings"
+  - task: "Write memory system architecture plan"
+    files: [thoughts/shared/plans/memory-system/architecture.md]
+
+blockers: []
+
+decisions:
+  - pr_target: "Always PR to parcadei/hermes-agent, never NousResearch/hermes-agent"
+  - embedding_model: "Snowflake Arctic Embed S (~33M params, 384-dim) on Modal CPU — no GPU needed"
+  - memory_db: "Leaning local SQLite + sqlite-vec for v1 (simplest, fastest reads)"
+  - migration_strategy: "Wrap existing MemoryStore — same tool interface, new backend"
+  - consolidation_model: "Auxiliary client (cheap model) for post-session extraction"
+  - recall_gating: "Heuristic for v1 — first message + long messages + questions"
+
+findings:
+  - modal_current_usage: "Only uses modal.Sandbox via swe-rex. No App/Function/Volume yet."
+  - modal_auth: "~/.modal.toml (CLI OAuth) or MODAL_TOKEN_ID/SECRET env vars"
+  - modal_cold_start: "2-5s for CPU container with model on Volume"
+  - modal_cost: "$30/mo free tier, ~$0.047/hr per core when running"
+  - prompt_cache_conflict: "Current memory is frozen at session start for cache stability. Dynamic recall per-turn would break this invariant — needs design thought."
+
+worked:
+  - "Using scout + oracle agents in parallel for codebase exploration + external research"
+  - "Writing architecture doc with explicit open decisions (D1-D5) rather than premature commitments"
+
+failed: []
+
+next:
+  - "Run discriminative validation on memory architecture plan (brenner/ck pass)"
+  - "Phase 1: Create agent/memory/modal_app.py — Embedder class with Volume"
+  - "Phase 1: Create agent/memory/embedding_client.py — local caller"
+  - "Phase 1: Deploy to Modal and verify end-to-end embed call"
+  - "Phase 2: Create agent/memory/store.py — SQLite + sqlite-vec"
+  - "Phase 3: Recall path wired into PromptAssembler"
+  - "Phase 4: Consolidation path triggered from SessionPersister"
+  - "Resolve open question: dynamic recall vs prompt cache stability"
+
+files:
+  created:
+    - thoughts/shared/plans/memory-system/architecture.md
+  modified:
+    - docs/architecture.md
+    - .claude/CLAUDE.md
+
+references:
+  - thoughts/shared/plans/memory-system/architecture.md
+  - /Users/cosimo/.hermes/memories/session_20260226_040349_research_doc.md
+  - .scout/cache/agents/oracle/output-2026-02-26T212009Z.md

@@ -1,0 +1,108 @@
+root_span_id: bdabbb8c-edf4-45cc-9e3e-c9bb41719ce5
+turn_span_id: 6b62b7b0-0695-41f7-be31-a7c8d599b770
+session_id: bdabbb8c-edf4-45cc-9e3e-c9bb41719ce5
+---
+session: general
+date: 2026-03-02
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "Vectorized O(N²) dream bottlenecks with BLAS matmul. Built parametric scale test (100→10k). Identified missing end-to-end pipeline test."
+now: "Build end-to-end scale test using hermes-memory orchestrator (not just NLCDM substrate). Strength decay → importance → dream pruning feedback loop untested at scale."
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_parametric_scale.py test_dream_redesign.py test_coupled_engine.py -v -s --tb=short"
+
+done_this_session:
+  - task: "Vectorized nrem_prune_xb — pre-compute S = patterns @ patterns.T via BLAS, fast-path when max(S) <= threshold"
+    files: [proofs/hermes-NLCDM/python/dream_ops.py]
+  - task: "Vectorized nrem_repulsion_xb — BLAS matmul + np.where for close pairs + vectorized R1 postcondition check"
+    files: [proofs/hermes-NLCDM/python/dream_ops.py]
+  - task: "Vectorized nrem_merge_xb — BLAS matmul for adjacency graph + fast-path short-circuit"
+    files: [proofs/hermes-NLCDM/python/dream_ops.py]
+  - task: "Built test_parametric_scale.py — 6 test classes, parametric sweep 100→10k using pre-cached embeddings_170k.npy"
+    files: [proofs/hermes-NLCDM/python/test_parametric_scale.py]
+  - task: "Updated test_dream_scalability.py — relaxed scaling exponent lower bound from 1.5 to 1.0 (BLAS brought it to 1.342)"
+    files: [proofs/hermes-NLCDM/python/test_dream_scalability.py]
+  - task: "Confirmed embeddings_170k.npy complete — 170270 × 1024 float32, 665MB"
+    files: [proofs/hermes-NLCDM/python/embeddings_170k.npy, proofs/hermes-NLCDM/python/sentences_170k.txt]
+
+decisions:
+  - vectorization_strategy: "Pre-compute full similarity matrix S = X @ X.T via BLAS, then fast-path return if max(S) <= threshold. Greedy loops still run on pre-computed S when pruning needed (array index ~ns vs dot product ~μs). At 10k with diverse data: entire prune/repulsion/merge returns instantly (no pairs exceed threshold)."
+  - repulsion_postcondition: "R1 check (delta_min non-decreasing) now uses BLAS matmul instead of Python for-loops, removing the N<=300 cap. Works at any N."
+  - scaling_exponent_update: "BLAS vectorization dropped dream scaling exponent from ~2.0 to 1.342. Updated test assertion from [1.5, 3.0] to [1.0, 3.0]."
+
+findings:
+  parametric_results: |
+    N=100: dream=0.1s, N=500: dream=0.4s, N=1k: dream=1.4s,
+    N=2k: dream=7.3s, N=5k: dream=62.7s. Still O(N²) but from
+    rem_unlearn_xb and other sub-ops, NOT from prune/repulsion/merge
+    (those return instantly due to fast-path: diverse HF data has
+    max cosine=0.65, well below thresholds 0.70/0.95/0.90).
+  remaining_bottleneck: |
+    The O(N²) is now in rem_unlearn_xb and possibly
+    rem_explore_cross_domain_xb — these still have Python for-loops.
+    Next vectorization targets.
+  zero_pruning_confirmed: |
+    Parametric test confirmed: 0 pruned, 0 merged at every scale
+    (100→5k so far). HF dataset sentences genuinely diverse.
+  critical_gap_identified: |
+    Current scale tests ONLY test NLCDM substrate (CoupledEngine + dream_ops).
+    Full pipeline: hermes-memory/orchestrator.py → encoding → contradiction →
+    consolidation → CoupledEngine → dream → recall. Strength decay (core.py)
+    feeds importance into dreams, but scale tests pass UNIFORM importance (0.5),
+    completely bypassing the decay→dream feedback loop.
+  two_systems: |
+    hermes-memory (proofs/hermes-memory/python/hermes_memory/):
+      core.py — strength_decay, importance_update, novelty_bonus, steady_state
+      orchestrator.py — MemoryOrchestrator.store/consolidate/recall
+      consolidation.py — episodic→semantic promotion, archiving
+      contradiction.py — detect/resolve contradictions
+    hermes-NLCDM (proofs/hermes-NLCDM/python/):
+      coupled_engine.py — CoupledEngine (Hopfield store/query/dream)
+      dream_ops.py — dream_cycle_xb pipeline (repulsion→prune→merge→unlearn→explore)
+    Connection: strength_decay lowers importance → importance feeds dream pruning
+
+worked:
+  - "BLAS matmul S = X @ X.T as drop-in replacement for per-pair dot products"
+  - "Fast-path short-circuit: if max(S) <= threshold, return immediately (common case for diverse data)"
+  - "np.fill_diagonal(S, -2.0) to mask self-similarity before max check"
+  - "np.where(np.triu(S, k=1) > threshold) to find close pairs from pre-computed matrix"
+  - "tldr impact/explain for understanding blast radius before modifying functions"
+  - "34/34 dream_redesign contract tests pass after vectorization"
+  - "53/53 core tests pass (4 skipped)"
+
+failed:
+  - "test_dream_scalability scaling exponent assertion too tight (assumed >=1.5, got 1.342 after BLAS) — had to relax"
+
+next:
+  - "Build end-to-end scale test using MemoryOrchestrator — store through full pipeline with strength decay + dreams"
+  - "Vectorize rem_unlearn_xb — next O(N²) bottleneck (dream=62.7s at N=5k mostly from this)"
+  - "Vectorize rem_explore_cross_domain_xb if also O(N²)"
+  - "Run test_parametric_scale.py to completion (was at N=5k when session ended)"
+  - "Run test_streaming_10k.py (now that embeddings_170k.npy exists)"
+  - "Run full existing test suite to verify no regressions from vectorization"
+  - "Commit vectorization changes + new test files"
+  - "Add embeddings_170k.npy to .gitignore (665MB)"
+  - "Consider: end-to-end test that exercises strength_decay → importance → dream → prune feedback at 10k scale"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/python/test_parametric_scale.py
+  modified:
+    - proofs/hermes-NLCDM/python/dream_ops.py
+    - proofs/hermes-NLCDM/python/test_dream_scalability.py
+
+background_state:
+  - "embeddings_170k.npy COMPLETE — (170270, 1024) float32, 665MB"
+  - "sentences_170k.txt COMPLETE — 170270 lines"
+  - "test_parametric_scale.py was running, got to N=5k (dream=62.7s), N=10k not yet run"
+  - "test_streaming_10k.py not yet run (can now run — .npy exists)"
+  - "Previous session's test_scale_10k.py: 23 passed, 4 fixed (not re-verified after vectorization)"
+
+dataset:
+  name: "agentlans/high-quality-english-sentences"
+  url: "https://huggingface.co/datasets/agentlans/high-quality-english-sentences"
+  size: "170270 sentences from C4+FineWeb"
+  embedding_model: "Qwen/Qwen3-Embedding-0.6B"
+  embedding_dim: 1024
+  storage: "float32, normalized on load to float64"

@@ -1,0 +1,142 @@
+root_span_id: fc08692f-b6e1-42de-a3e5-0aad3294707e
+turn_span_id: 
+session_id: fc08692f-b6e1-42de-a3e5-0aad3294707e
+---
+session: general
+date: 2026-02-28
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Encoding layer hardening — 4 research-verified fixes for emotion, correction patterns, third-person coverage, and language detection"
+now: "Optional: create PR to parcadei/hermes-agent fork, or write architecture documentation"
+
+test: bash /Users/cosimo/.hermes/hermes-agent/proofs/hermes-memory/python/run_tests.sh
+baseline: "1455 passed, 2 xfailed, 0 failed"
+
+done_this_session:
+  - task: "Resumed from orchestrator-audit-integration-complete handoff, assessed 5 encoding observations"
+    files: []
+    details: "Reviewed handoff, explained 5 optional encoding issues, performed 2nd/3rd order effects analysis on each"
+  - task: "Two-pass investigation: scout (tldr codebase mapping) + oracle (external research verification)"
+    files: []
+    details: |
+      Scout mapped all 5 issues to exact code locations via tldr commands.
+      Key findings: Issue 4 (episode merging) is N/A — no merge logic exists.
+      Issue 2 root cause: _make_pattern_regex() strips trailing space/comma,
+      so "no," and "no " both compile to identical \bno\b regex.
+      Oracle verified proposals against NLP literature, cognitive science, speech act research.
+      REVERSED my Issue 1 proposal: emotion should be dimensional modifier, not flat category.
+  - task: "Fix 1: Emotional valence as dimensional modifier"
+    files: [proofs/hermes-memory/python/hermes_memory/encoding.py, proofs/hermes-memory/python/tests/test_encoding.py]
+    details: |
+      Added ~70 emotion keywords (positive/negative/strong), emotional_valence field on
+      EncodingDecision, +0.05 importance boost. NOT a new category — preserves real
+      classification while annotating affect. 15 new tests.
+  - task: "Fix 2: Correction pattern precision"
+    files: [proofs/hermes-memory/python/hermes_memory/encoding.py, proofs/hermes-memory/python/tests/test_encoding.py]
+    details: |
+      Removed "no," and "no " (both compiled to identical \bno\b). Replaced with 9 compound
+      patterns requiring comma/period + corrective context: "no, i ", "no, that", "no, actually",
+      etc. Also handled \b edge case with periods. 12 new tests.
+  - task: "Fix 3: Third-person pattern parity"
+    files: [proofs/hermes-memory/python/hermes_memory/encoding.py, proofs/hermes-memory/python/tests/test_encoding.py]
+    details: |
+      Equalized all 7 third-person pattern lists (were 14-38% smaller). Added "they/their"
+      pronoun variants. Pattern counts now 18-29 per category, all >= first-person. 40 new tests
+      including coverage parity assertions.
+  - task: "Fix 4: Language detection + unclassified category"
+    files: [proofs/hermes-memory/python/hermes_memory/encoding.py, proofs/hermes-memory/python/hermes_memory/consolidation.py, proofs/hermes-memory/python/hermes_memory/contradiction.py, proofs/hermes-memory/python/tests/test_encoding.py]
+    details: |
+      Added "unclassified" category (importance 0.5, neutral). Lightweight ASCII-ratio
+      language detection heuristic (>30% non-ASCII alpha = non-English). detected_language
+      field on EncodingDecision. Unclassified excluded from contradiction detection.
+      30 new tests.
+  - task: "Committed proof system"
+    files: []
+    details: "git commit 3a8850d — 18 files, 23,225 lines. 1455 passed, 2 xfailed, 0 failed."
+
+blockers: []
+
+questions:
+  - "Should the proof system be PR'd to parcadei/hermes-agent fork?"
+  - "Is architecture documentation worth writing for the proof system?"
+
+decisions:
+  - emotion_is_dimensional_not_categorical: |
+      NLP literature (EMNLP 2021, NRC-VAD) confirms emotion is a dimensional modifier,
+      not a flat category. "I'm frustrated with TypeScript" is a preference with negative
+      valence. Separate category loses semantic content. Psychology confirms ambivalence
+      (contradictory emotions coexist), so contradiction detection is psychologically incorrect.
+  - correction_patterns_need_compound_context: |
+      _make_pattern_regex() strips trailing space/comma before adding \b anchors, so
+      "no," and "no " both compile to \bno\b — identical. Root cause was deeper than
+      expected. Compound patterns ("no, i ", "no, actually") achieve ~80% precision
+      per speech act research.
+  - validation_corpus_needs_210_plus: |
+      Oracle found 50 examples too small for statistical significance. Need 30+ per class
+      (210+ total for 7 categories). Per-class precision thresholds better than overall
+      accuracy: >=80% for correction/instruction, >=70% for preference/fact.
+  - fasttext_over_langdetect: |
+      Oracle recommended FastText lid.176.ftz for production. For proof system, used
+      lightweight ASCII-ratio heuristic instead (no external dependencies).
+  - issue4_episode_merging_is_NA: |
+      Scout confirmed: no merge logic exists in codebase. Each episode classified
+      individually. Future concern only.
+
+findings:
+  - two_pass_investigation_valuable: |
+      Scout (tldr codebase mapping) + Oracle (external research) in sequence caught
+      things neither would alone. Scout found the _make_pattern_regex stripping root
+      cause. Oracle reversed my emotion category proposal using NLP literature.
+  - parallel_krakens_work_on_same_file: |
+      4 krakens editing encoding.py simultaneously produced zero merge conflicts.
+      Each touched different sections (patterns, dataclass, detection logic, categories).
+      All 4 results integrated cleanly: 1455 passed.
+  - second_third_order_analysis_continues_to_pay: |
+      Tracing effects through encoding → recall → contradiction → consolidation → optimizer
+      revealed Issue 2 causes false supersession (2nd order) and consolidation pool
+      corruption (3rd order). This depth of analysis justified the fixes.
+
+worked:
+  - "Two-pass: scout for codebase facts, oracle for external verification — sequential not parallel"
+  - "4 parallel krakens with detailed prompts including scout+oracle findings"
+  - "Research-verified solutions before implementation — caught wrong emotion proposal"
+  - "2nd/3rd order effects analysis to justify fix priority"
+
+failed:
+  - "Initial emotion category proposal was wrong — dimensional modifier is correct approach"
+  - "Polling background agents wastes context — should just wait for notifications"
+
+next:
+  - "Optional: Create PR with full proof system to parcadei/hermes-agent fork"
+  - "Optional: Write architecture documentation summarizing the proof and its coverage"
+  - "Optional: Build validation corpus (210+ examples, 30 per class) for third-person pattern testing"
+  - "Optional: Replace ASCII-ratio heuristic with FastText lid.176.ftz for production language detection"
+
+files:
+  modified:
+    - proofs/hermes-memory/python/hermes_memory/encoding.py  # All 4 fixes: emotion valence, correction patterns, third-person parity, unclassified category
+    - proofs/hermes-memory/python/hermes_memory/consolidation.py  # unclassified compression ratio
+    - proofs/hermes-memory/python/hermes_memory/contradiction.py  # unclassified excluded from contradiction
+    - proofs/hermes-memory/python/tests/test_encoding.py  # +97 new tests across all 4 fixes
+    - proofs/hermes-memory/python/pyproject.toml  # dependency updates
+
+# Key references:
+# Previous handoff: thoughts/shared/handoffs/general/2026-02-28_06-04_orchestrator-audit-integration-complete.yaml
+# Scout report: .scout/encoding-issues-mapping-20260228-062809.md
+# Oracle report: .claude/cache/agents/oracle/output-2026-02-28T063541Z.md
+# Architecture: thoughts/shared/plans/memory-system/architecture.md
+# Encoding spec: thoughts/shared/plans/memory-system/encoding/spec.md
+# Adversarial findings: thoughts/shared/plans/memory-system/encoding/adversarial-findings.md
+#
+# PROOF SYSTEM STATUS (COMPLETE + HARDENED):
+#   1. encoding.py — Done + audited + reasoning gap fixed + 4 hardening fixes
+#   2. recall.py — Done + audited
+#   3. contradiction.py — Done + audited + unclassified exclusion
+#   4. consolidation.py — Done + audited + remediated + unclassified compression
+#   5. optimizer.py — Done + audited + hardened
+#   6. orchestrator.py — Done + audited + 9 findings fixed + integration validated
+#
+# Commit: 3a8850d on refactor/aiagent-decomposition
+# Full test suite: 1455 passed, 2 xfailed, 0 failed

@@ -1,0 +1,116 @@
+root_span_id: cd0d29b8-69cd-41ad-ab33-f2a9aa5ebba3
+turn_span_id:
+session_id: cd0d29b8-69cd-41ad-ab33-f2a9aa5ebba3
+---
+session: general
+date: 2026-02-27
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "Piece 4/5 consolidation.py — spec hardened, Phase A build in progress"
+now: "Wait for Kraken A (aaddca1) to finish, then launch B+C parallel, then D"
+
+test: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/test_consolidation.py -q --tb=short
+baseline: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/ -q --tb=short
+
+done_this_session:
+  - task: "Created consolidation spec from research synthesis (2596 lines)"
+    files: [thoughts/shared/plans/memory-system/consolidation/spec.md]
+  - task: "Adversarial Pass 1 (Level-Split + Paradox-Hunt) — applied to spec"
+    files: [thoughts/shared/plans/memory-system/consolidation/adversarial-pass1.md]
+  - task: "Adversarial Pass 2 (Scale-Check + Materialize) — 11 findings, time constants renamed, thresholds fixed"
+    files: [thoughts/shared/plans/memory-system/consolidation/adversarial-pass2.md]
+  - task: "Adversarial Pass 3 (Exclusion-Test + Object-Transpose) — 3 lethal flaws fixed"
+    files: [thoughts/shared/plans/memory-system/consolidation/adversarial-pass3.md]
+  - task: "Merged Pass 3 amendments back into spec (concurrent write fix)"
+    files: [thoughts/shared/plans/memory-system/consolidation/spec.md, thoughts/shared/plans/memory-system/consolidation/pass3-merge-summary.md]
+  - task: "Launched Kraken A (foundation: enums, constants, dataclasses, config) — agent aaddca1 still running"
+    files: [proofs/hermes-memory/python/tests/test_consolidation.py]
+
+blockers: []
+
+questions: []
+
+decisions:
+  - multi_kraken_build: "User requested split into multiple parallel krakens. Design: Phase A (data types) → B+C parallel (core logic || extraction) → D (pipeline). A must complete first since B,C,D depend on its data types."
+  - spec_data_types_evolved: "Spec dataclasses differ from initial prompt: uses index (not memory_id), contested (not is_contested), source_episodes on candidate, consolidation_count, compression_ratio on SemanticExtraction. Agent has full spec so will follow spec."
+  - concurrent_write_fix: "3 adversarial agents wrote spec.md in parallel. Pass 2 was last writer, overwrote Pass 3's changes. Resolved by merging Pass 3 findings back via spark agent. Final spec: 2596 lines."
+
+findings:
+  - baseline_tests: "764 passed, 2 xfailed before build started"
+  - spec_size: "2596 lines after all 3 adversarial passes merged"
+  - config_fields_total: "17+ config fields discovered: retention_threshold_l1/l2/l3, semantic_value_threshold, min_temporal_distance, consolidation_window, retrieval_frequency_threshold, max_pool_size, intra_session_similarity_threshold, intra_session_temporal_proximity, cluster_similarity_threshold, temporal_weight, temporal_decay_rate, importance_decay_factor, min_content_similarity, storage_pressure_mild, storage_pressure_severe, max_batch_size, recency_guard, high_activation_threshold, severe_pressure_multiplier, mild_pressure_retention, max_candidates_per_batch, semantic_weight_beta, temporal_decay_lambda, consolidation_decay, activation_inheritance, semantic_boost"
+  - kraken_a_progress: "test_consolidation.py at 880 lines, consolidation.py not yet written (TDD pattern). Agent aaddca1 still running."
+  - lethal_flaws_caught: "AP3-F1 (info destruction in extract_semantic), AP3-F2 (temporal-only clustering), AP3-F3 (inhibitor bypass via miscategorization)"
+  - key_private_helpers: "_passes_inhibitors(), _content_is_correction(), _extract_by_sentence_scoring(), _compute_semantic_value(), _next_level(), _truncate_to_sentences(), _get_extraction_patterns()"
+  - public_functions: "should_consolidate(), extract_semantic(), consolidate_memory(), compute_affinity(), select_consolidation_candidates(), archive_episodic()"
+  - pieces_status: "encoding(1/5 done), recall(2/5 done), contradiction(3/5 done), consolidation(4/5 building), piece5 TBD"
+
+worked:
+  - "3-pass adversarial hardening caught 3 lethal + 11 scale issues before any code was written"
+  - "Concurrent write detection and merge — preserved all findings"
+  - "Multi-kraken build strategy with clear dependency ordering"
+
+failed: []
+
+next:
+  - "Check if Kraken A (aaddca1) completed — it was writing test_consolidation.py (880L) and about to write consolidation.py"
+  - "If A completed: launch Kraken B (core logic: should_consolidate, _passes_inhibitors, _content_is_correction, compute_affinity, _compute_semantic_value) + Kraken C (extraction: extract_semantic, _extract_by_sentence_scoring, archive_episodic, _truncate_to_sentences, _get_extraction_patterns) in PARALLEL"
+  - "After B+C: launch Kraken D (pipeline: consolidate_memory, select_consolidation_candidates, _next_level)"
+  - "If A did NOT complete: resume agent aaddca1, or re-launch Phase A"
+  - "After all phases: run baseline tests (expect 764 + new tests passed, 2 xfailed)"
+  - "Phase 5.5: Audit via critic agent"
+  - "Create handoff for piece 5/5"
+
+files:
+  created:
+    - thoughts/shared/plans/memory-system/consolidation/spec.md
+    - thoughts/shared/plans/memory-system/consolidation/adversarial-pass1.md
+    - thoughts/shared/plans/memory-system/consolidation/adversarial-pass2.md
+    - thoughts/shared/plans/memory-system/consolidation/adversarial-pass3.md
+    - thoughts/shared/plans/memory-system/consolidation/pass3-merge-summary.md
+    - proofs/hermes-memory/python/tests/test_consolidation.py
+  modified: []
+
+# Multi-Kraken Build Plan for next session:
+#
+# Phase A (Kraken A — aaddca1, may be complete):
+#   - ConsolidationLevel enum (IntEnum), ConsolidationMode enum
+#   - 8+ constants: LEVEL_TIME_CONSTANTS, LEVEL_HALF_LIVES, LEVEL_RETENTION_THRESHOLDS,
+#     CATEGORY_COMPRESSION, NON_CONSOLIDATABLE_CATEGORIES, CORRECTION_CONTENT_MARKERS,
+#     CORRECTION_MARKER_THRESHOLD, SEMANTIC_TEMPLATES, extraction patterns, DEFAULT_CONSOLIDATION_CONFIG
+#   - 5 frozen dataclasses: ConsolidationConfig (~25 fields with validation),
+#     ConsolidationCandidate, SemanticExtraction, ArchivedMemory, ConsolidationResult
+#   - Tests for all data types
+#
+# Phase B (core logic — launch after A):
+#   - _passes_inhibitors(candidate, config) -> bool  [5 inhibitors: contested, recency, activation, category, content-based]
+#   - _content_is_correction(content) -> bool  [pattern matching against CORRECTION_CONTENT_MARKERS]
+#   - _compute_semantic_value(candidate) -> float  [weighted: 0.6*cat_imp + 0.3*imp + 0.1*access_bonus]
+#   - should_consolidate(candidate, config) -> bool  [primary trigger + secondary triggers]
+#   - compute_affinity(a, b, config) -> float  [Jaccard content_sim + temporal_sim, min_content_similarity floor]
+#   - Tests for all above
+#
+# Phase C (extraction — launch PARALLEL with B):
+#   - _get_extraction_patterns(category) -> list[Pattern]  [per-category pattern lists]
+#   - _truncate_to_sentences(text, target_length) -> str  [sentence-boundary truncation]
+#   - _extract_by_sentence_scoring(content, target_length) -> str  [info-density scoring fallback]
+#   - extract_semantic(content, category, config, sources...) -> SemanticExtraction
+#   - archive_episodic(candidate, consolidated_to, config) -> ArchivedMemory
+#   - Tests for all above
+#
+# Phase D (pipeline — launch after B+C):
+#   - _next_level(current) -> ConsolidationLevel | None
+#   - consolidate_memory(candidate, config) -> ConsolidationResult  [orchestrator: should_consolidate + extract + archive]
+#   - select_consolidation_candidates(pool, config, mode, pool_size) -> list[Candidate]  [storage pressure, sorting]
+#   - Tests for all above
+#
+# Key spec sections per phase:
+#   Phase B: Sections 5.1, 5.2, 5.5, 5.11, 5.12
+#   Phase C: Sections 5.3, 5.9, 5.10, 5.13, 5.7, 4.3, 4.4
+#   Phase D: Sections 5.4, 5.6, 5.8
+#
+# Agent prompt pattern: "Read consolidation.py (created by Phase A), read spec sections X-Y,
+#   ADD functions to consolidation.py and tests to test_consolidation.py. Do NOT modify
+#   existing code from Phase A. Run ruff + tests after every change."

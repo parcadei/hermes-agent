@@ -1,0 +1,114 @@
+root_span_id: ce2ed0a6-0759-4d25-833a-29b3e9fbea43
+turn_span_id: 
+session_id: ce2ed0a6-0759-4d25-833a-29b3e9fbea43
+---
+session: general
+date: 2026-02-28
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Optimizer hardening + integration interface review across all 5 memory modules"
+now: "Build orchestrator (memory lifecycle manager) with 2 bridge functions, or fix encoding reasoning gap"
+
+test: cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-memory/python && source .venv/bin/activate && python -m pytest tests/test_optimizer.py -q --tb=short -m "not slow"
+baseline: "53 passed (was 51), 0 failed, 2 deselected (slow)"
+
+done_this_session:
+  - task: "Optimizer hardening — 3 changes via TDD pipeline (Kraken agent)"
+    files: [proofs/hermes-memory/python/hermes_memory/optimizer.py, proofs/hermes-memory/python/tests/test_optimizer.py]
+    details: |
+      1. Extracted STABILITY_SIM_STEPS=100 constant — replaced 9 hardcoded 100s across objective(), _compute_per_competency(), validate()
+      2. Added assert len(scenarios) >= 120 at end of build_benchmark_scenarios() — guards against silent _try_add drops
+      3. Expanded _try_add docstring — documents silent skip rationale and guard assertion
+      2 new tests added (TestStabilitySimSteps)
+  - task: "Integration interface review — 3 parallel scout audits across all 5 modules"
+    files: []
+    details: |
+      Audited 5 interface boundaries using tldr + code reading:
+      1. encoding → consolidation (VALID_CATEGORIES, CATEGORY_IMPORTANCE)
+      2. encoding → contradiction (VALID_CATEGORIES, category validation)
+      3. recall ↔ consolidation (MemoryState → ConsolidationCandidate)
+      4. contradiction → consolidation (contested flag)
+      5. optimizer → recall (ParameterSet coverage, time units)
+  - task: "Encoding gate analysis — evaluated domain-agnostic fitness"
+    files: []
+    details: "Mapped all 7 categories, 10 knowledge_types, pattern sets, write policy, importance seeding"
+
+blockers: []
+
+questions:
+  - "Should 'reasoning' be added to KNOWLEDGE_TYPE_TO_CATEGORY? Currently missing — smart agents can't classify reasoning via metadata path, must fall through to pattern matching."
+  - "Are the 5 encoding observations (no emotion category, 'no ' too aggressive, etc.) worth filing as issues or are they intentional design choices?"
+
+decisions:
+  - integration_review_before_orchestrator: "Ran interface audit BEFORE orchestrator build. Found 2 real gaps that would have been bugs."
+  - metadata_path_is_domain_agnostic: "Pattern matching (Path A) is Nemori/conversational-specific. Metadata shortcut (Path B) makes encoding work for ANY agent domain (coding, legal, finance, support, etc.)"
+
+findings:
+  - green_interfaces: |
+      4 interfaces are clean, no drift:
+      - encoding → consolidation: all 7 categories covered in CATEGORY_COMPRESSION_RATIOS, NON_CONSOLIDATABLE, SEMANTIC_TEMPLATES
+      - encoding → contradiction: imports VALID_CATEGORIES, runtime validation in ContradictionConfig.__post_init__
+      - optimizer → recall: all 14 ParameterSet fields covered (6 optimized + 7 pinned + 1 derived). recall.py fully delegates to engine.rank_memories
+      - time units: consistent after C2 fix. consolidation uses days, engine is unit-agnostic (delta_t=1.0)
+  - red_gap_1_contested: |
+      contradiction outputs flagged_indices: frozenset[int] (contradiction.py:468)
+      consolidation expects is_contested: bool on ConsolidationCandidate (consolidation.py:552)
+      NO bridge code exists. Orchestrator must map flagged_indices → is_contested=True when constructing candidates.
+  - red_gap_2_semantic_to_recall: |
+      SemanticExtraction lacks relevance, strength, creation_time, last_access_time — all required by engine.rank_memories
+      Has first_observed/last_updated instead of creation_time/last_access_time
+      Orchestrator must implement SemanticExtraction → MemoryState conversion
+  - encoding_missing_reasoning_knowledge_type: |
+      KNOWLEDGE_TYPE_TO_CATEGORY maps 10 types but no "reasoning" → coding agents storing
+      architecture decisions via metadata path can't get reasoning (0.40 importance),
+      must use "context" → fact (0.60) which over-weights transient reasoning
+  - encoding_domain_agnostic: |
+      The 7 categories (preference, fact, correction, instruction, reasoning, greeting, transactional)
+      are general enough for any domain. The metadata shortcut (source_type="semantic" + knowledge_type)
+      bypasses pattern matching entirely — agent does its own classification, encoding just validates + assigns importance.
+
+worked:
+  - "3 parallel scout agents for interface audit — fast, comprehensive, no context bloat"
+  - "Kraken TDD pipeline for optimizer hardening — clean 3-change batch with 2 new tests"
+  - "tldr for code navigation in scouts — structure, imports, importers, search commands"
+  - "ASCII diagrams for architecture communication — user engaged immediately"
+
+failed: []
+
+next:
+  - "Build orchestrator (memory lifecycle manager) with store() and query() API"
+  - "Implement bridge 1: map_contradictions_to_candidates(flagged_indices, candidates) → set is_contested=True"
+  - "Implement bridge 2: semantic_extraction_to_memory_state(extraction) → MemoryState for recall"
+  - "Optional: Add 'reasoning' to KNOWLEDGE_TYPE_TO_CATEGORY in encoding.py"
+  - "Optional: Tighten 'no ' correction pattern to reduce false positives (no problem, no worries)"
+  - "Full baseline rerun: cd proofs/hermes-memory/python && ./run_tests.sh (expect ~1143 passed)"
+
+files:
+  created: []
+  modified:
+    - proofs/hermes-memory/python/hermes_memory/optimizer.py  # STABILITY_SIM_STEPS, assertion, docstring
+    - proofs/hermes-memory/python/tests/test_optimizer.py  # 2 new tests for STABILITY_SIM_STEPS
+
+# Key references:
+# Integration interface map: this handoff (findings section)
+# Cascade analysis: thoughts/shared/plans/memory-system/audit/cascade-effects-analysis.md
+# Previous handoff: thoughts/shared/handoffs/general/2026-02-28_01-31_consolidation-spec-drift-remediation.yaml
+#
+# Orchestrator bridge functions needed:
+#   1. flagged_indices: frozenset[int] → is_contested: bool (per candidate)
+#   2. SemanticExtraction → MemoryState (first_observed→creation_time, last_updated→last_access_time, compute strength, relevance is query-dependent)
+#
+# Encoding architecture:
+#   Path A (dumb): raw text → pattern matching → 7 categories (Nemori/conversational)
+#   Path B (smart): metadata.source_type="semantic" + knowledge_type → lookup → importance (any agent)
+#   Gap: no "reasoning" in KNOWLEDGE_TYPE_TO_CATEGORY (10 types, reasoning missing)
+#
+# Module status (all 5 done + audited):
+#   1. encoding.py — Done
+#   2. recall.py — Done
+#   3. contradiction.py — Done
+#   4. consolidation.py — Done + audited + remediated
+#   5. optimizer.py — Done + audited + hardened (this session)
+#   Integration review: COMPLETE (4 green, 2 red gaps documented)

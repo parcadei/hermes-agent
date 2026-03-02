@@ -1,0 +1,103 @@
+root_span_id: 33cd764e-ae67-4121-87fb-a11adcb817b4
+turn_span_id: 
+session_id: 33cd764e-ae67-4121-87fb-a11adcb817b4
+---
+session: general
+date: 2026-02-27
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: Built Hermes memory encoding layer (architecture piece 1/5) — post-segmentation heuristic gate with TDD pipeline, adversarial review, full audit
+now: Build retrieval integration (piece 2/5) — how memories enter LLM context during conversation
+test: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/ -q --tb=short -m "not slow"
+
+done_this_session:
+  - task: "Resumed from nemori-analysis handoff, verified 127 tests passing, Nemori clone at /tmp/nemori/"
+    files: []
+  - task: "Phase 1 SPEC: Created 1860-line behavioral spec with 13 sections, dual pattern sets, importance seeding"
+    files: [thoughts/shared/plans/memory-system/encoding/spec.md]
+  - task: "Phase 2 TESTS: Wrote 68 failing tests (unit, property-based, edge cases, integration)"
+    files: [proofs/hermes-memory/python/tests/test_encoding.py]
+  - task: "Phase 3 ADVERSARIAL: 3 Brenner passes found 16 findings — critical: episode narratives are 3rd-person not 1st-person, fail-open negates gate, confidence denominator inflation"
+    files: [thoughts/shared/plans/memory-system/encoding/adversarial-findings.md]
+  - task: "Phase 4 PLAN: Created 6-phase implementation plan (A-F)"
+    files: [thoughts/shared/plans/memory-system/encoding/phased-plan.md]
+  - task: "Phase 5 BUILD: Implemented encoding.py (723 lines), all 68 tests passing, 195 total"
+    files: [proofs/hermes-memory/python/hermes_memory/encoding.py]
+  - task: "Phase 5.5 AUDIT: Found 19 issues (6 critical, 8 high, 5 moderate), fixed all 19"
+    files: [proofs/hermes-memory/python/hermes_memory/encoding.py, thoughts/shared/plans/memory-system/encoding/audit-findings.md]
+  - task: "Added 32 audit-coverage tests, total now 227 tests all passing"
+    files: [proofs/hermes-memory/python/tests/test_encoding.py]
+  - task: "Added Section 12.1 to MEMORY_SYSTEM.md — per-category dynamics regimes design note"
+    files: [proofs/hermes-memory/MEMORY_SYSTEM.md]
+
+blockers: []
+
+questions:
+  - "Retrieval integration: should recall be sync (blocks prompt assembly) or async (prefetch while other layers build)?"
+  - "How to handle existing memory tool's flat-file snapshot vs dynamic per-turn recall?"
+  - "Should retrieval scoring live in Python (simple) or Rust+PyO3 (perf for hot path)?"
+
+decisions:
+  - python_now_rust_later: "Encoding layer in Python (heuristic text classification, not perf-sensitive). Rust+PyO3 planned for dynamics engine and retrieval scoring (pieces 2+5) where perf matters."
+  - post_segmentation_gate: "Gate sits after Nemori's segmentation, not before buffer. Episodes provide richer context for classification than individual messages."
+  - heuristic_first: "Rule-based classifier with LLM upgrade path. classify() is the extension point — swap heuristics for LLM without touching write policy."
+  - fail_open_design: "Gate's primary value is importance seeding and category annotation, not filtering. Fail-open at confidence < 0.5 ensures no important memories are lost."
+  - importance_seeding: "correction=0.9, instruction=0.85, preference=0.8, fact=0.6, reasoning=0.4. Seeds dynamics from creation instead of waiting for feedback loop."
+  - per_category_dynamics: "Category metadata enables per-category (alpha, beta) regimes. Corrections get slower decay than reasoning. Interface ready via EncodingDecision.category."
+  - dual_pattern_sets: "First-person ('I like') + third-person ('The user expressed a preference') patterns. Nemori produces 3rd-person narratives."
+
+findings:
+  - adversarial_critical_1: "Episode narratives are 3rd-person, not 1st-person. Original patterns would have failed on real Nemori output. Fixed with dual pattern sets."
+  - adversarial_critical_2: "Fail-open triggers on >95% of inputs with naive confidence scoring. Fixed with SINGLE_PATTERN_CONFIDENCE_FLOOR=0.35 calibration."
+  - adversarial_critical_3: "Gate rejects ~0-5% of episodes because Nemori's segmentation already filters standalone greetings. Reframed gate purpose as importance seeder."
+  - adversarial_critical_4: "Nemori's knowledge_type is a better classifier than heuristics for semantic memories. Added KNOWLEDGE_TYPE_TO_CATEGORY shortcut."
+  - audit_critical_fixes: "Pre-compiled regex (perf), ReDoS mitigation (max_input_length), Unicode normalization (NFKC), safe metadata access, semantic memory bypass, reclassification fallback."
+
+worked:
+  - "TDD pipeline with parallel Phase 2 (tests) and Phase 3 (adversarial) — both depend on spec, not each other"
+  - "Adversarial Brenner passes caught the 3rd-person narrative issue BEFORE implementation — saved rework"
+  - "Importance seeding from encoding categories — natural integration point between encoding and dynamics"
+  - "Separate audit phase with critic agent + spark fix agent — found 19 real issues"
+
+failed: []
+
+next:
+  - "Build retrieval integration (piece 2/5): how memories enter LLM context. scoring.py + recall.py"
+  - "Decision: sync vs async recall, scoring in Python vs Rust+PyO3"
+  - "Wire encoding gate into Nemori's EventBus (episode_created event)"
+  - "After retrieval: contradiction/supersession (piece 3/5)"
+  - "After contradiction: compression/consolidation (piece 4/5)"
+  - "After compression: dynamics wiring with Rust+PyO3 (piece 5/5)"
+  - "Consider per-category dynamics regimes when building piece 5 (design note in MEMORY_SYSTEM.md Section 12.1)"
+
+files:
+  created:
+    - proofs/hermes-memory/python/hermes_memory/encoding.py
+    - thoughts/shared/plans/memory-system/encoding/spec.md
+    - thoughts/shared/plans/memory-system/encoding/phased-plan.md
+    - thoughts/shared/plans/memory-system/encoding/adversarial-findings.md
+    - thoughts/shared/plans/memory-system/encoding/audit-findings.md
+  modified:
+    - proofs/hermes-memory/python/tests/test_encoding.py
+    - proofs/hermes-memory/MEMORY_SYSTEM.md
+
+# Key reference docs for next session:
+#   thoughts/shared/docs/nemori.md — full Nemori architecture analysis
+#   thoughts/shared/plans/memory-system/encoding/spec.md — encoding layer spec (post-adversarial, 1860 lines)
+#   thoughts/shared/plans/memory-system/architecture.md — overall architecture plan
+#   proofs/hermes-memory/MEMORY_SYSTEM.md — formal verification + Section 12.1 per-category dynamics note
+#   /tmp/nemori/ — cloned repo (may need re-clone if /tmp cleaned)
+#
+# The 5 architecture pieces (in order):
+#   1. Encoding — DONE (this session). 227 tests, 723-line encoding.py
+#   2. Retrieval integration (NEXT) — how memories enter context
+#   3. Contradiction/supersession — handling conflicting facts
+#   4. Compression/consolidation — episodic -> semantic aging
+#   5. Dynamics wiring — R/S state, scoring, decay (Rust+PyO3, Lean-proven)
+#
+# Test verification:
+#   cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/ -q --tb=short -m "not slow"
+#   Expected: 227 passed in ~2s (non-slow)
+#   Full suite: .venv/bin/python -m pytest tests/ -v → 227 total

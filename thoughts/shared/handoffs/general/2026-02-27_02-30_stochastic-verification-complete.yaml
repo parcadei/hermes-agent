@@ -1,0 +1,105 @@
+root_span_id: f6c9ba4d-01e6-460c-adac-bfb47f6c3dba
+turn_span_id: 
+session_id: f6c9ba4d-01e6-460c-adac-bfb47f6c3dba
+---
+session: memory-system-stochastic-verification
+date: 2026-02-27
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: Wire ContractingWith into Mathlib Banach fixed-point, then build Python stochastic verification suite proving Markov chain convergence
+now: Scribe agent writing MEMORY_SYSTEM.md (background) — commit it when done, then proceed to markdown spec or Python implementation from handoff next list
+test: cd proofs/hermes-memory && lake build && cd python && .venv/bin/python -m pytest tests/ -v
+
+done_this_session:
+  - task: "ContractionWiring.lean — 8 theorems wiring Lipschitz bounds into Mathlib ContractingWith.fixedPoint"
+    files: [proofs/hermes-memory/HermesMemory/ContractionWiring.lean]
+  - task: "Updated HermesMemory.lean with ContractionWiring import"
+    files: [proofs/hermes-memory/HermesMemory.lean]
+  - task: "Python core.py — all 18 Lean definitions translated to Python"
+    files: [proofs/hermes-memory/python/hermes_memory/core.py]
+  - task: "Python markov_chain.py — stochastic simulation, coupling, spectral analysis"
+    files: [proofs/hermes-memory/python/hermes_memory/markov_chain.py]
+  - task: "75 property tests mapping every Lean theorem to hypothesis"
+    files: [proofs/hermes-memory/python/tests/test_memory_dynamics.py, proofs/hermes-memory/python/tests/test_strength_decay.py, proofs/hermes-memory/python/tests/test_soft_selection.py, proofs/hermes-memory/python/tests/test_novelty_bonus.py, proofs/hermes-memory/python/tests/test_composed_system.py, proofs/hermes-memory/python/tests/test_contraction.py]
+  - task: "16 stochastic verification tests — Monte Carlo, coupling, spectral gap"
+    files: [proofs/hermes-memory/python/tests/test_monte_carlo.py, proofs/hermes-memory/python/tests/test_coupling.py, proofs/hermes-memory/python/tests/test_spectral.py]
+  - task: "Committed all 26 files at 68e2f10"
+    files: []
+
+blockers: []
+
+decisions:
+  - domain_restriction: "Work on [0,Smax]^2 as complete forward-invariant subset using ContractingWith.exists_fixedPoint' rather than all of R x R"
+  - nnreal_coercion: "ContractingWith requires K : NNReal. Bridge with exact_mod_cast from R inequality K_val < 1"
+  - subtype_metric: "Use Subtype.dist_eq to convert between subtype and ambient distances for LipschitzWith proof"
+  - uniqueness_via_edist: "eq_or_edist_eq_top_of_fixedPoints for uniqueness — two fixed points coincide or have infinite distance"
+  - stochastic_params: "User-suggested params (alpha=0.1,beta=0.05) give K=1.2 > 1 (violates contraction). Tests use alpha=0.1,beta=0.1,T=5.0 giving K=0.95 < 1"
+  - mean_field_gap: "Stationary distributions missing from Mathlib — Lean proves deterministic mean-field stability, Python empirically verifies stochastic convergence"
+
+findings:
+  - contraction_wiring_errors: "Major issues: NNReal.mk_lt_one doesn't exist, Set.MapsTo.restrict_apply doesn't exist, IsFixedPt needs 'open Function', ring fails on |-p+p'| (use abs_neg)"
+  - gcongr_closes_goals: "gcongr sometimes closes all subgoals via assumption-like behavior — adding ; exact after gcongr causes 'no goals'"
+  - subtype_val_congr: "rw [congr_arg Subtype.val h] fails when goal has bare y not (y, hy). Extract with have heq := congr_arg Subtype.val h"
+  - parameter_regime_matters: "Contraction condition L*alpha*Smax < 1 - exp(-beta*delta) is a real boundary, not proof artifact. K=1.2 gives bimodal stochastic behavior"
+  - spectral_results: "lambda_2 < 1, spectral gap ~0.076, mixing time ~13 steps, coupling time ~50 steps"
+
+worked:
+  - "exists_fixedPoint' for complete subsets instead of global fixedPoint"
+  - "exact_mod_cast for NNReal < 1 from R < 1"
+  - "Subtype.dist_eq + exact for LipschitzWith on restriction"
+  - "abs_neg for |(1-p)-(1-p')| = |p-p'|"
+  - "TDD pipeline with parallel kraken agents for test generation"
+
+failed:
+  - "NNReal.mk_lt_one — doesn't exist"
+  - "Set.MapsTo.restrict_apply — doesn't exist"
+  - "rw [congr_arg Subtype.val h] — type mismatch on subtype vs bare value"
+  - "alpha=0.1, beta=0.05 params — K=1.2 violates contraction condition"
+
+next:
+  - "Commit MEMORY_SYSTEM.md when scribe agent finishes (running in background)"
+  - "Derive markdown spec (Option B) from all 75+ proven theorems"
+  - "Derive Python production implementation — each def as function, each theorem as runtime assertion"
+  - "Resolve 5 open decisions in docs/architecture.md (D1-D5)"
+
+files:
+  created:
+    - proofs/hermes-memory/HermesMemory/ContractionWiring.lean
+    - proofs/hermes-memory/python/pyproject.toml
+    - proofs/hermes-memory/python/hermes_memory/__init__.py
+    - proofs/hermes-memory/python/hermes_memory/core.py
+    - proofs/hermes-memory/python/hermes_memory/markov_chain.py
+    - proofs/hermes-memory/python/tests/strategies.py
+    - proofs/hermes-memory/python/tests/test_memory_dynamics.py
+    - proofs/hermes-memory/python/tests/test_strength_decay.py
+    - proofs/hermes-memory/python/tests/test_soft_selection.py
+    - proofs/hermes-memory/python/tests/test_novelty_bonus.py
+    - proofs/hermes-memory/python/tests/test_composed_system.py
+    - proofs/hermes-memory/python/tests/test_contraction.py
+    - proofs/hermes-memory/python/tests/test_markov_chain.py
+    - proofs/hermes-memory/python/tests/test_monte_carlo.py
+    - proofs/hermes-memory/python/tests/test_coupling.py
+    - proofs/hermes-memory/python/tests/test_spectral.py
+  modified:
+    - proofs/hermes-memory/HermesMemory.lean
+
+# Full verification stack:
+#
+# Layer 1 — Lean 4 (75 theorems, 0 sorries):
+#   Proves deterministic mean-field map is a contraction with unique
+#   globally stable fixed point satisfying all 3 safety guarantees.
+#   Capstone: stableStationaryState_safe in ContractionWiring.lean
+#
+# Layer 2 — Python property tests (75 tests):
+#   Each Lean theorem mapped to hypothesis @given test.
+#   Confirms code matches math.
+#
+# Layer 3 — Stochastic verification (16 tests):
+#   Monte Carlo: 500 chains from random starts converge to S*
+#   Coupling: chains from (0,0) and (Smax,Smax) merge in ~50 steps
+#   Spectral: |lambda_2| < 1, gap ~0.076, mixing ~13 steps
+#   Empirically proves the Markov chain claim Lean can't formalize.
+#
+# Total: 125 tests, all passing in ~11s

@@ -1,0 +1,64 @@
+root_span_id: 8a8538c9-2295-40b6-b78f-a6ce910f3239
+turn_span_id: 
+session_id: 8a8538c9-2295-40b6-b78f-a6ce910f3239
+---
+session: general
+date: 2026-02-26
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: TDD pipeline Phases 0-4 complete — spec hardened, discriminative validation done, phased implementation plan written
+now: Resume at Phase 5 (TDD build loop) starting with Phase 1 of plan (circular import fix)
+test: /Users/cosimo/.hermes/hermes-agent/venv/bin/python3 -m pytest tests/ -q --tb=short
+
+done_this_session:
+  - task: "Phase 3.25: Discriminative validation — all 3 hypotheses confirmed against actual source"
+    files: []
+  - task: "Phase 4: Phased implementation plan created — 7 phases with TDD test-first approach"
+    files: [thoughts/shared/plans/aiagent-decomposition/phased-plan.md]
+  - task: "Created .claude/CLAUDE.md with tldr usage instructions for refactoring agents"
+    files: [.claude/CLAUDE.md]
+
+blockers: []
+
+questions:
+  - "Phase 6 wiring is the highest-risk phase — should we do a dry-run diff before committing changes to run_agent.py?"
+  - "Should smoke test protocol (Phase 7.2) be automated or manual?"
+
+decisions:
+  - phase_325_confirmed: "All 3 hypotheses validated: (1) ToolExecConfig collapses 15 field accesses into 8 logical groups — net improvement, (2) SessionPersister setter atomically fixes pre-existing session_log_file bug at run_agent.py:1384, (3) PromptAssembler has exactly 1 cache invalidation path (compression only) — clean lifecycle"
+  - skip_phase_35: "Prior art search skipped — this is standard OOP decomposition, not novel architecture"
+  - defer_phase_6: "run_conversation decomposition (15 code paths) deferred to separate future pipeline"
+  - tldr_in_agents: "All refactoring agents should use tldr impact/whatbreaks/importers before modifying functions. Added to .claude/CLAUDE.md"
+  - plan_phase_order: "7 phases: (1) circular import fix, (2) eager import fix, (3) PromptAssembler, (4) SessionPersister, (5) execute_tool_calls, (6) wire into AIAgent, (7) integration validation"
+
+findings:
+  - session_log_bug_confirmed: "run_agent.py:1384 updates session_id but NOT session_log_file after compression. SessionPersister setter fixes this atomically. Verified in source."
+  - parameter_grouping: "Frozen ToolExecConfig dataclass collapses 10 config fields into 1 object. Total interface: 1 config + 3 positional + 4 callbacks = 8 groups for 15 field accesses."
+  - cache_lifecycle_clean: "PromptAssembler cache has exactly 1 invalidation trigger (compression at L1376). Built once per run_conversation call. Maps 1:1 to invalidate()+build() API."
+  - only_one_tools_import: "Only tools/file_tools.py:197 does 'from tools import check_file_requirements'. All other production code imports from submodules directly."
+  - circular_import_location: "tools/registry.py:124 has deferred 'from model_tools import _run_async' inside dispatch() method body"
+
+worked:
+  - "Reading source directly for discriminative validation instead of spawning agents — faster, more accurate"
+  - "Plan includes exact test case lists (12-14 tests per component) — agents can implement directly"
+  - "Grep confirmed blast radius of tools/__init__.py change is minimal (1 production file)"
+
+failed: []
+
+next:
+  - "Phase 5 build loop: Start with Phase 1 (circular import fix) — write tests/test_import_structure.py, create agent/async_bridge.py, modify model_tools.py and tools/registry.py"
+  - "Phase 5 build loop: Phase 2 (eager import fix) — write tests/test_lazy_tools_init.py, gut tools/__init__.py, fix tools/file_tools.py"
+  - "Phase 5 build loop: Phase 3 (PromptAssembler) — write tests/agent/test_prompt_assembler.py, create agent/prompt_assembler.py"
+  - "Phase 5 build loop: Phase 4 (SessionPersister) — write tests/agent/test_session_persister.py, create agent/session_persister.py"
+  - "Phase 5 build loop: Phase 5 (execute_tool_calls) — write tests/agent/test_tool_executor.py, create agent/tool_executor.py"
+  - "Phase 5 build loop: Phase 6 (wire into AIAgent) — modify run_agent.py to compose components, delete extracted methods"
+  - "Phase 5 build loop: Phase 7 (integration) — full test suite + smoke test + import validation"
+  - "Agents should use tldr impact/whatbreaks/importers per .claude/CLAUDE.md instructions"
+
+files:
+  created:
+    - thoughts/shared/plans/aiagent-decomposition/phased-plan.md
+    - .claude/CLAUDE.md
+  modified: []

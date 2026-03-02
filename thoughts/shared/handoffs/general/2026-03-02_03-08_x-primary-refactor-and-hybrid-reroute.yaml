@@ -1,0 +1,92 @@
+root_span_id: ab2f34fb-bccb-425c-8651-7e18f5b63229
+turn_span_id: 645ec3e7-fe2a-44c6-95c1-d3dc76221a4c
+session_id: ab2f34fb-bccb-425c-8651-7e18f5b63229
+---
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Refactor CoupledEngine to X-primary state, reroute HybridEngine through B-retrieval + A-reranking, add adaptive β control"
+now: "Build capacity boundary test where dream shows measurable improvement, stress test at 1000 patterns"
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_coupled_engine.py test_dream_ops.py test_dream_validation.py test_benchmark.py test_proof_validation.py -v"
+
+done_this_session:
+  - task: "Kill W as primary state in CoupledEngine"
+    result: |
+      W is now a lazy @property derived from X (X.T @ X, zero diagonal).
+      store() just appends to memory_store — no Hebbian W update.
+      Old multi-mode dream(mode="full"|"mini"|"micro"|"deep") deleted entirely.
+      dream_xb() renamed to dream() — single proof-aligned path.
+      save()/load() no longer serialize W separately.
+    files: [proofs/hermes-NLCDM/python/coupled_engine.py, proofs/hermes-NLCDM/python/test_coupled_engine.py]
+
+  - task: "Reroute HybridEngine.query through B with A re-ranking"
+    result: |
+      query() now goes through B (softmax attention over X at β) then A (metadata re-ranking).
+      B returns 3x candidate set, A scores each with importance/recency/activation.
+      Combined score: 0.6·B_score + 0.4·A_score.
+      VALIDATED: coherence on ambiguous queries went from 0.680 (old A-only routing) to 1.000 (B-routing + A-reranking).
+    files: [proofs/hermes-NLCDM/python/test_benchmark.py]
+
+  - task: "Add adaptive β control logic"
+    result: |
+      choose_beta("precise"|"normal"|"associative") returns proof-derived presets (50, 10, 3).
+      should_dream() computes capacity utilization via Capacity.lean formula, gates to 50%-150% N_max.
+      query() accepts optional beta parameter.
+      VALIDATED β tradeoff: associative β=3 → P@1=0.067/cluster=0.400, normal β=10 → P@1=0.600/cluster=1.000, precise β=50 → P@1=1.000/cluster=1.000.
+    files: [proofs/hermes-NLCDM/python/test_benchmark.py]
+
+  - task: "Full test suite: 102 passed, 4 skipped, 0 regressions"
+
+decisions:
+  - w_lazy_property: "W = X.T @ X computed on demand, cached until X changes. Not independently evolved."
+  - single_dream_path: "Removed old W-based dream modes (micro/mini/full/deep). Only proof-aligned dream_cycle_xb remains."
+  - hybrid_score_weights: "0.6·B + 0.4·A for combined scoring. B dominant because it carries proven guarantees."
+  - dream_ops_untouched: "Old W-based functions in dream_ops.py kept intact — test_dream_validation.py tests them directly as building blocks."
+
+findings:
+  coherence_validated: |
+    Ambiguous query coherence A=0.680, B=1.000, A+B=1.000.
+    Rerouting hybrid through B gave it B's attractor-snapping guarantee.
+    Old hybrid (A-routed) would have gotten 0.680.
+
+  capacity_cliff_diagnostic: |
+    System A gets P@1=1.0 at all loads because cosine similarity + exact query = nearest neighbor.
+    System B collapses at α=0.234 (N=15, dim=64) at β=5 — too low β for random patterns.
+    The capacity cliff test needs β sweep (per original handoff TODO).
+
+  beta_regime_empirical: |
+    At spread=0.08 clusters, dim=128:
+      β=3: P@1=0.067, cluster=0.400 (broad associations, basin overlap)
+      β=10: P@1=0.600, cluster=1.000 (right cluster, sometimes wrong specific pattern)
+      β=50: P@1=1.000, cluster=1.000 (perfect exact recall)
+    Matches proof predictions exactly.
+
+  should_dream_gating: |
+    50 patterns in dim=128 at β=10 correctly returns should_dream=False (under capacity).
+    Need a test near capacity boundary to validate should_dream=True triggers.
+
+architecture:
+  system_a_bookkeeper: "Owns text, metadata, importance, lifecycle, encoding gate, β selection, dream gating"
+  system_b_brain: "Owns pattern matrix X, softmax retrieval, energy landscape, dream cycle"
+  interface: |
+    A → B: add_pattern(embedding), dream(tagged_indices), query(embedding, beta)
+    B → A: softmax weights, dream report, associations
+    Neither reaches into the other's domain.
+
+files:
+  modified:
+    - proofs/hermes-NLCDM/python/coupled_engine.py
+    - proofs/hermes-NLCDM/python/test_coupled_engine.py
+    - proofs/hermes-NLCDM/python/test_benchmark.py
+
+next:
+  - "CRITICAL: Build capacity boundary test — compute exact N_max from Capacity.lean formula for given β and δ, store N_max + epsilon patterns, verify dream improves retrieval. This is where the hybrid earns its keep."
+  - "Stress test: 1000 patterns near capacity in dim=256. Does dream actually reduce mixture FPs?"
+  - "Update capacity cliff test to use β sweep — current β=5 is too low for dim=64 random patterns."
+  - "Make NREM β adaptive: compute delta_local = min distance to neighbors, then beta_nrem = log(4*N_local*M^2) / delta_local."
+  - "Test directional basin width: perturb mixture FPs along (p1-p2) direction to reveal 1/sqrt(H) scaling."
+  - "Consider per-pattern temperature beta_i for more targeted dream operations."
+  - "Extract HybridEngine from test_benchmark.py into its own module (it's now a real class, not just a test fixture)."

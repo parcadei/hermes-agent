@@ -1,0 +1,94 @@
+root_span_id: 8378b7e0-ef8b-4c3e-9fb5-aba1a217cb28
+turn_span_id: 
+session_id: 8378b7e0-ef8b-4c3e-9fb5-aba1a217cb28
+---
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Wired hermes-memory strength decay into NLCDM dream pipeline with 21 new tests. 70 total tests pass."
+now: "Commit test_strength_decay_dream.py. Then: formalize bridge between the two Lean proof systems. Consider per-cluster adaptive beta."
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_strength_decay_dream.py test_dream_lifecycle.py test_real_embeddings.py -v --tb=short"
+
+done_this_session:
+  - task: "Analyzed both proof systems (hermes-memory 6 Lean files + hermes-NLCDM 14 Lean files) and mapped what they prove"
+    files: []
+  - task: "Created MemoryStoreWithDecay class wiring StrengthDecay.lean dynamics into Python"
+    files: [proofs/hermes-NLCDM/python/test_strength_decay_dream.py]
+  - task: "Wrote 21 tests across 4 test classes validating composed system"
+    files: [proofs/hermes-NLCDM/python/test_strength_decay_dream.py]
+
+decisions:
+  - temperature_for_contraction: "Used temperature=1.0 (not 0.1) for composed system contraction test. Low temperature makes soft_select near-deterministic, violating the Lipschitz condition L·α·Smax < 1-exp(-βΔ). Higher temperature → lower L → contraction holds."
+  - strength_weighted_importance: "Importance passed to dream pipeline = raw_importance * current_strength. This makes temporally decayed patterns appear less important to prune/merge operations."
+  - initial_strength: "New patterns start at α·Smax (not Smax). Maps to steady state entry point from StrengthDecay.lean."
+
+findings:
+  proof_system_coverage: |
+    hermes-memory proves: forgetting curve, strength decay/convergence,
+    soft selection (0,1), novelty bonus, composition safety (anti-lock-in +
+    anti-thrashing + anti-cold-start), Banach fixed-point (unique stationary
+    state with global convergence).
+    hermes-NLCDM proves: energy wells, Hopfield update descent (strict at
+    non-fixed points), exponential capacity N~exp(βδ)/(4βM²), coupling bounds,
+    modular/block-diagonal structure, Lyapunov function for coordinate descent,
+    temperature parameterization, spurious state characterization, energy gaps,
+    basin volumes.
+  gap_between_systems: |
+    The two Lean proof systems share no imports. The bridge is conceptual:
+    hermes-memory's β (decay rate) ≠ hermes-NLCDM's β (inverse temperature).
+    Formalizing the bridge would require a joint Lean file connecting
+    StrengthDecay's temporal dynamics to NLCDM's capacity formula.
+  soft_select_sensitivity: |
+    At low temperature (T=0.1), soft_select is near-deterministic.
+    Initial conditions (0.1, 0.9) vs (0.9, 0.1) converge to DIFFERENT
+    attractors — the system has two stable fixed points, not one.
+    The contraction condition only holds when T is large enough that
+    the Lipschitz constant L of soft_select is small.
+
+worked:
+  - "Building MemoryStoreWithDecay as a thin wrapper that composes both systems"
+  - "Testing Lean theorem properties directly in Python (each test maps to a specific theorem)"
+  - "Using make_separated_centroids from test_capacity_boundary.py for fixtures"
+  - "Multi-day wake/sleep simulation to test long-horizon behavior"
+
+failed:
+  - "Initial contraction test with T=0.1 — too sharp, soft_select Lipschitz constant too high"
+  - "Novelty bonus test storing 5 patterns with interleaved advance_time — creates extreme decay disparity across patterns"
+
+next:
+  - "Commit test_strength_decay_dream.py (21 tests, all passing)"
+  - "Formalize Lean bridge: joint file connecting hermes-memory StrengthDecay to NLCDM Capacity (shared parameter constraints)"
+  - "Per-cluster adaptive beta: higher β for well-separated clusters, lower for tight ones"
+  - "Scale testing: 1000+ patterns with strength decay, verify O(N²) operations remain tractable"
+  - "Integration: hook MemoryStoreWithDecay into Hermes agent loop (store experiences, decay between sessions, dream between conversations)"
+  - "Consider: time-weighted dream priority — patterns with low strength/importance should be dream candidates first"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/python/test_strength_decay_dream.py  # 21 tests, 4 classes
+
+test_details:
+  TestStrengthDecayProperties_8_tests: |
+    Validates Python impl against StrengthDecay.lean:
+    decay_at_zero, decay_positive, decay_le_init, decay_antitone,
+    decay_tends_to_zero, steady_state_lt_smax (anti-lock-in),
+    steady_state_is_fixed_point, iteration_converges_to_steady_state
+  TestSoftSelectionProperties_3_tests: |
+    Validates SoftSelection.lean:
+    soft_select_in_unit_interval, equal_strengths_equal_selection,
+    stronger_gets_higher_probability
+  TestComposedSystemProperties_2_tests: |
+    Validates ComposedSystem.lean + ContractionWiring.lean:
+    domain_invariance ([0,Smax] preserved),
+    contraction_convergence (unique stationary state via Banach)
+  TestDreamWithStrengthDecay_8_tests: |
+    Integration wiring both proof systems:
+    old_unaccessed_patterns_weaken, accessed_patterns_maintain_strength,
+    strength_weighted_importance_affects_pruning,
+    dream_cycle_with_decayed_patterns, multi_day_dream_with_decay_reduces_load,
+    retrieval_after_decay_and_dreams, novelty_bonus_window,
+    anti_lock_in_with_dreams
+  total: "21 new + 49 existing = 70 tests all passing in 72s"

@@ -1,0 +1,120 @@
+root_span_id: f06e625d-684b-4b37-adac-ccad1d221c62
+turn_span_id: 
+session_id: f06e625d-684b-4b37-adac-ccad1d221c62
+---
+session: general
+date: 2026-03-02
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "Dream Cycle Roadmap Phases 1-2 COMPLETE, Phases 3-4 in flight"
+now: "Wait for background agents (Phase 3: dream_metrics.py, Phase 4: BasinVolume.lean), then verify and commit"
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build && cd python && .venv/bin/python -m pytest test_dream_ops.py test_dream_validation.py -v"
+
+done_this_session:
+  - task: "Phase 1 — EnergyGap.lean: 10 theorems (zero sorry, zero warnings)"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/EnergyGap.lean, proofs/hermes-NLCDM/HermesNLCDM.lean]
+  - task: "Phase 2 — dream_ops.py: 10 functions + DreamParams, 30 tests all passing"
+    files: [proofs/hermes-NLCDM/python/dream_ops.py, proofs/hermes-NLCDM/python/test_dream_ops.py]
+  - task: "Updated CLAUDE.md with background agent reminder"
+    files: [.claude/CLAUDE.md]
+  - task: "Created full 4-phase roadmap plan"
+    files: [.claude/plans/parallel-booping-zebra.md]
+
+blockers: []
+
+questions:
+  - "Phase 4 (BasinVolume.lean) Hessian comparison — will the agent complete it sorry-free?"
+  - "After all 4 phases: commit strategy? Single commit or per-phase?"
+
+decisions:
+  - energy_gap_sqrt_eps: "Energy gap condition uses sqrt(eps) for norm perturbation — tight because concentrated fp perturbation is O(M^2 sqrt(eps))"
+  - two_dynamics_systems: "NREM uses Hopfield (softmax + patterns), REM uses Boltzmann (sigmoid + W). Correctly separated."
+  - rem_explore_no_converge: "Fixed step count, no tolerance check. Weak Hebbian at EACH step, not just endpoint."
+  - lv_then_consolidate: "Dream cycle order: NREM → REM-unlearn → REM-explore → LV competition → consolidate_similar → return (W, embeddings)"
+  - union_find_consolidation: "Used union-find for transitive similarity chains in consolidate_similar"
+
+findings:
+  - gibbs_for_entropy_bound: "Reused gibbs_inequality from Dynamics.lean against uniform dist to prove entropy lower bound -log N"
+  - nlinarith_for_sqrt: "nlinarith with mul_self_sqrt witnesses avoids fragile rw chains for sqrt factoring"
+  - set_not_have_for_let: "Use 'set sim := ...' not 'have' so energy_at_fixedPoint returns visible variables"
+  - boltzmann_vs_hopfield: "Boltzmann dynamics (sigmoid(beta*W*x)) for coupling space; Hopfield update (softmax + patterns) for pattern space"
+
+worked:
+  - "Parallel agent launch — Phase 1 (Lean) and Phase 2 (Python) ran simultaneously, both succeeded"
+  - "Gibbs inequality reuse for entropy_lower_bound"
+  - "field_simp for N*(1/N*(-log N)) = -log N"
+  - "Vectorized LV competition via numpy broadcasting"
+
+failed:
+  - "Nothing failed in Phases 1-2"
+
+next:
+  - "Check Phase 3 agent (dream_metrics.py + test_dream_validation.py) — agent a634f09"
+  - "Check Phase 4 agent (BasinVolume.lean) — agent a0682e6"
+  - "Verify both builds: lake build + pytest"
+  - "If both pass, commit all 4 phases"
+  - "Plan file: .claude/plans/parallel-booping-zebra.md"
+
+background_agents:
+  - agent_id: a634f09
+    task: "Phase 3: dream_metrics.py + test_dream_validation.py"
+    status: "running"
+  - agent_id: a0682e6
+    task: "Phase 4: BasinVolume.lean (Hessian comparison)"
+    status: "running"
+
+phase_status:
+  phase1_energy_gap: "COMPLETE — EnergyGap.lean (10 theorems, zero sorry)"
+  phase2_dream_ops: "COMPLETE — dream_ops.py (10 functions, 30 tests)"
+  phase3_dream_metrics: "IN PROGRESS — agent a634f09"
+  phase4_basin_volume: "IN PROGRESS — agent a0682e6"
+
+cumulative_proof_status:
+  phase1_energy: "COMPLETE — Energy.lean, EnergyBounds.lean, LocalMinima.lean"
+  phase2_dynamics: "COMPLETE — Dynamics.lean"
+  phase3_coupling: "COMPLETE — Coupling.lean"
+  phase4_capacity: "COMPLETE — Capacity.lean (6 theorems)"
+  phase5_modular: "COMPLETE — Modular.lean (12 theorems)"
+  phase5_5_block_diagonal: "COMPLETE — BlockDiagonal.lean (14 items)"
+  phase5_7_weight_update: "COMPLETE — WeightUpdate.lean (5 theorems)"
+  phase5_8_temperature: "COMPLETE — Temperature.lean (5 theorems)"
+  phase5_9_spurious_states: "COMPLETE — SpuriousStates.lean (9 items)"
+  phase5_9b_energy_gap: "COMPLETE — EnergyGap.lean (10 theorems)"
+  phase5D1_basin_volume: "IN PROGRESS — BasinVolume.lean"
+  phase6_lyapunov: "COMPLETE — Lyapunov.lean (6 items)"
+
+energygap_theorems:
+  - "entropy_lower_bound: Σ p log p ≥ -log N (via Gibbs inequality)"
+  - "entropy_abs_bound: |Σ p log p| ≤ log N"
+  - "energy_fixedPoint_lower: E(ξ) ≥ -½‖ξ‖² - β⁻¹ log N"
+  - "energy_gap_from_norm_gap: ‖ξ_a‖² > ‖ξ_b‖² + 2β⁻¹ log N → E(ξ_a) < E(ξ_b)"
+  - "sqNorm_add_expansion: ‖a+b‖² = ‖a‖² + 2⟨a,b⟩ + ‖b‖²"
+  - "sqNorm_eq_pattern_plus_diff: ‖ξ‖² = ‖x_μ‖² + 2⟨x_μ, ξ-x_μ⟩ + ‖ξ-x_μ‖²"
+  - "concentrated_sqNorm_lower: ‖ξ‖² ≥ ‖x_μ‖² - 2√(‖x_μ‖²·‖ξ-x_μ‖²)"
+  - "concentrated_sqNorm_lower_bound: ‖ξ‖² ≥ ‖x_μ‖² - 2M√D (bounded version)"
+  - "energy_gap_concentrated: MAIN — concentrated fp has lower energy than mixture fp under gap condition"
+  - "energy_at_uniform_fixedPoint: E(ξ) = -½‖ξ‖² - β⁻¹ log N at uniform p"
+
+dream_ops_functions:
+  - "DreamParams: frozen dataclass with research v3 defaults"
+  - "hopfield_update: ξ → Σ softmax(β, X^T ξ)_μ · x_μ"
+  - "spreading_activation: iterate hopfield_update to convergence"
+  - "boltzmann_dynamics: x_{t+1} = sigmoid(β · W · x_t)"
+  - "nrem_replay: Hebbian rank-1 at high β"
+  - "rem_unlearn: anti-Hebbian from random starts"
+  - "rem_explore: weak Hebbian, FIXED step count, NO convergence"
+  - "lv_competition: Lotka-Volterra on attractor fitness"
+  - "consolidate_similar: union-find merge at cosine threshold"
+  - "dream_cycle: NREM → REM-unlearn → REM-explore → LV → consolidate"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/HermesNLCDM/EnergyGap.lean
+    - proofs/hermes-NLCDM/python/dream_ops.py
+    - proofs/hermes-NLCDM/python/test_dream_ops.py
+    - .claude/plans/parallel-booping-zebra.md
+  modified:
+    - proofs/hermes-NLCDM/HermesNLCDM.lean
+    - .claude/CLAUDE.md

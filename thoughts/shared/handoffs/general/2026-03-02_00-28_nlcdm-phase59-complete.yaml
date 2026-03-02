@@ -1,0 +1,84 @@
+root_span_id: e4a9c6dc-351d-4582-b613-de49a4cd225d
+turn_span_id: 6acda823-be41-4f71-8c30-af1e9c508285
+session_id: e4a9c6dc-351d-4582-b613-de49a4cd225d
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "NLCDM Phase 5.9 COMPLETE — SpuriousStates.lean (9 items: 2 private helpers + 7 theorems), zero sorry, zero warnings"
+now: "All phases complete. Consider Phase 5.9b (energy gap between concentrated vs mixture states) or new proof directions"
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build"
+
+done_this_session:
+  - task: "Fixed all 6 compiler errors in SpuriousStates.lean"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/SpuriousStates.lean]
+  - task: "Wired SpuriousStates module into root HermesNLCDM.lean"
+    files: [proofs/hermes-NLCDM/HermesNLCDM.lean]
+  - task: "Full lake build passes — 2286 jobs, zero errors, zero warnings"
+
+blockers: []
+
+questions:
+  - "Phase 5.9b scope: Can we quantify the energy gap between concentrated (near-pattern) and mixture (spurious) fixed points?"
+  - "Are there further phases to pursue? (e.g., basin of attraction analysis, convergence rate bounds)"
+
+decisions:
+  - let_binding_opacity: "After 'intro sim p', let-bound sim μ is opaque to simp_rw — use 'show' with expanded form to make inner sum visible"
+  - derive_hfp_in_p_terms: "Instead of fixedPoint_expansion (which returns softmax-expanded form), derive hfp_k directly via 'congr_fun hfp k; unfold hopfieldUpdate at h; exact h.symm' to get p-based form"
+  - private_theorem_local_copies: "When private theorems (weighted_sq_le, sqNorm_sub_le) from LocalMinima.lean are needed, copy them as private helpers with _local suffix"
+  - replace_convexOn_pow: "convexOn_pow doesn't exist in Mathlib4 — use weighted_sq_le_local (Cauchy-Schwarz trick) + hp_sum for per-coordinate Jensen"
+  - mul_le_mul_arg_fix: "mul_le_mul hp_tail le_rfl ... fails because le_rfl gives c≤c not c≤d — need (by linarith [hp_nn μ]) for 1-pμ ≤ 1"
+
+findings:
+  - congr_fun_unfold_pattern: "congr_fun hfp k; unfold hopfieldUpdate at h; exact h.symm — gives ξ k = Σ p μ * x_{μk} in p-terms, avoiding softmax expansion mismatch"
+  - show_unfolds_let: "'show' with expanded let-variable successfully makes opaque let-bindings visible to simp_rw"
+  - weighted_cauchy_schwarz_for_jensen: "weighted_sq_le_local (√w Cauchy-Schwarz trick) + hp_sum=1 directly gives per-coordinate Jensen (Σ pa)² ≤ Σ pa², replacing missing convexOn_pow"
+
+worked:
+  - "show ∑ μ, p μ * (∑ i, ...) = sqNorm ξ — unfolds let-bound sim for simp_rw [Finset.mul_sum]"
+  - "congr_fun hfp k; unfold hopfieldUpdate at h; exact h.symm — derives fixed point eq in p-terms"
+  - "weighted_sq_le_local p (fun μ => cfg.patterns μ k) hp_nn; rw [hp_sum, one_mul] — Jensen via Cauchy-Schwarz"
+  - "mul_le_mul hp_tail (by linarith [hp_nn μ]) hp_tail_nn hε_nn — correct arg order for (1-pμ)² ≤ ε"
+
+failed:
+  - "simp_rw [Finset.mul_sum] after intro sim p — fails because sim μ is opaque let-binding"
+  - "fixedPoint_expansion for hfp_k — returns softmax-expanded form that doesn't match p-based goal"
+  - "convexOn_pow 2 — doesn't exist in Mathlib4"
+  - "mul_le_mul hp_tail le_rfl — le_rfl gives 1-pμ ≤ 1-pμ not 1-pμ ≤ 1"
+
+next:
+  - "Consider Phase 5.9b: quantify energy gap E(mixture) - E(concentrated)"
+  - "  At concentrated fp (pμ ≥ 1-ε): E ≈ -½‖xμ‖² (entropy ≈ 0)"
+  - "  At mixture fp (uniform p): E ≈ -½‖avg‖² + β⁻¹ log N (high entropy)"
+  - "  Gap ≈ ½(‖xμ‖² - ‖avg‖²) - β⁻¹ log N"
+  - "Alternative: basin of attraction radius bounds, convergence rate estimates"
+
+phase59_theorems:
+  - "fixedPoint_expansion: ξ_k = Σ softmax(β, X^T ξ)_μ · x_{μk} (SpuriousStates.lean:44-50)"
+  - "fixedPoint_similarity_identity: Σ p_μ (x_μ · ξ) = ‖ξ‖² (SpuriousStates.lean:63-84)"
+  - "energy_at_fixedPoint: E(ξ) = -½‖ξ‖² + β⁻¹ Σ p log p (SpuriousStates.lean:101-120)"
+  - "energy_at_fixedPoint_le: E(ξ) ≤ -½‖ξ‖² (SpuriousStates.lean:123-132)"
+  - "weighted_sq_le_local: (Σ wa)² ≤ (Σ w)(Σ wa²) — private helper (SpuriousStates.lean:138-168)"
+  - "sqNorm_sub_le_local: ‖a-b‖² ≤ 4M² — private helper (SpuriousStates.lean:171-185)"
+  - "fixedPoint_sqNorm_le: ‖ξ‖² ≤ Σ p_μ ‖x_μ‖² Jensen (SpuriousStates.lean:193-222)"
+  - "fixedPoint_sqNorm_bound: ‖ξ‖² ≤ M² (SpuriousStates.lean:225-245)"
+  - "concentrated_fixedPoint_near_pattern: p_μ ≥ 1-ε → ‖ξ-x_μ‖² ≤ 4M²ε (SpuriousStates.lean:256-333)"
+
+cumulative_proof_status:
+  phase1_energy: "COMPLETE — Energy.lean, EnergyBounds.lean, LocalMinima.lean"
+  phase2_dynamics: "COMPLETE — Dynamics.lean"
+  phase3_coupling: "COMPLETE — Coupling.lean"
+  phase4_capacity: "COMPLETE — Capacity.lean (6 theorems)"
+  phase5_modular: "COMPLETE — Modular.lean (12 theorems)"
+  phase5_5_block_diagonal: "COMPLETE — BlockDiagonal.lean (14 items)"
+  phase5_7_weight_update: "COMPLETE — WeightUpdate.lean (5 theorems)"
+  phase5_8_temperature: "COMPLETE — Temperature.lean (5 theorems)"
+  phase5_9_spurious_states: "COMPLETE — SpuriousStates.lean (9 items)"
+  phase6_lyapunov: "COMPLETE — Lyapunov.lean (6 items)"
+
+files:
+  modified:
+    - proofs/hermes-NLCDM/HermesNLCDM/SpuriousStates.lean
+    - proofs/hermes-NLCDM/HermesNLCDM.lean

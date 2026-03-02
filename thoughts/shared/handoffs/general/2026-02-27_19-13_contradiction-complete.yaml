@@ -1,0 +1,90 @@
+root_span_id: 0cb83007-e9b7-4a55-9df9-2f0c8b95c3d4
+turn_span_id: 
+session_id: 0cb83007-e9b7-4a55-9df9-2f0c8b95c3d4
+---
+session: general
+date: 2026-02-27
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Piece 3/5 contradiction.py — build, audit, fix 3 2nd-order bugs"
+now: "Piece 4/5: compression/consolidation — needs spec creation first (no spec exists yet)"
+
+test: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/test_contradiction.py -q --tb=short
+
+done_this_session:
+  - task: "Resumed builder agent a335f24 → 1457 lines, all tests passing"
+    files: [proofs/hermes-memory/python/hermes_memory/contradiction.py]
+  - task: "Independent verification: 184 passed + 2 xfail, 560 baseline passed, ruff clean"
+    files: []
+  - task: "Phase C audit via critic agent — APPROVED, 0 critical issues, 3 minor findings"
+    files: []
+  - task: "2nd/3rd order effect analysis on 3 minor findings"
+    files: []
+  - task: "Fix 1: Removed unused `timestamp` param from detect_contradictions() (Hyrum's Law trap)"
+    files: [proofs/hermes-memory/python/hermes_memory/contradiction.py]
+  - task: "Fix 2: Fallback subject extraction [:5] → [:4] (prevented false negatives via Jaccard denominator inflation)"
+    files: [proofs/hermes-memory/python/hermes_memory/contradiction.py]
+  - task: "Fix 3: Separated EXCLUDED_CATEGORIES from weights, validation now (0.0, 2.0] (prevented silent skip footgun)"
+    files: [proofs/hermes-memory/python/hermes_memory/contradiction.py, proofs/hermes-memory/python/tests/test_contradiction.py]
+  - task: "Post-fix verification: 185 passed + 2 xfail, 560 baseline, ruff clean"
+    files: []
+
+blockers: []
+
+questions:
+  - "Piece 4/5 is compression/consolidation — no spec exists under thoughts/shared/plans/memory-system/. Need to create spec first."
+  - "Does 'compression/consolidation' map to architecture.md Phase 4 (write path consolidation), or is it a separate proof module like optimizer.py?"
+
+decisions:
+  - timestamp_removal: "Removed unused timestamp param from detect_contradictions(). resolve_contradictions() still has its timestamp (actually used for SupersessionRecord). YAGNI — add when needed with proper design."
+  - fallback_token_limit: "Changed [:5] to [:4] per spec. Extra token inflates Jaccard denominator → lower overlap → missed contradictions that compound in piece 4 consolidation."
+  - excluded_categories_split: "Option (b): EXCLUDED_CATEGORIES frozenset replaces weight=0.0 semantics. Weights validate (0.0, 2.0]. Prevents silent skip when caller sets weight=0.0 meaning 'deprioritize' but gets 'disabled'. greeting/transactional hardcoded as structurally excluded."
+  - spec_updates_needed: "3 spec sections need updating to match fixes: Section 3.2 (EXCLUDED_CATEGORIES + weight domain), Section 4.2 (1-4 words), Section 6.1 (no timestamp param). Deferred — code is source of truth, spec updates are non-blocking."
+
+findings:
+  - final_test_counts: "185 passed, 2 xfailed in contradiction; 560 passed, 19 deselected in baseline"
+  - contradiction_py_size: "1464 lines after fixes"
+  - public_symbols: "17 (was 16): added EXCLUDED_CATEGORIES. Enums 3, dataclasses 5, functions 6, constants 3 (DEFAULT_CATEGORY_WEIGHTS, FIELD_EXTRACTORS, NAME_STOP_WORDS, DEFAULT_CONTRADICTION_CONFIG, POLARITY_KEYWORDS, EXCLUDED_CATEGORIES = 6 constants total)"
+  - audit_clean: "Phase C critic found 0 critical, 0 blocking issues"
+  - pieces_status: "encoding(1/5 done), recall(2/5 done), contradiction(3/5 done), compression/consolidation(4/5 next), piece5 TBD"
+  - all_existing_modules: "encoding.py(837L), recall.py(867L), contradiction.py(1464L), optimizer.py(1154L), sensitivity.py(1034L) — all have tests"
+
+worked:
+  - "3-phase pipeline (spec harden → build → audit) continues to catch real bugs"
+  - "2nd/3rd order effect analysis on audit findings — caught Jaccard denominator inflation and silent-skip footgun before they compounded into piece 4"
+  - "Builder agent (119k tokens, 53 tool calls) produced working code autonomously"
+  - "Critic agent (51k tokens, 5 tool calls) gave accurate APPROVE with actionable minor findings"
+
+failed: []
+
+next:
+  - "Create spec for piece 4/5 (compression/consolidation) under thoughts/shared/plans/memory-system/consolidation/spec.md"
+  - "Clarify scope: is this about the consolidation write path from architecture.md Phase 4, or memory compression (merging similar memories)?"
+  - "Apply same 3-phase pipeline: Phase A (adversarial spec + test), Phase B (build), Phase C (audit)"
+  - "Update contradiction spec.md to match 3 code fixes (weight domain, token limit, no timestamp) — low priority"
+
+files:
+  created: []
+  modified:
+    - proofs/hermes-memory/python/hermes_memory/contradiction.py
+    - proofs/hermes-memory/python/tests/test_contradiction.py
+
+# Key code changes for next session reference:
+#
+# contradiction.py changes:
+#   Line 31-39: DEFAULT_CATEGORY_WEIGHTS no longer includes greeting/transactional
+#   Line 42: New EXCLUDED_CATEGORIES frozenset (greeting, transactional)
+#   Line 394-405: Validation rejects EXCLUDED_CATEGORIES keys, enforces (0.0, 2.0]
+#   Line 650: Fallback extraction [:5] → [:4]
+#   Line 1149: detect_contradictions() signature — timestamp param removed
+#   Line 1215-1217: Early exit uses EXCLUDED_CATEGORIES instead of weight==0.0
+#   Line 1241-1243: Loop skip uses EXCLUDED_CATEGORIES instead of weight==0.0
+#
+# test_contradiction.py changes:
+#   Line 35: Added EXCLUDED_CATEGORIES import
+#   Line 67-72: _DEFAULT_CATEGORY_WEIGHTS updated (no greeting/transactional)
+#   Replaced test_category_weight_zero_suppresses_detection with:
+#     test_excluded_category_suppresses_detection (structural skip)
+#     test_excluded_category_rejected_in_weights (validation guard)

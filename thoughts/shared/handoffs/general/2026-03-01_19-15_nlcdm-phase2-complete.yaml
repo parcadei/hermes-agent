@@ -1,0 +1,99 @@
+root_span_id: d92e05a5-c6c1-4333-8b20-28beb697f670
+turn_span_id:
+session_id: d92e05a5-c6c1-4333-8b20-28beb697f670
+---
+session: general
+date: 2026-03-01
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: NLCDM Phase 2 complete — energy descent + strict decrease in Dynamics.lean, zero sorry, zero warnings
+now: Start Lean Phase 3 (pairwise coupling) or Python Phase P1 (embedding separation stats)
+
+test: cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build
+
+done_this_session:
+  - task: "Proved energy descent E(ξ_new) ≤ E(ξ_old) via CCCP surrogate chain"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Dynamics.lean]
+  - task: "Proved strict descent E(ξ_new) < E(ξ_old) when ξ is not a fixed point"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Dynamics.lean]
+  - task: "Proved Jensen for exp via convexOn_exp.map_sum_le"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Dynamics.lean]
+  - task: "Proved Fenchel-Young equality lse = Σp·z - β⁻¹·Σp·log(p)"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Dynamics.lean]
+  - task: "Proved Gibbs' inequality KL(q‖p) ≥ 0 via log x ≤ x-1"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Dynamics.lean]
+  - task: "Proved full Fenchel-Young inequality with entropy term"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Dynamics.lean]
+  - task: "Proved surrogate minimizer Q(c) ≤ Q(ξ) and strict Q(c) < Q(ξ) when c≠ξ"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Dynamics.lean]
+  - task: "Wired Dynamics.lean into root module, committed Phase 1+2"
+    files: [proofs/hermes-NLCDM/HermesNLCDM.lean]
+
+blockers: []
+
+questions:
+  - "Should Lean Phase 3 (pairwise coupling/LaSalle) or Python Phase P1 (embedding separation) be prioritized next?"
+
+decisions:
+  - cccp_proof_strategy: "Used CCCP surrogate chain: E(ξ_new) ≤ Q̃(ξ_new) ≤ Q̃(ξ_old) = E(ξ_old). Step 1 is FY equality, step 2 is full FY inequality, step 3 is surrogate minimizer."
+  - gibbs_from_log_le: "Proved KL ≥ 0 from Real.log_le_sub_one_of_pos (log x ≤ x-1). Telescoping: Σ q·(p/q - 1) = Σp - Σq = 0."
+  - strict_descent_via_surrogate: "Strict descent only needs strict surrogate minimizer (∑(ξ-c)² > 0 when ξ≠c via sq_pos_of_ne_zero). No need for strict Jensen or strict FY."
+  - hopfieldUpdate_simple_def: "Removed intermediate 'weights' let binding from hopfieldUpdate to avoid unfold issues with set/rw."
+
+findings:
+  - hook_false_positives: "The Edit/Write Lean hook reports 'compiles successfully' but gives FALSE POSITIVES. ALWAYS verify with actual 'lake build HermesNLCDM.Dynamics'. At least 4 false positives occurred this session."
+  - finset_sum_sub_distrib: "Finset.sum_sub_distrib doesn't unify directly with ∑ μ (Finset.univ sugar). Use 'rw [← Finset.sum_sub_distrib]' or 'simp_rw [Finset.sum_sub_distrib]' instead of bare term-mode."
+  - finset_sum_comm_requires_mul_sum: "To swap ∑μ p·∑i f = ∑i ∑μ p·f, first distribute with simp_rw [Finset.mul_sum], then Finset.sum_comm."
+  - let_bindings_block_rw: "Lean let bindings in theorem statements block rw/simp. Use 'intro c' to eliminate, or 'show' to manually state goal. hopfieldUpdate unfolds with lets that block set — use funext to equate."
+  - sq_pos_of_ne_zero_signature: "sq_pos_of_ne_zero takes just the proof (h : x ≠ 0), not the value. Usage: sq_pos_of_ne_zero h, NOT sq_pos_of_ne_zero x h."
+  - nlinarith_for_quadratic: "nlinarith can close quadratic goals that linarith cannot. Used for ½‖ξ-c‖² ≥ 0 expansion. Also need explicit hcc : Σ c*c = Σ c² bridge."
+  - conv_ext_not_for_sums: "conv_lhs => ext x doesn't work on Finset.sum. Use simp_rw [show ∀ x, ... from ...] instead."
+  - sum_mul_rewrite: "To rewrite inside a sum like ∑ x, p x * (f x * g) = ∑ x, (p x * f x) * g, use simp_rw [show ∀ x, ... from fun x => by ring] then rw [← Finset.sum_mul]."
+
+worked:
+  - "CCCP proof architecture: FY equality + full FY + surrogate minimizer"
+  - "simp_rw for rewriting under Finset.sum binders"
+  - "funext to equate hopfieldUpdate output with explicit ξ_new definition"
+  - "nlinarith for quadratic nonnegativity goals"
+  - "Always verifying with lake build after hook reports success"
+  - "sq_pos_of_ne_zero for strict positivity of squares"
+
+failed:
+  - "Hook false positives: reported success 4+ times when lake build showed errors"
+  - "positivity cannot prove 0 < (ξ i - c i)^2 — needs ne_zero, not just nonneg"
+  - "conv_lhs => ext x on sums — use simp_rw instead"
+  - "Finset.sum_sub_distrib as bare term in calc chain — implicit finset mismatch"
+  - "linarith for quadratic expansion — needs nlinarith"
+
+next:
+  - "Lean Phase 3 (per research synthesis §11A): Pairwise coupling — symmetric W → convergence, W_ij > 0 → shared basin, W_ij < 0 → basin separation. Papers: Slotine 2003, Wang & Slotine 2005"
+  - "Python Phase P1 (per §11B, can run parallel with Lean Phase 3): Embedding separation statistics — compute pairwise cosine similarity distribution for realistic memories, find empirical δ(N), determine N_max where P(δ ≥ δ_min) ≥ 0.99"
+  - "Python Phase P_threshold (per §11B, PRIORITY before Lean Phase 3): Sweep τ_high/τ_low coupling thresholds, measure module count, capacity, consolidation rate, find Pareto frontier"
+
+phase2_theorem_map:
+  - "Dynamics.lean: hopfieldUpdate, isFixedPoint definitions"
+  - "Dynamics.lean: softmax_pos (standalone positivity)"
+  - "Dynamics.lean: exp_weighted_sum_le (Jensen for exp via convexOn_exp.map_sum_le)"
+  - "Dynamics.lean: lse_ge_weighted_sum (weak Fenchel-Young)"
+  - "Dynamics.lean: log_softmax (log(softmax_μ) = βz_μ - log S)"
+  - "Dynamics.lean: softmax_weighted_log (Σ p·log(p) = β·Σp·z - log S)"
+  - "Dynamics.lean: lse_eq_softmax_sum (Fenchel-Young equality)"
+  - "Dynamics.lean: surrogate_minimizer (Q(c) ≤ Q(ξ))"
+  - "Dynamics.lean: softmax_entropy_nonneg (Σ p·log(p) ≤ 0)"
+  - "Dynamics.lean: gibbs_inequality (KL(q‖p) ≥ 0)"
+  - "Dynamics.lean: lse_ge_weighted_sum_plus_entropy (full Fenchel-Young)"
+  - "Dynamics.lean: energy_descent (E(ξ_new) ≤ E(ξ_old) — MAIN THEOREM)"
+  - "Dynamics.lean: surrogate_minimizer_strict (Q(c) < Q(ξ) when c≠ξ)"
+  - "Dynamics.lean: energy_descent_strict (E(ξ_new) < E(ξ_old) when ξ not fixed point)"
+
+commits:
+  - "e9ea532: feat: NLCDM formal proofs Phase 1+2 — energy wells, local minima, energy descent"
+  - "d8cddd8: feat: strict energy descent — E decreases strictly unless at fixed point"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/HermesNLCDM/Dynamics.lean
+  modified:
+    - proofs/hermes-NLCDM/HermesNLCDM.lean

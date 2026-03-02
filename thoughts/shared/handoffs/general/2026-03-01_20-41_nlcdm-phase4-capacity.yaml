@@ -1,0 +1,91 @@
+root_span_id: 84b7b98
+session_id: nlcdm-phase4
+---
+session: general
+date: 2026-03-01
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: NLCDM Phase 4 complete — exponential capacity bounds, 6 theorems in Capacity.lean, zero sorry, zero warnings
+now: Phase 5 (Modular Structure — block-diagonal decomposition of W matrix)
+
+test: cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build
+
+done_this_session:
+  - task: "Proved capacity_criterion: 4NβM² ≤ exp(βδ) implies β·δ ≥ log(4NβM²)"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Capacity.lean]
+  - task: "Proved tail_bound_from_capacity: softmax tail ≤ 1/(4βM²)"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Capacity.lean]
+  - task: "Proved concentration_from_capacity: softmax concentrates under capacity"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Capacity.lean]
+  - task: "Proved MAIN THEOREM local_minima_from_capacity: capacity condition ⟹ each stored pattern is local minimum"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Capacity.lean]
+  - task: "Proved coupling_bound_from_pairwise: pairwise monotonicity ⟹ Phase 3 coupling bound"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Capacity.lean]
+  - task: "Proved coupled_descent_pairwise: coordinate descent with cleaner hypothesis"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Capacity.lean]
+  - task: "Wired Capacity.lean into root module"
+    files: [proofs/hermes-NLCDM/HermesNLCDM.lean]
+
+blockers: []
+
+questions:
+  - "Phase 5 scope: block-diagonal decomposition of W matrix — what structure to prove? (block independence, energy decomposition across modules)"
+  - "Phase 5.5 block-diagonal: is this a sub-phase of Phase 5 or separate?"
+  - "Phase 6 Full System Lyapunov: what's the target statement?"
+
+decisions:
+  - le_div_iff_naming: "Mathlib4 uses le_div_iff₀ (with subscript 0) for the ordered field version. The plain le_div_iff does NOT exist. The ₀ suffix distinguishes GroupWithZero lemmas from Group lemmas."
+  - capacity_as_bridge: "Phase 4 bridges capacity bound (exponential) to Phase 1 conditions (logarithmic). capacity_criterion converts 4NβM² ≤ exp(βδ) to β·δ ≥ log(4NβM²), which is exactly what stored_patterns_are_local_minima needs."
+  - pairwise_to_coupling: "coupling_bound_from_pairwise converts a simpler per-pair hypothesis (each coupling term involving k doesn't increase) to the Phase 3 coupling bound hypothesis. This makes coupled_descent_pairwise more usable."
+
+findings:
+  - lake_build_only_imports: "CRITICAL: lake build only compiles transitively imported modules. A standalone .lean file NOT imported by HermesNLCDM.lean will NOT be built. Early hook 'success' reports were false positives because Capacity.lean wasn't imported yet. Always add the import to HermesNLCDM.lean FIRST, then fix errors."
+  - neg_mul_parsing: "-β * δ is parsed as (-β) * δ in Lean 4, not -(β * δ). Use 'show (-β * δ : ℝ) = -(β * δ) from neg_mul β δ' before exp_neg to make the rewrite match. Same pattern as LocalMinima.lean:438."
+  - positivity_needs_cast_pos: "positivity cannot prove 0 < 4 * ↑N * β * M ^ 2 without first establishing 0 < ↑N. Add 'have hN_pos : (0 : ℝ) < ↑N := Nat.cast_pos.mpr (NeZero.pos N)' before the positivity call."
+  - exp_product_cancellation: "exp(βδ) * exp(-βδ) = 1 via ← exp_add + ring + exp_zero. Used to convert capacity bound to multiplication form for nlinarith."
+  - hook_false_positive_again: "Hook reported compilation success for Capacity.lean before it was imported. Consistent with Phase 3 finding. Always verify with lake build after adding import."
+
+worked:
+  - "le_div_iff₀ h4βM_pos to convert 1/(4βM²) goal to multiplication form"
+  - "mul_le_mul_of_nonneg_right hcap (le_of_lt hexp_neg_pos) to multiply capacity bound by exp(-βδ)"
+  - "nlinarith with explicit mul_nonneg for closing the final inequality"
+  - "Nat.cast_pos.mpr (NeZero.pos N) for ↑N positivity"
+  - "neg_mul β δ for -β*δ → -(β*δ) conversion"
+
+failed:
+  - "le_div_iff — does not exist in Mathlib4 (use le_div_iff₀)"
+  - "div_le_div_iff — does not exist by this name"
+  - "div_eq_mul_inv approach — more complex than needed"
+  - "Hook success without import — file wasn't being compiled"
+
+next:
+  - "Phase 5: Modular Structure — block-diagonal decomposition of W matrix"
+  - "Phase 5.5: Block-Diagonal Decomposition (may be sub-phase of Phase 5)"
+  - "Phase 6: Full System Lyapunov — convergence of full coupled system"
+  - "Python P1 (parallel): Embedding separation statistics — empirical δ(N)"
+  - "Python P_threshold (PRIORITY per earlier handoff): Sweep τ_high/τ_low coupling thresholds"
+
+phase4_theorem_map:
+  - "Capacity.lean: capacity_criterion (algebraic bridge: exp capacity → log condition)"
+  - "Capacity.lean: tail_bound_from_capacity (softmax tail ≤ 1/(4βM²))"
+  - "Capacity.lean: concentration_from_capacity (softmax concentrates under capacity)"
+  - "Capacity.lean: local_minima_from_capacity (MAIN: capacity ⟹ local minima)"
+  - "Capacity.lean: coupling_bound_from_pairwise (pairwise → coupling bound)"
+  - "Capacity.lean: coupled_descent_pairwise (coordinate descent, cleaner hypothesis)"
+
+cumulative_proof_status:
+  phase1_energy: "COMPLETE — Energy.lean, EnergyBounds.lean, LocalMinima.lean"
+  phase2_dynamics: "COMPLETE — Dynamics.lean (hopfieldUpdate, energy_descent, energy_descent_strict)"
+  phase3_coupling: "COMPLETE — Coupling.lean (symmetry, sign properties, coordinate descent)"
+  phase4_capacity: "COMPLETE — Capacity.lean (exponential capacity, 6 theorems)"
+  phase5_modular: "NOT STARTED"
+  phase5_5_block_diagonal: "NOT STARTED"
+  phase6_lyapunov: "NOT STARTED"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/HermesNLCDM/Capacity.lean
+  modified:
+    - proofs/hermes-NLCDM/HermesNLCDM.lean

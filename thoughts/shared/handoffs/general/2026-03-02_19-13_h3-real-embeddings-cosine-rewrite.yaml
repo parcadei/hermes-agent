@@ -1,0 +1,117 @@
+root_span_id: 88a6fdad-a7e4-4de3-aa48-e473c370fccb
+turn_span_id: 0fc5e43e-f5a5-496a-b7c0-dcaa23c2e91b
+session_id: 88a6fdad-a7e4-4de3-aa48-e473c370fccb
+---
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "H3 real-embedding test complete: 50/50 delta>0 when query IS cross-domain thought, 0/50 for cold discovery. Phase 11 (creativity) now proven. Cosine rewrite is next."
+now: "Rewrite TransferDynamics.lean (Phase 10) to bound cosine_sim(T(ξ), target) instead of dot product. The math: cos = dot/||T(ξ)||, and ||T(ξ)|| <= 1 for unit patterns. Empirical targets in test_h3_real_embeddings.py Table 2."
+test: |
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_h3_real_embeddings.py test_bridge_integration.py -v --tb=short
+
+done_this_session:
+  - task: "Wrote 8 real-embedding H3 tests using CORPUS (200 sentences, 10 domains) + 170k background embeddings"
+    files:
+      - proofs/hermes-NLCDM/python/test_h3_real_embeddings.py
+    details: |
+      5 test classes: AlignmentGapMeasurement, DotVsCosineAtScale, PreconditionAudit,
+      CosineBoundProposal, MechanismComparison. All 8 tests pass in 10.7s.
+  - task: "Settled the H3 gating question with empirical data"
+    files: []
+    details: |
+      Test 1a: delta > 0 in 50/50 cases (100%) when query IS the cross-domain thought.
+      Mean delta = +0.115. Tribunal prediction WRONG for this scenario.
+      Test 1b: delta > 0 in 0/50 cases (0%) for cold discovery (normal query + separate bridge).
+      Tribunal prediction CORRECT here. Split result changes the operational interpretation.
+
+decisions:
+  - cosine_rewrite_justified: |
+      Empirical data shows dot bound is 0.001 at N=5000 while actual cosine is 0.728.
+      The 40x improvement is mechanically achievable: cos(T(ξ),target) = dot/||T(ξ)||
+      and ||T(ξ)|| <= 1 for unit-vector patterns. Worth formalizing in Lean.
+  - skip_time_decay_tests: "Cosine rewrite is higher priority — it completes the proof chain tightness."
+  - phase_11_complete: |
+      User confirmed Phase 11 (creativity/perturbation-response) is proven in Lean:
+      response_linearity, response_covariance_eq_coupling, response_correlation_implies_bridge.
+      0 sorry, 19 modules, 2294 build jobs. The creativity gap is closed.
+
+findings:
+  h3_split_result: |
+    KEY: The theorem applies when query IS the cross-domain thought (delta > 0, 100%),
+    but NOT for cold discovery (delta < 0, 100%). This means the theorem validates
+    "thinking about health while in finance context" but not "asking a finance question
+    and hoping to find health info via a bridge." Operationally meaningful distinction.
+  preconditions_hold_on_real_embeddings: |
+    SURPRISE: All preconditions hold 100% at N=200. Non-negativity: 0/200 patterns have
+    negative dot with any domain centroid. Real embeddings from the same model cluster
+    positively — they don't behave like random unit vectors. Tribunal's "~50% negative"
+    prediction was based on random-vector analysis that doesn't apply to real embeddings.
+  dot_vs_cosine_confirmed: |
+    N=200:  dot=0.568, cos=0.905, ||T||=0.627
+    N=1000: dot=0.390, cos=0.849, ||T||=0.460
+    N=5000: dot=0.295, cos=0.728, ||T||=0.405
+    N=10000:dot=0.279, cos=0.698, ||T||=0.399
+    Ratio cos/dot = 1/||T(xi)|| exactly. Cosine-based bound would give 0.728 vs 0.001.
+  convergence_unexpected: |
+    Hopfield iteration converges in 7 steps to fitness pattern (not health or finance).
+    Cosine to health centroid stays at 0.881 throughout. Attractor landscape is complex —
+    nearest-pattern convergence doesn't necessarily mean domain-specific convergence.
+  proof_chain_complete: |
+    With Phase 11, the full chain is verified:
+    REM-explore perturbation → Corr = cosine similarity (Lemma 3) → bridge condition (Phase 11b)
+    → extended store bridges (Phase 8) → cross-domain retrieval (Phase 10).
+    Only remaining improvement: cosine-based bound tightening in Phase 10.
+
+worked:
+  - "CORPUS embeddings + 170k background noise gives realistic scaling tests"
+  - "Using cross-domain sentences as both query AND bridge pattern tests the right scenario"
+  - "Measuring delta empirically before deciding theorem relevance — data > theory"
+
+failed: []
+
+next:
+  - step: "Cosine rewrite for TransferDynamics.lean"
+    details: |
+      Rewrite Phase 10 theorem to bound cosine_sim(T(ξ), target) instead of dot product.
+      Core math: cos(T(ξ), target) = dot(T(ξ), target) / ||T(ξ)||.
+      Since T(ξ) = Σ w_μ x_μ (convex combination of unit vectors), ||T(ξ)|| <= 1.
+      New bound: σ / ((1 + (N-1)exp(-βδ)) * ||T(ξ)||).
+      But ||T(ξ)|| appears in both numerator and denominator — need to bound ||T(ξ)||
+      from above to get a clean cosine lower bound. Key insight: ||T(ξ)|| <= 1 always,
+      so cosine >= dot >= σ/(1+(N-1)exp(-βδ)). The same bound works for cosine!
+      But the TIGHTER result is: when bridge dominates (w_bridge ≈ 1), T(ξ) ≈ bridge,
+      so cos(T(ξ), target) ≈ σ directly. Need to formalize the concentration argument.
+      File: proofs/hermes-NLCDM/HermesNLCDM/TransferDynamics.lean
+      Empirical validation targets in: test_h3_real_embeddings.py (TestCosineBoundProposal)
+  - step: "Integration tests for time-based decay"
+    details: "From monotonicity-chain handoff. Lower priority than cosine rewrite."
+  - step: "Activate novelty_bonus (N0=0.2, gamma=0.05)"
+  - step: "Push to parcadei/mimir"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/python/test_h3_real_embeddings.py
+    - thoughts/shared/handoffs/general/2026-03-02_19-13_h3-real-embeddings-cosine-rewrite.yaml
+  modified: []
+
+background_state:
+  - "19 Lean modules, Phases 1-11 complete, 0 sorry, 2294 build jobs"
+  - "216 + 8 = 224 Python tests passing"
+  - "V1 bridge functions wired into CoupledEngine (decay_rate=0.01, novelty_N0=0.0)"
+  - "parcadei/mimir repo LIVE (private)"
+  - "embeddings_170k.npy available for real-embedding tests"
+  - "Phase 11 (creativity) closes the perturbation-response mechanism gap"
+
+key_references:
+  - "proofs/hermes-NLCDM/python/test_h3_real_embeddings.py — 8 real-embedding H3 tests"
+  - "proofs/hermes-NLCDM/python/test_bridge_integration.py — 18 discriminative tests"
+  - "proofs/hermes-NLCDM/python/thoughts/tribunal/discriminative-results.md — tribunal synthesis"
+  - "proofs/hermes-NLCDM/HermesNLCDM/TransferDynamics.lean — Phase 10 (cosine rewrite target)"
+  - "proofs/hermes-NLCDM/python/embeddings_170k.npy — 170k real embeddings"
+  - "proofs/hermes-NLCDM/python/embed_170k.py — embedding generation script"
+  - "proofs/hermes-NLCDM/python/test_real_embeddings.py — CORPUS fixture with 10 domains"
+  - "thoughts/shared/handoffs/general/2026-03-02_18-01_discriminative-tribunal-complete.yaml — previous handoff"

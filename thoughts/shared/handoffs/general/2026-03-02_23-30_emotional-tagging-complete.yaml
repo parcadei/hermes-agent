@@ -1,0 +1,152 @@
+root_span_id: ba034127-1562-4d67-83ef-2cbaae87aee9
+turn_span_id: 
+session_id: ba034127-1562-4d67-83ef-2cbaae87aee9
+---
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Phase 12 Emotional Tagging: Lean proof (0 sorry) + Python implementation + 4-condition longitudinal eval. 131/131 tests pass. Pushed to parcadei/mimir."
+now: "Run S_min sweep (0.3, 0.5, 0.7, 0.9) × access-refresh (on/off) to find the operating point where importance differentiation is wide AND P@1 stays above 0.90."
+test: |
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_wiring_discriminative.py test_coupled_engine.py test_bridge_integration.py test_dream_ops.py test_strength_decay_dream.py test_longitudinal_eval.py -v --tb=short
+  # Expect: 131 passed
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build 2>&1 | tail -3
+  # Expect: 2295 jobs, 0 sorry, 0 warnings
+
+done_this_session:
+  - task: "Pushed prior session work (novelty defaults + longitudinal eval) to parcadei/mimir"
+    files: [proofs/hermes-NLCDM/python/coupled_engine.py, proofs/hermes-NLCDM/python/test_longitudinal_eval.py]
+    details: "Commit 3f92e44"
+
+  - task: "Lean proof: EmotionalTagging.lean — Phase 12, 0 sorry, 0 warnings"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/EmotionalTagging.lean, proofs/hermes-NLCDM/HermesNLCDM.lean]
+    details: |
+      emotionalS₀(S_min, d) = S_min + (1 - S_min) · d
+      Theorems: prediction_error_well_formed, prediction_error_monotone,
+      prediction_error_strict_mono, decay_preserves_S₀_ordering,
+      cold_crosses_threshold_sooner, emotional_tagging_improves_capacity,
+      emotional_bridge_safety_monotone.
+      Registered as Phase 12 in HermesNLCDM.lean.
+
+  - task: "Python implementation: prediction-error S₀ in CoupledEngine.store()"
+    files: [proofs/hermes-NLCDM/python/coupled_engine.py]
+    details: |
+      _prediction_error(): cosine distance to nearest stored pattern, returns [0,1]
+      _emotional_S0(): S_min + (1-S_min)*d, proven well-formed
+      store() uses prediction-error S₀ when importance=None (default).
+      Explicit importance always takes precedence (sentinel None pattern).
+      New params: emotional_tagging=True, emotional_S_min=0.3
+
+  - task: "Extended longitudinal eval to 4 conditions + 4 new H5 tests"
+    files: [proofs/hermes-NLCDM/python/test_longitudinal_eval.py]
+    details: |
+      Added v2_emotional condition: V2 coupled + prediction-error S₀.
+      After ingest_memories(), new patterns get _emotional_S0() applied.
+      Access-refresh queries shared with v2_coupled condition.
+      4 new tests: H5 importance differentiation, H5b retrieval, H5c REM, H5d pattern count.
+
+  - task: "Fixed wiring tests that assumed default importance=0.5"
+    files: [proofs/hermes-NLCDM/python/test_wiring_discriminative.py]
+    details: |
+      3 tests in TestClaim6QueryFeedbackLoop called store() without explicit importance.
+      With emotional_tagging=True, first pattern gets S₀=1.0 (maximally novel).
+      Fix: pass importance=0.5 explicitly. These test query feedback, not store-time importance.
+
+  - task: "Pushed Phase 12 to parcadei/mimir"
+    files: []
+    details: "Commit e835bd8, 5 files changed, 443 insertions"
+
+decisions:
+  sentinel_none_for_importance: |
+    store(importance=None) means "use emotional tagging". Explicit importance=0.5 bypasses it.
+    This preserves backward compatibility — tests that pass explicit importance are unaffected.
+    Alternative was emotional_tagging=False in test constructors, but sentinel is cleaner.
+  S_min_0_3_as_default: |
+    Chosen as initial default. Lean proof shows S_min must be > 0 (for bridgeDecay_pos).
+    0.3 gives meaningful differentiation range [0.3, 1.0] but may be too aggressive —
+    P@1 dropped from 0.94 to 0.67. Next step: sweep S_min values.
+  linear_mapping: |
+    S₀ = S_min + (1-S_min)*d is the simplest monotone mapping [0,1] → [S_min,1].
+    Could use sigmoid or power law later, but linear is provably monotone and well-formed.
+
+findings:
+  emotional_tagging_works_but_needs_calibration: |
+    Day 100 results (4 conditions):
+    V2 emotional: 25 patterns, P@1=0.67, importance range 0.62, 171 REM assoc
+    V2 coupled:   26 patterns, P@1=0.94, importance range 0.53, 202 REM assoc
+    V1 dream:     33 patterns, P@1=0.39, importance range 0.28, 74 REM assoc
+    Baseline:     2179 patterns, P@1=0.003, no associations
+
+    Emotional tagging achieves WIDER importance differentiation (0.62 vs 0.53)
+    and FEWER patterns (25 vs 26) — confirming Theorem 3.
+    But P@1 dropped (0.67 vs 0.94) — S_min=0.3 too aggressive.
+  importance_std_confirms_mechanism: |
+    V2 emotional std=0.1999 vs V2 coupled std=0.1468.
+    The system IS distinguishing novel from redundant patterns more sharply.
+
+worked:
+  - "Sentinel None for importance default — clean backward compatibility"
+  - "_prediction_error as cosine distance to nearest existing pattern — simple, correct"
+  - "Lean proof compiles on first write (confirmed by hook) — 0 sorry"
+  - "Unused variable warnings fixed with _ prefix on contract-documenting hypotheses"
+
+failed:
+  - "S_min=0.3 causes P@1 drop from 0.94 to 0.67 — too aggressive for within-domain patterns"
+  - "Initial store(importance=0.5) default — emotional tagging silently overrode explicit calls, broke 5 tests. Fixed with None sentinel."
+
+next:
+  - step: "S_min sweep: 0.3, 0.5, 0.7, 0.9 × access-refresh on/off"
+    details: |
+      Write test_emotional_sweep.py with parameterized run_longitudinal_eval.
+      For each (S_min, access_refresh) pair, record P@1 and importance_range at day 100.
+      The sweep needs access-refresh as a toggle: modify run_longitudinal_eval to accept
+      access_refresh_queries: int = 5 (set to 0 for "off" condition).
+      Plot or print a table: S_min vs P@1 vs importance_range, with/without access-refresh.
+      CRITICAL: Test the claim that "access-refresh compensates for aggressive S_min".
+      If S_min=0.5 + access-refresh gives P@1>0.90 AND range>0.53, that's the operating point.
+      If P@1 degrades monotonically with no sweet spot, the problem is structural.
+  - step: "Consider non-linear prediction-error mapping"
+    details: |
+      If linear mapping has no sweet spot, try sigmoid or power-law.
+      S₀ = S_min + (1-S_min) * d^alpha where alpha<1 compresses high distances
+      (most patterns get higher S₀, only very similar ones get cold).
+      Would need new Lean theorem for monotonicity of power-law composition.
+  - step: "Predictive coding (from user's roadmap)"
+    details: |
+      Store only the residual — the part that can't be reconstructed from existing
+      high-generation abstractions. Composes multiplicatively with dreams.
+      Harder than emotional tagging — requires residual computation + proof that
+      residual storage preserves retrieval of the full pattern.
+  - step: "Reconsolidation (from user's roadmap)"
+    details: |
+      ξᵢ → ξᵢ + η(q - ξᵢ) on retrieval. Hardest to prove safe — needs basin
+      stability bound. Deferred until emotional tagging calibration is settled.
+
+files:
+  created:
+    - proofs/hermes-NLCDM/HermesNLCDM/EmotionalTagging.lean
+    - thoughts/shared/handoffs/general/2026-03-02_23-30_emotional-tagging-complete.yaml
+  modified:
+    - proofs/hermes-NLCDM/HermesNLCDM.lean
+    - proofs/hermes-NLCDM/python/coupled_engine.py
+    - proofs/hermes-NLCDM/python/test_longitudinal_eval.py
+    - proofs/hermes-NLCDM/python/test_wiring_discriminative.py
+
+background_state:
+  - "20 Lean modules (Phases 1-12), 2295 jobs build clean, 0 sorry"
+  - "131/131 Python tests passing (26 wiring + 24 engine + 18 bridge + 30 dream_ops + 21 decay + 12 longitudinal)"
+  - "parcadei/mimir repo up to date — commit e835bd8"
+  - "Novelty activated: N0=0.2, gamma=0.05"
+  - "Emotional tagging activated: S_min=0.3 (needs calibration via sweep)"
+
+key_references:
+  - "proofs/hermes-NLCDM/HermesNLCDM/EmotionalTagging.lean — Phase 12 proof (this session)"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:163-196 — _prediction_error + _emotional_S0"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:198-236 — store() with emotional tagging"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:95-96 — emotional_tagging + emotional_S_min params"
+  - "proofs/hermes-NLCDM/python/test_longitudinal_eval.py:182-211 — _emotional_S0 standalone"
+  - "proofs/hermes-NLCDM/python/test_longitudinal_eval.py:290-298 — v2_emotional ingestion override"
+  - "proofs/hermes-NLCDM/HermesNLCDM/MonotonicityChain.lean:161-168 — bridge_safety_monotone (composed with)"

@@ -1,0 +1,221 @@
+root_span_id: phase-11-perturbation-response
+session_id: phase-11-perturbation-response
+---
+session: general
+date: 2026-03-02
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "Phase 11 planned: formalize perturbation-response mechanism (REM-explore creativity) in Lean. Loogle search complete, proof strategy designed, discriminative wiring tests written (26/26 pass)."
+now: "Write PerturbationResponse.lean Phase 11a: Cov(X@δ, X@δ) = X^TX/d (algebraic), define Pearson correlation, prove Corr lower bound. Then Phase 11b: connect to Phase 8 bridge criterion."
+test: |
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && python -m pytest test_wiring_discriminative.py -v --tb=short
+
+done_this_session:
+  - task: "Discriminative wiring tests — 26/26 pass, verified V1→V2 bridge is correct"
+    files: [proofs/hermes-NLCDM/python/test_wiring_discriminative.py]
+    details: |
+      6 claims tested:
+        1. Function equivalence: V2 np.exp copies match V1 math.exp within 1e-12 (13 tests, 300 random sweeps)
+        2. Wiring path: dream() passes non-None, non-uniform importances to dream_cycle_xb (mock-captured)
+        3. Temporal discrimination: older last_access_time → strictly lower effective importance
+        4. Novelty discrimination: newer creation_time → higher effective importance
+        5. Dream outcome: fresh clustered memories survive pruning at higher rate than old
+        6. Query feedback loop: query() calls _importance_update, accumulates, clamps at 1.0
+  - task: "Verified existing tests already cover Phase 8-10 claims (no new discriminative tests needed)"
+    files: []
+    details: |
+      test_reasoning_trace_centroids.py (14 tests) covers bridge formation, conditional monotonicity, transfer dynamics.
+      test_strength_decay_dream.py (21 tests) covers decay→importance→prune chain.
+      The handoff's "next step 3" (discriminative Python tests) was already done.
+  - task: "Mapped REM-explore mechanism gap in Lean proofs"
+    files: []
+    details: |
+      ConditionalMonotonicity.lean:169 treats rem_explore_cross_domain_xb as black box.
+      bridge_count_grows_on_insert proves CONSEQUENCE (storing a discovered centroid grows bridges).
+      MECHANISM (why perturbation-response correlation finds associations) is unproven.
+  - task: "Loogle search for Mathlib building blocks"
+    files: []
+    details: |
+      Found all needed theorems (see loogle_results below).
+  - task: "Designed proof strategy for Phase 11"
+    files: []
+  - task: "Lint-cleaned test_wiring_discriminative.py (removed unused pytest import, fixed n_after assignment)"
+    files: [proofs/hermes-NLCDM/python/test_wiring_discriminative.py]
+
+decisions:
+  - wiring_already_correct: |
+      CoupledEngine has working local copies of V1 functions (_strength_decay, _importance_update,
+      _novelty_bonus at coupled_engine.py:49-61). They're numerically equivalent to core.py
+      (math.exp vs np.exp, same formulas). The "0 callers" finding refers to core.py having
+      no callers — but coupled_engine.py independently re-implemented and wired them correctly.
+  - no_canonicalization_needed_yet: |
+      Left local copies in coupled_engine.py rather than importing from core.py.
+      Keeps hermes-NLCDM self-contained. Discriminative tests prove equivalence.
+  - proof_split_lemma1_vs_lemma23: |
+      Lemma 1 (normalization Taylor expansion) deferred to Python validation.
+      Lemmas 2-3 (algebraic, provable now) are the load-bearing results.
+      Unnormalized case X@(x+εδ) = X@x + εX@δ is EXACT, no approximation needed.
+  - phase_11_structure: |
+      Phase 11a: Cov(X@δ, X@δ) = X^TX/d + define Pearson correlation + Corr lower bound
+      Phase 11b: Connect Corr bound to Phase 8 bridge criterion (closes the loop)
+
+findings:
+  rem_explore_mechanism: |
+    Python rem_explore_cross_domain_xb (dream_ops.py:1163) implements PGO wave simulation:
+    1. Sample cross-cluster pairs (x_i, x_j)
+    2. Generate K=10 random perturbation vectors δ_k, scale ε=0.01
+    3. Compute responses: r_i = X @ normalize(x_i + εδ_k), r_j = X @ normalize(x_j + εδ_k)
+    4. Pearson-correlate r_i and r_j across all K*N values
+    5. Pairs with |corr| > 0.3 are associations
+
+    Key mathematical insight: X@(x+εδ) = X@x + εX@δ. The Pearson correlation of responses
+    is driven by the shared εX@δ term. Cov(X@δ, X@δ) = X^TX/d for uniform δ on S^{d-1}.
+    This means perturbation-response covariance IS the coupling matrix. That's why it works.
+
+  loogle_results: |
+    Building blocks for Phase 11 proof:
+
+    Matrix linearity:
+      - Matrix.mulVec_add (Data.Matrix.Mul) — X@(a+b) = X@a + X@b
+      - Matrix.mulVec_smul (Data.Matrix.Mul) — X@(c·v) = c·(X@v)
+      - Matrix.vecMul_transpose (Data.Matrix.Mul) — v^T·X = X^T·v
+
+    Inner product:
+      - inner_add_left (Analysis.InnerProductSpace.Basic) — ⟨a+b,c⟩ = ⟨a,c⟩+⟨b,c⟩
+      - inner_smul_left (Analysis.InnerProductSpace.Basic) — ⟨c·a,b⟩ = c·⟨a,b⟩
+
+    Covariance/Variance (66+ theorems):
+      - ProbabilityTheory.covariance (Probability.Moments.Covariance)
+      - ProbabilityTheory.covariance_add_left — Cov(f+g, h) = Cov(f,h)+Cov(g,h)
+      - ProbabilityTheory.covariance_const_mul_left — Cov(c·f, g) = c·Cov(f,g)
+      - ProbabilityTheory.covariance_const_left — Cov(const, f) = 0
+      - ProbabilityTheory.covariance_comm, covariance_same
+      - ProbabilityTheory.variance (Probability.Moments.Variance) — 75+ theorems
+
+    MISSING from Mathlib:
+      - Pearson correlation definition (need to define: Cov/sqrt(Var·Var))
+      - Expectation of X^T δ ⊗ X^T δ for uniform δ on S^{d-1}
+        (but can be stated algebraically for finite samples)
+      - Normalization Taylor expansion (deferred to Python)
+
+  proof_strategy: |
+    THREE LEMMAS (two for Lean, one for Python):
+
+    Lemma 1 (PYTHON ONLY — too hard for Lean):
+      normalize(x + εδ) ≈ x + ε(δ - ⟨x,δ⟩x) + O(ε²)
+      Needs analysis on S^{d-1}, explicit error bounds. Deferred.
+
+    Lemma 2 (LEAN — algebraic, load-bearing):
+      Cov(X@δ, X@δ) = X^TX/d for uniform δ
+      "Perturbation-response covariance IS the coupling matrix"
+      Uses: Matrix.mulVec_add, covariance_add_left, covariance_const_mul_left
+      Can state for finite samples to avoid spherical measure.
+
+    Lemma 3 (LEAN — algebraic):
+      Corr(r_i, r_j) ≥ monotone function of (X^TX)_{ij} / sqrt((X^TX)_{ii}·(X^TX)_{jj})
+      Follows from Lemma 2 + Cauchy-Schwarz infrastructure
+
+    BRIDGE TO PHASE 8:
+      If Corr ≥ threshold implies Phase 8 bridge condition (dotSim ≥ τ),
+      then REM-explore discovery → bridge formation → transfer is formally verified end-to-end.
+
+  what_the_theorem_covers: |
+    MEMORY (proven, Phases 1-10): store cross-domain thought → dream consolidation →
+    centroid formation → bridge persistence → retrieval. "Remembering insights you've had."
+
+    CREATIVITY (Phase 11 target): within-domain query → REM perturbation →
+    cross-domain discovery. "Generating insights you haven't had."
+
+    The tribunal's discriminative finding (from earlier session):
+    - Transfer theorem works when query IS the cross-domain thought (100% delta>0)
+    - Fails when query is pure within-domain hoping for bridge (0% delta>0)
+    - REM-explore empirically works (5 associations on real embeddings) via perturbation-response
+    - Phase 11 would formalize WHY perturbation-response works → close the creativity gap
+
+worked:
+  - "TLDR impact/calls mapping gave complete integration surface without reading files"
+  - "Mock-patching dream_cycle_xb to capture importances kwarg for wiring verification"
+  - "Clustering patterns (same-centroid + spread) to create enough similarity for dream pruning"
+  - "Fixed seed + manual time manipulation for reproducible temporal tests"
+  - "Loogle finds Mathlib theorems reliably with exact identifier names"
+
+failed:
+  - "TLDR structure/extract fails with relative paths — needs absolute paths"
+  - "TLDR calls fails when given single file — needs project directory"
+  - "Chaining multiple printf|loogle in one bash command — pipes interfere"
+  - "test_novelty_decays_monotonically with large ages (1000+) — exp(-50) indistinguishable from 0"
+
+next:
+  - step: "Phase 11a — PerturbationResponse.lean"
+    details: |
+      Create proofs/hermes-NLCDM/HermesNLCDM/PerturbationResponse.lean
+
+      Definitions needed:
+        - responseVector (X : Matrix, x : Vector, δ : Vector) = X.mulVec (x + ε • δ)
+        - pearsonCorr (f g : Ω → ℝ) = Cov(f,g) / sqrt(Var(f) · Var(g))
+
+      Lemma 2: response_covariance_eq_coupling
+        For δ uniform, E[X@δ ⊗ X@δ] = X^TX / d
+        Approach: state for finite samples, use algebraic identity
+        X@(x+εδ) = X@x + εX@δ (exact, Matrix.mulVec_add + mulVec_smul)
+        Cov(X@x + εX@δ, X@x + εX@δ) = ε²·Cov(X@δ, X@δ) (covariance_const_left + const_mul)
+
+      Lemma 3: response_correlation_lower_bound
+        Corr(r_i, r_j) ≥ monotone function of row similarity in X^TX
+        Uses Lemma 2 + Cauchy-Schwarz
+
+      Imports needed:
+        - Mathlib.Probability.Moments.Covariance
+        - Mathlib.Probability.Moments.Variance
+        - Mathlib.Data.Matrix.Mul
+        - Mathlib.Analysis.InnerProductSpace.Basic
+        - HermesNLCDM.BridgeFormation (for dotSim, isBridge)
+
+  - step: "Phase 11b — Connect to bridge criterion"
+    details: |
+      Theorem: response_correlation_implies_bridge
+        If Corr(r_i, r_j) ≥ threshold AND both patterns have sufficient
+        alignment with a centroid, then the Phase 8 bridge condition holds.
+
+      This closes: REM-explore discovery → bridge formation → conditional persistence → transfer
+      Full formally verified chain for the creativity mechanism.
+
+  - step: "Python validation — normalization gap"
+    details: |
+      Test that normalization (Lemma 1, deferred) doesn't break Lean bounds:
+      1. Run rem_explore_cross_domain_xb on real embeddings WITH and WITHOUT normalization
+      2. Measure gap between Corr values
+      3. If gap < threshold, the Lean proof covers operational mechanism
+      File: test_normalization_gap.py in proofs/hermes-NLCDM/python/
+
+  - step: "Update HermesNLCDM.lean with Phase 11 imports"
+  - step: "Push to parcadei/mimir after Phase 11"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/python/test_wiring_discriminative.py
+    - thoughts/shared/handoffs/general/2026-03-02_19-30_phase-11-perturbation-response-formalization.yaml
+  modified: []
+
+background_state:
+  - "18 Lean modules, Phases 1-10 complete, 2293 jobs build clean, 0 sorry"
+  - "188/188 Python tests passing (162 existing + 26 new wiring tests)"
+  - "1455/1455 tests passing in hermes-memory"
+  - "parcadei/mimir repo LIVE — https://github.com/parcadei/mimir (private)"
+  - "V1 bridge functions have working local copies in coupled_engine.py (numerically equivalent)"
+  - "DSA vectorization complete: 149-204x speedup on rem_unlearn_xb"
+  - "MonotonicityChain.lean exists (Phase 9a, created by another session)"
+
+key_references:
+  - "proofs/hermes-NLCDM/python/dream_ops.py:1163 — rem_explore_cross_domain_xb (mechanism to formalize)"
+  - "proofs/hermes-NLCDM/HermesNLCDM/ConditionalMonotonicity.lean:167-179 — bridge_count_grows_on_insert (consequence already proven)"
+  - "proofs/hermes-NLCDM/HermesNLCDM/BridgeFormation.lean — Phase 8 bridge definitions (dotSim, isBridge)"
+  - "proofs/hermes-NLCDM/HermesNLCDM/TransferDynamics.lean — Phase 10 transfer_via_bridge"
+  - "proofs/hermes-NLCDM/python/test_wiring_discriminative.py — 26 discriminative wiring tests"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:49-61 — V2 local copies of bridge functions"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:141-155 — _compute_effective_importance"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:254-353 — dream() method"
+  - "proofs/hermes-memory/python/hermes_memory/core.py:111,99,144 — V1 originals (strength_decay, importance_update, novelty_bonus)"

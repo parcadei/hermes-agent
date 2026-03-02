@@ -1,0 +1,111 @@
+root_span_id: f14836bf-5468-4003-9282-4eab5c483415
+turn_span_id: 3c982053-9b56-47e1-b29d-0f9ab2288c3c
+session_id: f14836bf-5468-4003-9282-4eab5c483415
+title: "NLCDM EnergyBounds.lean — Proof Progress"
+date: "2026-03-01T13:45:00Z"
+status: in_progress
+
+tasks:
+  - name: "Fix all 8 sorrys in hermes-NLCDM Phase 1"
+    status: in_progress
+    subtasks:
+      - name: "EnergyBounds.lean — lse_ge_max"
+        status: done
+        notes: "Proved via single_le_sum + exp positivity"
+      - name: "EnergyBounds.lean — lse_le_max_plus"
+        status: done
+        notes: "Proved via sum_le_sum + log monotonicity + inv_mul_cancel"
+      - name: "EnergyBounds.lean — dot_le_norms (Cauchy-Schwarz)"
+        status: done
+        notes: "Proved via discriminant method: specialize t = -dot/sqNorm_v, then field_simp + ring"
+      - name: "EnergyBounds.lean — localEnergy_bounded_below"
+        status: done
+        notes: "Proved via lse_le_max_plus + Cauchy-Schwarz + AM-GM (nlinarith with sq_nonneg)"
+      - name: "EnergyBounds.lean — smoothWeight_abs_le"
+        status: done
+        notes: "Proved via unfold smoothWeight, factor out s, abs_mul, sigmoid bounds"
+      - name: "EnergyBounds.lean — couplingEnergy_abs_le"
+        status: needs_fix
+        notes: |
+          Proof strategy is correct but has a type mismatch issue.
+          After `simp only [sqNorm]` + `set ni/nj/dot`, the `dot_le_norms` lemma
+          returns `sqNorm` types but we need raw sum types. Fix: don't unfold sqNorm
+          in the coupling proof, OR use `show` to cast types.
+          Also the nlinarith associativity issue with (1/2) * ni * nj vs 1/2 * (ni*nj).
+      - name: "EnergyBounds.lean — totalEnergy_bounded_below"
+        status: done
+        notes: "Trivial: witness with totalEnergy itself, le_refl"
+      - name: "LocalMinima.lean — softmax_concentration"
+        status: pending
+      - name: "LocalMinima.lean — localEnergyGrad_small_at_pattern"
+        status: pending
+      - name: "LocalMinima.lean — hessian_positive_definite_at_pattern"
+        status: pending
+
+critical_discovery:
+  autoImplicit_false: |
+    The lakefile sets `autoImplicit := false`. When using `lake build` (which the
+    compiler-in-the-loop hook uses), β, M, R must be explicitly declared as
+    variables or parameters. `lake env lean` was more permissive — it allowed
+    autoImplicit. ALL theorems in EnergyBounds.lean need explicit variable decls.
+
+    Fix: Add `variable (β : ℝ) (M : ℝ) (R : ℝ)` at the top of the namespace,
+    OR make them explicit parameters in each theorem signature like:
+      theorem lse_ge_max {N : ℕ} [NeZero N] {β : ℝ} (hβ : 0 < β) ...
+
+    Energy.lean handles this by passing β through SystemConfig.β or as explicit
+    function params (e.g., `logSumExp (β : ℝ)`).
+
+  compiler_hook_only_fires_on_Write: |
+    The compiler-in-the-loop hook (PostToolUse) only triggers on `Write` tool,
+    NOT `Edit`. Line 184 of compiler-in-the-loop.mjs:
+    `if (input.tool_name !== "Write")`. Use Write for .lean files to get
+    compiler feedback + Goedel-Prover suggestions.
+
+  loogle_binary_location: |
+    ~/tools/loogle/.lake/build/bin/loogle — works with mathlib.idx.
+    NOT on PATH as `loogle-search`. Use full path:
+    ~/tools/loogle/.lake/build/bin/loogle "query"
+    First query takes ~10s to load 343MB index. Use for finding Mathlib lemma names.
+
+learnings:
+  - "positivity tactic handles exp/sum positivity goals well"
+  - "div_lt_div_of_pos_left works for reciprocal monotonicity"
+  - "simp [smoothWeight] works for zero-at-zero proofs"
+  - "Finset.single_le_sum needs explicit (f := ...) annotation sometimes"
+  - "nlinarith [sq_nonneg (r - |M|), sq_abs M] proves AM-GM style bounds"
+  - "field_simp + ring is the go-to combo for algebraic simplification with division"
+  - "Cauchy-Schwarz discriminant proof: expand ∑(u+tv)², specialize t=-dot/sqNorm_v"
+  - "abs_mul, abs_neg, abs_of_nonneg are key for absolute value manipulation"
+  - "Real.sqrt_sq_eq_abs converts sqrt(M²) to |M| regardless of M sign"
+  - "Finset.sup'_le proves bounds on sup' by bounding each element"
+
+remaining_work:
+  - step: "Fix autoImplicit issue in EnergyBounds.lean"
+    detail: |
+      Add explicit variable declarations for β, M, R. Two approaches:
+      1. Add `variable {β : ℝ}` after `namespace HermesNLCDM` for lse theorems
+      2. Use {β : ℝ} in each theorem signature
+      The localEnergy_bounded_below already gets β from cfg.β_pos, but needs
+      explicit M. totalEnergy_bounded_below needs explicit R.
+  - step: "Fix couplingEnergy_abs_le type mismatch"
+    detail: |
+      Don't use `simp only [sqNorm]` — keep sqNorm opaque so dot_le_norms matches.
+      Instead unfold couplingEnergy/cosineSim and use `show` to bridge between
+      √(∑ x_i k²) and √(sqNorm x_i). Or prove a helper:
+        have : √(∑ k, x_i k ^ 2) = √(sqNorm x_i) := by unfold sqNorm
+  - step: "Prove 3 LocalMinima.lean sorrys"
+    detail: |
+      softmax_concentration: finite-β exponential bound, hardest
+      localEnergyGrad_small_at_pattern: depends on softmax_concentration
+      hessian_positive_definite_at_pattern: 2nd order condition, covariance PSD
+
+artifacts:
+  - path: "proofs/hermes-NLCDM/HermesNLCDM/EnergyBounds.lean"
+    notes: "Main file being worked on — 6/8 proofs logically done, needs autoImplicit fix"
+  - path: "proofs/hermes-NLCDM/HermesNLCDM/Energy.lean"
+    notes: "Definitions file — compiles clean, no sorrys"
+  - path: "proofs/hermes-NLCDM/HermesNLCDM/LocalMinima.lean"
+    notes: "3 sorrys remaining — hardest proofs"
+  - path: "proofs/hermes-NLCDM/python/tests/test_energy.py"
+    notes: "15/15 tests passing"

@@ -1,0 +1,63 @@
+root_span_id: 790eb44e-cbeb-4c45-a2be-0282dc39ae17
+turn_span_id: 
+session_id: 790eb44e-cbeb-4c45-a2be-0282dc39ae17
+---
+session: hermes-refactor-pr-review
+date: 2026-02-27
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: Fix all PR review findings from AIAgent decomposition (parcadei/hermes-agent#1) and update tdd-pipeline skill
+now: Address remaining upstream PR comments (7 issues not from our refactor) and resolve any new review comments
+
+test: /Users/cosimo/.hermes/hermes-agent/venv/bin/python3 -m pytest tests/ -q --tb=short
+
+done_this_session:
+  - task: Pulled and triaged all 14 PR comments from CodeRabbit and Cursor bots
+    files: []
+  - task: Classified 7 issues as refactor bugs vs 7 as upstream catchup
+    files: []
+  - task: Fixed all 7 refactor bugs with regression tests (235→250 tests passing)
+    files: [agent/session_persister.py, agent/tool_executor.py, run_agent.py, tests/agent/test_session_persister.py, tests/agent/test_tool_executor.py, tests/test_lazy_tools_init.py]
+  - task: Committed and pushed fix (commit 6ad6e9a after rebase on fork/refactor/aiagent-decomposition)
+    files: []
+  - task: Root-caused 3 failure patterns and updated tdd-migration-pipeline skill
+    files: [/Users/cosimo/.claude/skills/tdd-migration-pipeline/SKILL.md]
+
+blockers: []
+
+questions:
+  - Should the 7 upstream issues (approval.py regex bypass, discord debug print, install.sh TTY guard, etc.) be fixed in this PR or filed as separate upstream issues?
+  - Memory store (PostgreSQL) was down - learning not persisted
+
+decisions:
+  - refactor_vs_upstream_split: Classified issues by checking which files appeared in our refactor commit (856ae19) vs upstream merges. Only fixed our 7; left upstream 7 untouched.
+  - property_delegation: Replaced duplicate session_log_file attribute with @property delegating to SessionPersister (Bug 5) rather than adding a sync mechanism.
+  - extraction_boundary_protocol: Added 5-step protocol to tdd-pipeline Phase 5 BUILD LOOP for refactoring work, derived from the 3 failure patterns found.
+
+findings:
+  - blind_extraction_boundary: "Methods moved but callers outside extraction scope (main(), delegate_tool.py via getattr) not updated. tldr impact misses dynamic access."
+  - semantic_ordering_mutation: "self.session_id = new_id ran before parent_session_id or self._session_id evaluated, causing self-referencing parent. Capture-before-mutate rule needed."
+  - incomplete_condition_splitting: "elif name == X and has_db: without complementary elif name == X: error branch caused silent fallthrough."
+  - unit_tests_insufficient_for_extraction: "62 new unit tests passed but mocked the exact integration seams where bugs hid. Entrypoint smoke tests needed."
+
+worked:
+  - Triaging by commit blame (which files in refactor commit vs upstream)
+  - Running tldr impact to trace full call trees of moved methods
+  - Kraken agent for parallel fix application with test verification
+  - Rebasing cleanly after fork diverged (6 new upstream commits)
+
+failed:
+  - Memory store was down (PostgreSQL not running) - postmortem learning not persisted
+
+next:
+  - Check PR for new review comments after push (CodeRabbit/Cursor may re-review)
+  - Address 7 upstream issues if they should be in this PR (tools/approval.py regex bypass is CRITICAL - rm -f -r bypasses approval)
+  - Fix 2 ruff warnings in session_persister.py (unused imports Optional, has_incomplete_scratchpad)
+  - Consider adding entrypoint integration tests (--save_sample, gateway, compression) per the new pipeline protocol
+  - Start PostgreSQL and store the postmortem learning
+
+files:
+  created: [/Users/cosimo/.hermes/hermes-agent/.scout/tdd-pipeline-summary.md]
+  modified: [agent/session_persister.py, agent/tool_executor.py, run_agent.py, tests/agent/test_session_persister.py, tests/agent/test_tool_executor.py, tests/test_lazy_tools_init.py, /Users/cosimo/.claude/skills/tdd-migration-pipeline/SKILL.md]

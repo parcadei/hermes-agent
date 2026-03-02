@@ -1,0 +1,145 @@
+root_span_id: cc3140b1-a30e-435a-ac39-aeddc0816a09
+turn_span_id: dc559b4b-feb9-4b9c-a286-4ad2a3e3a212
+session_id: cc3140b1-a30e-435a-ac39-aeddc0816a09
+---
+session: general
+date: 2026-03-02
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "Built conflict resolution benchmark, implemented contradiction-aware store in CoupledEngine, achieved 100% conflict resolution accuracy"
+now: "Add v2_contradiction as 6th condition in longitudinal eval to verify P@1 doesn't regress at 0.938 over 100 days. The 0.85 threshold may cause false positives with messy domain overlap — measure empirically."
+test: |
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_wiring_discriminative.py test_coupled_engine.py test_bridge_integration.py test_dream_ops.py test_strength_decay_dream.py test_longitudinal_eval.py -v --tb=short
+  # Expect: 138 passed
+
+done_this_session:
+  - task: "Built conflict resolution benchmark (TestConflictResolution)"
+    files: [proofs/hermes-NLCDM/python/test_coupled_engine.py]
+    details: |
+      Two tests: test_conflict_resolution_three_conditions and test_conflict_resolution_with_wake_queries.
+      20 facts (10 get updated), controlled embedding geometry (cos ~0.90 within-topic, ~0.20 cross-topic).
+      Sequence: store 20 → age originals 300s → 5 dream cycles → store 10 updates → 5 dream cycles → query all.
+      Three conditions: V2 Coupled, V2+recon η=0.01, V2+recon η=0.1.
+
+  - task: "Measured baseline conflict resolution WITHOUT contradiction-aware store"
+    details: |
+      All three conditions scored identically: 6/10 updated, 10/10 unchanged (80% total).
+      Same 4 topics failed in ALL conditions (3, 5, 8, 9).
+      N_final=30 (all patterns survived — prune threshold 0.95 too high, merge min_group=3 too large).
+      Reconsolidation had ZERO effect — fires only during query AFTER scoring.
+      Wake queries also had zero effect — importance boost doesn't affect query scoring.
+      Root cause: nrem_repulsion_xb pushes apart but direction is geometry-dependent (~60% correct).
+
+  - task: "Implemented contradiction-aware store in CoupledEngine"
+    files: [proofs/hermes-NLCDM/python/coupled_engine.py]
+    details: |
+      Added contradiction_aware=False and contradiction_threshold=0.85 params to __init__.
+      When enabled, store() checks cos similarity with existing patterns.
+      If cos > threshold: replace existing (text, embedding, timestamps), keep max(old, new) importance.
+      Otherwise: append as before.
+      Lines ~87-115 (__init__), ~202-275 (store method).
+
+  - task: "Verified 100% conflict resolution with contradiction-aware store"
+    details: |
+      10/10 updated, 10/10 unchanged, N_final=20 (replacements, not appends).
+      138/138 tests passing (no regressions — contradiction_aware=False by default).
+
+decisions:
+  opt_in_contradiction: |
+    contradiction_aware defaults to False. Existing code paths unaffected.
+    Only TestConflictResolution enables it. This prevents the regression in
+    test_old_memories_pruned_more_than_fresh (which stores 10 tightly-clustered
+    patterns with spread=0.05 → cos~0.997, would be falsely replaced at 0.85).
+  threshold_0_85: |
+    Chosen to match synthetic geometry: cos(original, update) ≈ 0.90 with
+    value_alpha=0.32. Needs calibration against real embeddings (Qwen3-0.6B)
+    where "CEO of Acme is Alice" vs "CEO of Acme is Bob" might be 0.80-0.95.
+
+findings:
+  repulsion_partial_resolution: |
+    Without contradiction-aware store, nrem_repulsion_xb provides ~60% conflict
+    resolution via importance asymmetry (aged originals are movable, fresh updates
+    are anchored). But direction depends on centroid-original-update triangle
+    geometry — 4/10 topics fail because repulsion pushes original CLOSER to centroid.
+  reconsolidation_zero_effect: |
+    Reconsolidation (η=0.01 and η=0.1) had identical results to V2 Coupled.
+    It fires during query AFTER scoring, so single final queries have no effect.
+    Wake queries don't help either — importance boost doesn't affect scoring,
+    and pattern migration toward own embedding is near-no-op.
+  dream_cycle_xb_limitations: |
+    Fixed thresholds prevent conflict resolution:
+    - nrem_prune_xb threshold=0.95: doesn't fire on 0.90-similar pairs
+    - nrem_merge_xb min_group=3: doesn't fire on pairs (size 2)
+    dream_cycle_v2 has adaptive thresholds that might help, but CoupledEngine uses xb.
+  importance_not_in_scoring: |
+    CoupledEngine.query() scores by cosine similarity only. Importance affects
+    dream pruning but NOT query ranking. This limits importance-based conflict
+    resolution to dream-time mechanisms.
+
+worked:
+  - "Opt-in contradiction_aware flag — preserves backward compatibility"
+  - "Replace-on-store with max(old, new) importance — clean, deterministic"
+  - "Controlled embedding geometry for reproducible benchmarks"
+  - "Time manipulation via direct timestamp backdating (no sleep/mocking)"
+
+failed:
+  - "Reconsolidation for conflict resolution — zero effect in store-dream-query paradigm"
+  - "Wake queries for conflict resolution — importance boost doesn't affect scoring"
+  - "Initial attempt with contradiction_aware always-on — broke clustered pattern tests"
+
+next:
+  - step: "Add v2_contradiction as 6th condition in longitudinal eval"
+    details: |
+      Run 100-day simulation with CoupledEngine(contradiction_aware=True).
+      Key concern: with 2000+ ingestions and within_domain_spread=0.04,
+      patterns from same domain have cos ~0.96. At threshold 0.85, ALL
+      same-domain patterns would be replaced instead of accumulated.
+      This would destroy the pattern store — only 10 patterns (one per domain).
+
+      Options:
+      a. Raise threshold to 0.96 for longitudinal eval (above within-domain spread)
+      b. Use the longitudinal eval's own ingestion (bypasses CoupledEngine.store)
+      c. Test with CoupledEngine directly in a separate longitudinal-style test
+
+      The longitudinal eval uses its own numpy arrays, not CoupledEngine.
+      To test contradiction_aware in longitudinal context, either:
+      - Modify run_longitudinal_eval to use CoupledEngine for ingestion, or
+      - Create a new CoupledEngine-based longitudinal test (simpler, cleaner)
+
+  - step: "Calibrate contradiction_threshold against real embeddings"
+    details: |
+      Use Qwen3-0.6B to embed pairs of contradicting facts and measure cosine.
+      Need to find the gap between:
+      - cos(same-topic-different-answer): should be ABOVE threshold
+      - cos(same-domain-different-topic): should be BELOW threshold
+      If gap is too narrow, need additional text-based heuristics.
+
+  - step: "Consider importance-weighted query scoring"
+    details: |
+      Current query() uses pure cosine. Adding importance weighting would
+      help conflict resolution even without contradiction-aware store.
+      score = cos_sim * importance^alpha for some alpha.
+      This is a deeper architectural change — needs Lean proof update.
+
+files:
+  modified:
+    - proofs/hermes-NLCDM/python/coupled_engine.py
+    - proofs/hermes-NLCDM/python/test_coupled_engine.py
+
+background_state:
+  - "20 Lean modules (Phases 1-12), 2295 jobs build clean, 0 sorry"
+  - "138/138 Python tests passing (was 136, +2 new conflict resolution tests)"
+  - "Emotional tagging reverted to False in CoupledEngine defaults"
+  - "Reconsolidation implemented but off by default"
+  - "Contradiction-aware store implemented, off by default"
+  - "V2 Coupled P@1=0.938 is the proven baseline (unchanged)"
+
+key_references:
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:87-115 — contradiction_aware params in __init__"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:202-275 — store() with contradiction detection"
+  - "proofs/hermes-NLCDM/python/test_coupled_engine.py:497-780 — TestConflictResolution class"
+  - "proofs/hermes-NLCDM/python/dream_ops.py:843-932 — nrem_repulsion_xb (movable = importance < 0.7)"
+  - "proofs/hermes-NLCDM/python/dream_ops.py:940-968 — nrem_prune_xb (threshold=0.95)"
+  - "proofs/hermes-NLCDM/python/dream_ops.py:1043-1082 — nrem_merge_xb (min_group=3)"

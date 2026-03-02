@@ -1,0 +1,204 @@
+root_span_id: mimir-integration-map
+session_id: mimir-integration-map
+---
+session: general
+date: 2026-03-02
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "TLDR-mapped integration surface between hermes-memory and hermes-NLCDM. Identified 3 bridge functions with 0 callers. Loogle-searched Mathlib monotonicity composition theorems. Next: prove monotonicity chain in Lean, then wire."
+now: "Prove the monotonicity chain in Lean (MonotonicityChain.lean). Then wire core.py functions into CoupledEngine/orchestrator."
+test: |
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_dream_redesign.py test_vectorize_dsa.py test_coupled_engine.py -v --tb=short
+
+done_this_session:
+  - task: "Created private repo parcadei/mimir from proofs/ directory"
+    files: []
+    details: "98 files, 224k lines. Excluded .lake/ (13.4GB), embeddings_170k.npy (665MB). Committed as parcadei with noreply email. https://github.com/parcadei/mimir"
+  - task: "TLDR structure + calls mapping of both systems"
+    files: []
+    details: |
+      hermes-memory: 11 files, 141 call edges. Pipeline: orchestrator → encoding → contradiction → consolidation → recall
+      hermes-NLCDM: dream_ops.py (20 functions), coupled_engine.py (CoupledEngine class), nlcdm_core.py (8 primitives)
+  - task: "TLDR impact analysis on bridge functions"
+    files: []
+    details: |
+      core.py:strength_decay — 0 callers in production (only markov_chain.py simulation)
+      core.py:importance_update — 0 callers anywhere
+      core.py:novelty_bonus — called only by core.py:boosted_score (internal)
+      All three are Lean-proven but unwired.
+  - task: "Loogle search for Mathlib monotonicity composition theorems"
+    files: []
+    details: "Found 4 key theorems (see loogle_results below)"
+  - task: "Identified exact wiring points and monotonicity chain structure"
+    files: []
+
+decisions:
+  - lean_before_wire: "User decided to prove monotonicity chain in Lean FIRST, then wire Python. Rationale: proven system to design off of, avoid finding issues later."
+  - mimir_repo_created: "Private repo parcadei/mimir houses all proofs. Both hermes-memory and hermes-NLCDM Lean + Python."
+
+findings:
+  tldr_integration_map: |
+    HERMES-MEMORY (V1 — proven dynamics, 0 production callers):
+      orchestrator.py → encoding → contradiction → consolidation → recall
+      core.py has: strength_decay, importance_update, soft_select,
+                   novelty_bonus, steady_state_strength
+      ALL have 0 callers from orchestrator or any production code.
+      Only called by: markov_chain.py (simulation), engine.py (standalone sim)
+
+    HERMES-NLCDM (V2 — Hopfield substrate + dream pipeline):
+      CoupledEngine.dream() → dream_cycle_xb()
+        → nrem_repulsion_xb → nrem_prune_xb → nrem_merge_xb
+        → rem_unlearn_xb → rem_explore_cross_domain_xb
+      CoupledEngine.query() → spreading_activation → hopfield_update
+      Accepts: importances: np.ndarray  ← THIS IS THE BRIDGE SLOT
+      Currently: importances defaults to 0.5 uniform (no decay signal)
+
+  three_bridge_functions: |
+    1. strength_decay(S₀, β_decay, t) → S(t)
+       Source: hermes-memory/core.py — Lean proven in StrengthDecay.lean
+       Target: importances parameter of dream_cycle_xb
+       Property: Antitone in t (strength decreases over time)
+
+    2. importance_update(base_importance, access_count, recency)
+       Source: hermes-memory/core.py — uses clamp01
+       Target: per-pattern importance driving prune/merge priority
+       Property: Monotone in access_count, Antitone in time-since-access
+
+    3. novelty_bonus(t, t_store)
+       Source: hermes-memory/core.py — exploration window
+       Target: new pattern importance at CoupledEngine.store() time
+       Property: Antitone in (t - t_store) after initial window
+
+  monotonicity_chain: |
+    The composition claim to prove:
+
+    time increases (Monotone)
+    → strength_decay output decreases (Antitone — proven in StrengthDecay.lean: decay_antitone)
+    → importance fed to dream decreases for old patterns (Antitone.comp_monotone)
+    → dream prune preferentially removes low-importance (Monotone: lower importance → higher prune probability)
+    → N decreases or stays same (Antitone in importance of weakest pattern)
+    → capacity condition N < exp(βδ)/(4βM²) becomes easier (Monotone in N_max/N ratio)
+    → system safety preserved (QED)
+
+    Each link is either Monotone or Antitone with known composition rules.
+
+  loogle_results: |
+    From local Loogle (~/tools/loogle) confirmed against Mathlib:
+
+    From Mathlib.Order.Monotone.Defs:
+      1. Monotone.comp: Monotone g → Monotone f → Monotone (g ∘ f)
+      2. Antitone.comp: Antitone g → Antitone f → Monotone (g ∘ f)
+      3. Monotone.comp_antitone: Monotone g → Antitone f → Antitone (g ∘ f)
+      4. Antitone.comp_monotone: Antitone g → Monotone f → Antitone (g ∘ f)
+
+    From Mathlib.Analysis.Complex.Exponential:
+      5. Real.exp_monotone: Monotone Real.exp
+
+    For exp(-βt) antitone: compose Real.exp_monotone with Monotone.comp_antitone
+    where f(t) = -βt is antitone for β>0. Or prove directly from exp_monotone + neg.
+
+    Loogle binary: ~/tools/loogle/.lake/build/bin/loogle
+    Usage: loogle [QUERY] or printf 'QUERY\n' | loogle -i
+    Note: ~10s cold start per query (343MB index). Consider loogle-server for batching.
+
+    Composition chain for the bridge theorem:
+      Monotone(time) → Antitone(decay via exp(-βt)) → Monotone(importance_from_strength)
+      → Antitone(prune_survival: lower imp → less survival) → Antitone(N)
+      → Monotone(capacity_margin: fewer N → easier)
+    Net: Antitone in time → capacity margin is non-decreasing.
+    Use: alternating Antitone.comp_monotone / Monotone.comp_antitone.
+
+  reasoning_trace_centroids_validated: |
+    Another instance validated 6/6 claims for reasoning trace centroids:
+    1. S_TT block-diagonality 2.47x (traces self-organize by strategy)
+    2. 0→25 cross-domain associations (killer result — traces CREATE bridges)
+    3. S_CT effective rank 18/20 (each trace is independent transfer path)
+    4. Association growth 6→11→15 across dream cycles (no rank collapse)
+    5. Spreading activation converges toward centroid (+0.079 cos_sim)
+    6. Energy wells 2x deeper at trace centroids vs random interpolation
+    Test file: proofs/hermes-NLCDM/python/test_reasoning_trace_centroids.py
+
+  lean_proof_systems_current_state: |
+    hermes-memory Lean (6 files):
+      StrengthDecay.lean — S(t)=S₀·e^(-β·t), decay_antitone, tends_to_zero, steady_state
+      SoftSelection.lean — soft_select ∈ (0,1), monotone in strength
+      NoveltyBonus.lean — exploration window properties
+      MemoryDynamics.lean — forgetting curve R(t)=e^(-t/S)
+      ComposedSystem.lean — composition safety (anti-lock-in, anti-thrashing, anti-cold-start)
+      ContractionWiring.lean — Banach fixed-point, unique stationary state
+
+    hermes-NLCDM Lean (14 files):
+      Energy.lean, EnergyBounds.lean, LocalMinima.lean — energy landscape
+      Dynamics.lean — Hopfield update descent (strict at non-fixed points)
+      Coupling.lean — coupling bounds
+      Capacity.lean — N < exp(βδ)/(4βM²)
+      Modular.lean — block-diagonal structure
+      BlockDiagonal.lean — 14 items
+      WeightUpdate.lean, Temperature.lean — parameterization
+      SpuriousStates.lean — destabilization conditions
+      EnergyGap.lean — 10 theorems
+      Lyapunov.lean — coordinate descent Lyapunov function
+      BasinVolume.lean — basin radius ≥ δ/2
+
+worked:
+  - "TLDR structure + calls + impact gave complete integration map without reading files"
+  - "Loogle web fetch worked for finding Mathlib theorems"
+  - "impact analysis revealed the critical gap: 0 callers on proven functions"
+
+failed:
+  - "Loogle URL encoding needed specific query syntax — first two queries returned errors"
+
+next:
+  - step: "Create MonotonicityChain.lean (or BridgeTheorem.lean) in hermes-NLCDM"
+    details: |
+      Import Mathlib.Order.Monotone.Defs for Monotone.comp, Antitone.comp_monotone etc.
+      Prove the 5-link chain:
+        1. time_monotone : Monotone (fun t => t)  -- trivial
+        2. decay_antitone : Antitone (strength_decay S₀ β_decay)  -- already in StrengthDecay.lean
+        3. importance_antitone : Antitone (importance_from_strength)  -- new: lower strength → lower importance
+        4. prune_monotone : Monotone (fun imp => prune_removes_below imp)  -- new: lower importance → more pruning
+        5. capacity_monotone : Monotone (fun N => capacity_satisfied N beta delta)  -- from Capacity.lean: fewer N → easier
+      Compose with Antitone.comp_monotone / Monotone.comp_antitone chain.
+    lean_imports_needed:
+      - "Mathlib.Order.Monotone.Defs"
+      - "HermesNLCDM.Capacity (for N < exp(βδ)/(4βM²))"
+      - "May need to port/reference StrengthDecay.lean decay_antitone from hermes-memory"
+  - step: "Wire Python after Lean proof"
+    details: |
+      1. strength_decay(S₀, β, t) → importance parameter in dream_cycle_xb
+      2. importance_update into CoupledEngine to replace uniform 0.5
+      3. novelty_bonus into CoupledEngine.store()
+      4. MemoryOrchestrator to call CoupledEngine with real importance values
+  - step: "Reasoning trace storage design spec"
+    details: |
+      After wiring, design how reasoning traces get stored as first-class patterns
+      in the Hopfield network. The 0→25 association result shows traces CREATE
+      cross-domain bridges. Design spec should cover: trace encoding, storage format,
+      dream interaction, retrieval mechanism.
+  - step: "Push to parcadei/mimir after Lean proof + wiring"
+
+files:
+  created:
+    - thoughts/shared/handoffs/general/2026-03-02_16-30_tldr-integration-map-monotonicity-chain.yaml
+  modified: []
+
+background_state:
+  - "parcadei/mimir repo LIVE — https://github.com/parcadei/mimir (private)"
+  - "Another instance working on Lean proofs (unspecified which theorems)"
+  - "Another instance validated reasoning trace centroid claims (6/6 pass)"
+  - "162/162 Python tests passing across all NLCDM test files"
+  - "1455/1455 tests passing in hermes-memory (from encoding hardening session)"
+  - "embeddings_170k.npy exists (665MB, excluded from git)"
+  - "DSA vectorization complete: 149-204x speedup on rem_unlearn_xb"
+
+key_references:
+  - "thoughts/shared/plans/memory-system/dream-redesign-spec.md — full behavioral contracts"
+  - "thoughts/shared/plans/memory-system/architecture.md — V1 architecture plan"
+  - "proofs/hermes-memory/python/hermes_memory/core.py — bridge functions (strength_decay, importance_update, novelty_bonus)"
+  - "proofs/hermes-NLCDM/python/dream_ops.py — dream_cycle_xb (importances parameter)"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py — CoupledEngine.dream() entry point"
+  - "proofs/hermes-NLCDM/python/test_strength_decay_dream.py — manual wiring tests (21 tests)"
+  - "proofs/hermes-NLCDM/python/test_reasoning_trace_centroids.py — trace centroid validation"

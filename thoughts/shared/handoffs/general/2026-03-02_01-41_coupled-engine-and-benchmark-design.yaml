@@ -1,0 +1,79 @@
+root_span_id: 34fdc5ee-c739-4919-b1af-9ae3217ea033
+turn_span_id: ebe7be66-dee2-49d4-ba93-25d4cac0c106
+session_id: 34fdc5ee-c739-4919-b1af-9ae3217ea033
+---
+session: general
+date: 2026-03-02
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "Built coupled_engine.py (NLCDM runtime) — 25/25 tests pass, ready for System A vs B benchmark"
+now: "Write benchmark test comparing System A (hermes-memory) vs System B (coupled_engine) vs hybrid"
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_coupled_engine.py test_dream_ops.py test_dream_validation.py -v"
+
+done_this_session:
+  - task: "Built coupled_engine.py — CoupledEngine class with store/query/dream/tag/get_metrics/save/load"
+    files: [proofs/hermes-NLCDM/python/coupled_engine.py]
+  - task: "Built test_coupled_engine.py — 25 tests covering all operations"
+    files: [proofs/hermes-NLCDM/python/test_coupled_engine.py]
+  - task: "Fixed W dimension: (dim,dim) in embedding space, NOT (N,N) — matches dream_ops API contracts"
+  - task: "All 71 tests pass (25 new + 46 existing)"
+
+blockers: []
+
+questions:
+  - "Benchmark scenarios: what realistic workloads? conversational? long-term recall? interference?"
+  - "Hybrid strategy: System A for fast retrieval, System B dream() for offline consolidation? Or System B re-ranks System A top-k?"
+
+decisions:
+  - w_is_dim_dim: "W must be (dim,dim) not (N,N) because dream_ops functions (nrem_replay, rem_unlearn, boltzmann_dynamics) do W @ x where x is (dim,). The spec said N×N but the code contracts require dim×dim."
+  - query_uses_spreading_activation: "Query uses spreading_activation(beta, embeddings, query) from dream_ops rather than manual W-space iteration. This gives pattern-space Hopfield dynamics matching the Lean proofs."
+  - no_cma_es_needed: "CMA-ES was for hermes-memory's 6 arbitrary scoring weights. Coupled engine parameters are physics-derived from the Lean proofs — no optimization search space."
+
+findings:
+  - system_a_api: "hermes-memory engine: score_memory(params, MemoryState, time) → float. Uses weighted sum of relevance, recency, importance, activation. O(N) per query. ParameterSet has 12 params (6 CMA-ES tuned). File: proofs/hermes-memory/python/hermes_memory/engine.py"
+  - system_b_api: "coupled_engine: query(embedding, beta, top_k) → list[dict]. Uses spreading_activation in pattern space. O(N·dim·iters) per query. dream() consolidates offline."
+  - common_interface: "Both accept embeddings and return ranked results. Benchmark needs: (1) common embedding space, (2) shared scenario definition, (3) metrics: precision@k, latency, and quality-after-dream"
+
+worked:
+  - "Hebbian store: W += outer(emb, emb) with zero diagonal — simple, matches Hopfield theory"
+  - "Using spreading_activation from dream_ops for query — reuses proven code"
+  - "Orthogonal patterns for capacity tests — random patterns cause softmax saturation at moderate beta"
+
+failed:
+  - "Initial design had W as (N,N) — all dream_ops calls failed with shape mismatch"
+  - "Initial store() appended entry before computing couplings — embeddings cache included new entry"
+  - "Random pattern capacity tests with beta=5.0 — softmax saturates to single attractor with N>10"
+
+next:
+  - "Write proofs/hermes-NLCDM/python/test_benchmark.py comparing System A vs B vs A+B"
+  - "Benchmark design (3 systems to compare):"
+  - "  System A (hermes-memory): score_memory pipeline, fast scalar scoring"
+  - "  System B (coupled_engine): spreading activation + dream cycles"
+  - "  System A+B (hybrid): System A for fast retrieval, System B dream() for consolidation"
+  - "Benchmark scenarios:"
+  - "  1. Fresh store + immediate retrieval (no dream) — measures raw retrieval"
+  - "  2. Store N memories, dream, then retrieval — measures dream benefit"
+  - "  3. Interference: store similar/contradictory patterns, measure separation after dream"
+  - "  4. Long-term: store 100+ memories over simulated time, measure retrieval decay"
+  - "  5. Latency: wall-clock time per query for each system"
+  - "Metrics: precision@1, precision@5, mean reciprocal rank, latency_ms"
+  - "The hybrid should use System A for <10ms wake queries, System B dream() during idle"
+  - "Need adapter class wrapping hermes-memory engine to share embedding interface with coupled_engine"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/python/coupled_engine.py
+    - proofs/hermes-NLCDM/python/test_coupled_engine.py
+  modified: []
+
+architecture_notes:
+  system_a_location: "proofs/hermes-memory/python/hermes_memory/engine.py"
+  system_a_key_classes: "ParameterSet (12 params, frozen), MemoryState (6 fields, frozen), SimulationResult"
+  system_a_key_functions: "score_memory(params, memory, time) → float, rank_memories, select_memory, step_dynamics, simulate"
+  system_a_imports: "from hermes_memory.core import retention, strength_update, sigmoid, ScoringWeights, score, ..."
+  system_b_location: "proofs/hermes-NLCDM/python/coupled_engine.py"
+  system_b_key_class: "CoupledEngine(dim, beta) with W:(dim,dim), memory_store:list[MemoryEntry]"
+  system_b_key_methods: "store(text, emb, importance), query(emb, beta, top_k), dream(mode, tagged), tag, get_metrics, save/load"
+  bridge_challenge: "System A uses MemoryState(relevance, last_access_time, importance, access_count, strength, creation_time) — no embedding. System B uses embedding vectors. Benchmark needs to assign cosine_sim as relevance for System A."

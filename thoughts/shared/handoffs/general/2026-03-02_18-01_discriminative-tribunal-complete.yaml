@@ -1,0 +1,105 @@
+root_span_id: 51b9dff6-9178-47cf-99f1-d00f8d61ab82
+turn_span_id: 2e62bb7f-1818-4248-93ac-9fe80d4531da
+session_id: 51b9dff6-9178-47cf-99f1-d00f8d61ab82
+---
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Brenner tribunal on Phase 8-10 claims: 18 discriminative tests, all 3 hypotheses assessed. H1 VALIDATED, H2 VALIDATED (vacuous), H3 INCONCLUSIVE."
+now: "Add real-embedding H3 test using embeddings_170k.npy (170k x 1024, 10 domains, delta=0.10) to settle transfer dynamics question. Then integration tests for time-based decay."
+test: |
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_bridge_integration.py -v --tb=short
+
+done_this_session:
+  - task: "Extracted 6 falsifiable hypotheses from Phase 8-10 Lean proofs"
+    files: []
+    details: "Scout agent read BridgeFormation.lean, ConditionalMonotonicity.lean, TransferDynamics.lean and mapped each theorem to Python implementation code with preconditions, observable predictions, and falsification criteria."
+  - task: "Ran Brenner tribunal — 3 parallel agents"
+    files:
+      - proofs/hermes-NLCDM/python/test_bridge_integration.py
+      - proofs/hermes-NLCDM/python/thoughts/tribunal/hypotheses.md
+      - proofs/hermes-NLCDM/python/thoughts/tribunal/discriminative-results.md
+    details: |
+      Test Designer (kraken): Wrote 18 tests, all passing. Validated bounds empirically.
+      Adversarial Critic: H1 YELLOW, H2 YELLOW (vacuous), H3 RED (bound collapse at N=1000).
+      Hypothesis Generator (architect): Found normalization gap (closable), tautology problem (H2),
+        alignment gap problem (H3, CRITICAL), implementation divergence (H3-C, HIGH).
+  - task: "Synthesized tribunal results into discriminative-results.md"
+    files: [proofs/hermes-NLCDM/python/thoughts/tribunal/discriminative-results.md]
+
+decisions:
+  - h1_normalization_safe: "Normalization preserves or strengthens bounds for unit vectors. ||raw_centroid|| <= 1 means cosine >= dot. Gap is closed."
+  - h2_vacuous_not_wrong: "Conditional monotonicity is mathematically correct but operationally vacuous — protected set bridge count is typically 0 because important memories are diverse. Flag for documentation, not a bug."
+  - h3_inconclusive: "Bound is correct but O(sigma/N) at scale. Three open issues: alignment gap delta likely negative for real cross-domain queries, non-negativity assumption unrealistic, Python uses perturbation-correlation not Hopfield transfer."
+
+findings:
+  h3_dot_vs_cosine: |
+    KEY DISCOVERY: At N=1000, dot bound degrades to 0.024 BUT cosine_sim stays at 0.758.
+    ||T(xi)|| shrinks proportionally, preserving direction. The theorem bounds the wrong quantity.
+    A cosine-based bound would be much tighter.
+  h3_alignment_gap_problem: |
+    CRITICAL: For cross-domain queries from domain A, domain-A patterns have HIGHER alignment
+    with the query than the bridge centroid. delta < 0 precisely when you need the theorem.
+    The precondition fails in the very scenario it's designed to address.
+  h3_implementation_divergence: |
+    Python discovers cross-domain associations via rem_explore_cross_domain_xb (perturbation-response
+    correlation at dream_ops.py:1163-1296), NOT Hopfield dynamics. Lean proofs validate mechanism A;
+    code uses mechanism B. Unknown if they correlate.
+  real_embeddings_available: |
+    embeddings_170k.npy: 170,270 x 1024 float32 (Qwen3-Embedding-0.6B)
+    10 semantic domains in test_real_embeddings.py CORPUS fixture
+    Measured alignment gap delta=0.10 (within-domain ~0.46, between-domain ~0.36)
+    Can test H3 with realistic data instead of synthetic vectors.
+
+worked:
+  - "Parallel tribunal pattern (3 agents) produces high-quality adversarial coverage"
+  - "Scout for hypothesis extraction before launching tribunal — agents had precise targets"
+  - "Test designer discovering dot-vs-cosine gap was the key insight"
+
+failed: []
+
+next:
+  - step: "Real-embedding H3 test"
+    details: |
+      Use embeddings_170k.npy + CORPUS domains to test H3 with realistic alignment gaps.
+      Key question: is delta > 0 for cross-domain queries in practice?
+      At delta=0.10, N=1000, beta=5: bound = sigma/607 ≈ 0.001 (vacuous).
+      But cosine might still be strong — test both dot and cosine.
+      File: add to test_bridge_integration.py or new test_h3_real_embeddings.py
+  - step: "Integration tests for time-based decay"
+    details: |
+      From monotonicity-chain handoff: tests with explicit past timestamps,
+      verify low-importance old memories get pruned preferentially.
+      File: proofs/hermes-NLCDM/python/test_bridge_integration.py
+  - step: "Activate novelty_bonus with non-zero defaults"
+    details: "Currently N0=0.0 (off). Suggest N0=0.2, gamma=0.05."
+  - step: "Reasoning trace storage design spec"
+  - step: "Push to parcadei/mimir"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/python/test_bridge_integration.py
+    - proofs/hermes-NLCDM/python/thoughts/tribunal/hypotheses.md
+    - proofs/hermes-NLCDM/python/thoughts/tribunal/discriminative-results.md
+    - thoughts/shared/handoffs/general/2026-03-02_18-01_discriminative-tribunal-complete.yaml
+  modified: []
+
+background_state:
+  - "18 Lean modules, Phases 1-10 complete, 0 sorry, build clean"
+  - "198 + 18 = 216 Python tests passing"
+  - "V1 bridge functions wired into CoupledEngine (decay_rate=0.01, novelty_N0=0.0)"
+  - "parcadei/mimir repo LIVE (private)"
+  - "embeddings_170k.npy available for real-embedding tests"
+
+key_references:
+  - "proofs/hermes-NLCDM/python/test_bridge_integration.py — 18 discriminative tests"
+  - "proofs/hermes-NLCDM/python/thoughts/tribunal/discriminative-results.md — full synthesis"
+  - "proofs/hermes-NLCDM/python/thoughts/tribunal/hypotheses.md — competing hypotheses"
+  - "proofs/hermes-NLCDM/python/embeddings_170k.npy — 170k real embeddings for H3 tests"
+  - "proofs/hermes-NLCDM/python/test_real_embeddings.py — CORPUS fixture with 10 domains"
+  - "proofs/hermes-NLCDM/HermesNLCDM/TransferDynamics.lean — Phase 10 (H3 theorem)"
+  - "proofs/hermes-NLCDM/python/dream_ops.py:1163-1296 — rem_explore_cross_domain_xb (mechanism B)"
+  - "thoughts/shared/handoffs/general/2026-03-02_18-00_monotonicity-chain-proven-bridge-wired.yaml — previous handoff"

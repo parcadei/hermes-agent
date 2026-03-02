@@ -1,0 +1,85 @@
+root_span_id: 8fd10887-1429-40be-ae8d-2efcf6a887ce
+turn_span_id: a955c211-416c-43b3-9137-23c2dd8fb425
+session_id: 8fd10887-1429-40be-ae8d-2efcf6a887ce
+---
+session: general
+date: 2026-03-02
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "Benchmark System A vs B vs Hybrid — validated modern Hopfield capacity is exponential in β, not classical α≈0.138"
+now: "Rewrite benchmark capacity cliff to sweep β, kill W matrix from coupled_engine, redesign dream ops on {X, β}"
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_coupled_engine.py test_dream_ops.py test_dream_validation.py test_benchmark.py -v"
+
+done_this_session:
+  - task: "Built test_benchmark.py — SystemAAdapter, HybridEngine, 3 hard scenarios (clustered, temporal interference, capacity cliff)"
+    files: [proofs/hermes-NLCDM/python/test_benchmark.py]
+  - task: "Ran benchmark — 13/13 tests pass, 83/83 total across all test files"
+  - task: "Validated exponential capacity: β sweep (5,10,20,50) confirms N_max = exp(βδ)/(4βM²)"
+    files: [proofs/hermes-NLCDM/python/test_benchmark.py]
+  - task: "Confirmed query path uses modern Hopfield (spreading_activation, softmax attention) — NOT classical W·x"
+
+blockers: []
+
+questions:
+  - "Should W matrix be eliminated entirely from coupled_engine? The proofs never use it. Dream ops should work on {X, β} only."
+  - "NREM-replay currently does Hebbian W update after spreading_activation — should it instead adjust per-pattern β or reinforce pattern in X?"
+  - "REM-unlearn uses boltzmann_dynamics(W, ...) which is classical. Should it use low-β spreading_activation(X, ...) instead?"
+
+decisions:
+  - relevance_dominant_params: "SYSTEM_A_PARAMS uses w1=0.85 (relevance), novelty_start=0.01 — makes cosine_sim the dominant scoring factor for fair A vs B comparison"
+  - spread_004: "spread=0.04 gives cos_sim 0.88-0.95 to centroid in dim=128, calibrated empirically"
+  - three_hard_scenarios: "Replaced 5 easy orthogonal-pattern scenarios with 3 discriminative ones: clustered embeddings, temporal interference, capacity cliff"
+
+findings:
+  - beta_controls_capacity: "Capacity is exponential in β. β=5→N_max≈3, β=10→N_max≈75, β=20→N_max≈111K, β=50→N_max≈10^15. All in dim=64. The capacity cliff at β=5 is NOT classical Hopfield failure — it's the modern Hopfield capacity bound being hit at insufficient inverse temperature."
+  - coherence_is_b_advantage: "Ambiguous queries (midpoint of 2 clusters): B coherence=1.0, A coherence=0.68. B's spreading_activation snaps to one attractor basin. A scores independently, returns a mix. This is B's structural advantage."
+  - dream_doesnt_help_yet: "Dream doesn't extend capacity or improve temporal interference. Because dream_ops modify the Hebbian W matrix, which the query path (spreading_activation on pattern store X) doesn't use. The W matrix is vestigial."
+  - w_matrix_is_vestigial: "Query uses spreading_activation(beta, embeddings, query) — pure softmax attention over pattern store. W matrix is only used by dream_ops (nrem_replay Hebbian update, rem_unlearn boltzmann_dynamics, rem_explore). Dream effects don't propagate to queries because queries never touch W."
+  - beta_is_the_control_knob: "β trades capacity vs associativity. High β = exponential capacity, narrow basins, precise lookup. Low β = low capacity, broad basins, associative recall (mixtures). Dream cycles should modulate β, not W."
+  - energy_identity_at_fixedpoints: "E(ξ) = -½‖ξ‖² + β⁻¹·Σp·log(p). Entropy ranges [-log(N), 0]. At high β, entropy term vanishes. At low β, spurious mixture states get massive penalty proportional to log(N)/β. REM-unlearn should exploit this gap."
+
+worked:
+  - "SystemAAdapter wrapping hermes-memory score_memory with embedding interface — clean bridge"
+  - "make_cluster_patterns with calibrated spread=0.04 — realistic embedding space"
+  - "β sweep as capacity validation — directly confirms Capacity.lean theorem"
+  - "Ambiguous query test (midpoint of 2 centroids) — reveals B's structural advantage"
+
+failed:
+  - "Initial SYSTEM_A_PARAMS had w1=0.6, novelty_start=0.5 — novelty bias overwhelmed relevance, System A failed at N>15"
+  - "TestScale with DIM=128, N=150 — can't create 150 orthogonal patterns in 128 dims"
+  - "Dream cycles don't help because they modify W which queries don't use"
+  - "β=5 for capacity cliff — way too low, gives N_max≈3"
+
+next:
+  - "CRITICAL: Update test_benchmark.py capacity cliff to use β sweep (5,10,20,50) instead of fixed β=5. This is the proof validation test."
+  - "CRITICAL: Investigate whether W matrix should be eliminated from coupled_engine.py entirely. The proofs describe {X, β} architecture, not {W, X, β}."
+  - "Redesign dream_ops.py to operate on {X, β} instead of W:"
+  - "  NREM-replay: increase per-pattern β_i (or global β) for tagged patterns → deepen their basins"
+  - "  REM-unlearn: lower β temporarily → destabilize mixture states (wide basins, high entropy per EnergyGap.lean)"
+  - "  REM-explore: search at low β → find new associations via broad basin overlap"
+  - "Rerun temporal interference test after dream redesign — dream should now actually recover old memories"
+  - "Add β as a benchmark parameter to clustered embedding test — show that low β gives associative recall (coherence), high β gives precise retrieval (capacity)"
+  - "Consider per-pattern temperature: β_i for each stored pattern, modulated by dream cycles. Tagged patterns get higher β_i (deeper basins), untagged decay."
+
+files:
+  created:
+    - proofs/hermes-NLCDM/python/test_benchmark.py
+  modified: []
+
+architecture_notes:
+  query_path: "coupled_engine.query() → spreading_activation(beta, embeddings, query) → hopfield_update loop. Pure modern Hopfield. No W involved."
+  dream_path: "coupled_engine.dream() → dream_cycle(W, tagged, embeddings, params) → nrem_replay(W), rem_unlearn(W), rem_explore(W). All modify W. W is never read by query path."
+  the_gap: "Dream modifies W. Query reads X. They're disconnected. This is why dream 'doesn't help' — its effects are invisible to the query path."
+  correct_architecture: "State = {X (pattern store), β (inverse temperature)}. Query = softmax attention over X at β. Dream = modulate β and curate X. No W matrix. Capacity is exp(βδ)/(4βM²)."
+  lean_proof_files:
+    capacity: "proofs/hermes-NLCDM/HermesNLCDM/Capacity.lean — N_max = exp(βδ)/(4βM²)"
+    basin_volume: "proofs/hermes-NLCDM/HermesNLCDM/BasinVolume.lean — Herfindahl index, concentrated vs mixture basins"
+    energy_gap: "proofs/hermes-NLCDM/HermesNLCDM/EnergyGap.lean — E(ξ) = -½‖ξ‖² + β⁻¹·Σp·log(p)"
+    dynamics: "proofs/hermes-NLCDM/HermesNLCDM/Dynamics.lean — energy descent via CCCP"
+  python_files:
+    nlcdm_core: "proofs/hermes-NLCDM/python/nlcdm_core.py — log_sum_exp, softmax, local_energy, coupling_energy (has BOTH modern and classical)"
+    dream_ops: "proofs/hermes-NLCDM/python/dream_ops.py — hopfield_update (modern, correct), boltzmann_dynamics (classical, used by REM), nrem_replay (hybrid: modern retrieval → Hebbian W update)"
+    coupled_engine: "proofs/hermes-NLCDM/python/coupled_engine.py — CoupledEngine class. query() uses spreading_activation (modern). dream() uses W (classical). The mismatch."
+    benchmark: "proofs/hermes-NLCDM/python/test_benchmark.py — SystemAAdapter, HybridEngine, 3 scenarios + β sweep validation"

@@ -1,0 +1,87 @@
+root_span_id: 834bafa2-4159-43af-a17f-f926329d626c
+turn_span_id: 
+session_id: 834bafa2-4159-43af-a17f-f926329d626c
+---
+session: general
+date: 2026-02-27
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: Analyzed Nemori codebase against 5 architecture questions, verified composed scoring Lipschitz bound, documented integration architecture
+now: Build the encoding layer — the gate deciding WHAT from a conversation becomes a memory (upstream of Nemori's segmentation pipeline)
+test: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/test_contraction.py -v
+
+done_this_session:
+  - task: "Cloned nemori-ai/nemori, analyzed full codebase with tldr + file reads"
+    files: []
+  - task: "Mapped Nemori's 3 modules against 5 architecture questions (encoding, granularity, retrieval integration, contradiction, compression)"
+    files: []
+  - task: "Added composed scoring Lipschitz verification to test_contraction.py (2 new tests, 700 Monte Carlo samples)"
+    files: [proofs/hermes-memory/python/tests/test_contraction.py]
+  - task: "Updated MEMORY_SYSTEM.md section 4.4.1 with composed scoring constraint"
+    files: [proofs/hermes-memory/MEMORY_SYSTEM.md]
+  - task: "Created comprehensive nemori.md reference doc for future sessions"
+    files: [thoughts/shared/docs/nemori.md]
+  - task: "Added proofs/ and thoughts/ to .gitignore to prevent accidental push"
+    files: [.gitignore]
+
+blockers: []
+
+questions:
+  - "Encoding policy granularity: per-message classification or per-segment post-segmentation filtering?"
+  - "Should encoding policy be LLM-based (expensive, accurate) or heuristic (cheap, less accurate)?"
+  - "Does the encoding gate sit before Nemori's buffer (reject messages) or after segmentation (reject episodes)?"
+
+decisions:
+  - composed_scoring_constraint: "Extended contraction condition is K < 1 AND w_rec < 0.5. Balanced weights (none > 0.4) always preserve contraction."
+  - two_population_dynamics: "Episodic and semantic memories get separate (alpha, beta) parameter regimes. Both satisfy contraction independently."
+  - nemori_as_formation_layer: "Nemori handles memory formation (segment + narrate + predict-calibrate). Hermes dynamics handle post-formation behavior (decay, selection, novelty)."
+
+findings:
+  - nemori_no_encoding_gate: "Nemori stores EVERYTHING. No policy deciding whether to encode. Segmentation decides HOW to chunk, not WHETHER to store."
+  - nemori_no_dynamics: "No R, S, decay, importance feedback, novelty bonus. SemanticMemory.confidence hardcoded 0.8-0.9, never used for ranking."
+  - nemori_no_retrieval_integration: "search() returns raw dicts. No prompt injection, no context assembly. Caller's problem."
+  - nemori_no_contradiction: "semantic_similarity_threshold=1.0 means dedup effectively disabled. Conflicting facts coexist."
+  - nemori_no_compression: "No episodic-to-semantic aging. No offline consolidation. Episode merging only handles temporal duplicates."
+  - predict_calibrate_works: "18.7% improvement over naive extraction. Core innovation worth keeping."
+  - event_bus_extensible: "Nemori's EventBus (episode_created, episode_deleted) maps cleanly to dynamics — add memory_accessed event."
+
+worked:
+  - "tldr structure + targeted file reads for analyzing unfamiliar codebase"
+  - "Monte Carlo Lipschitz verification via hypothesis property tests"
+  - "Chain rule decomposition of composed scoring into per-component derivatives"
+
+failed: []
+
+next:
+  - "Design encoding policy: what triggers a memory write? Classification of turn types (greeting, correction, preference, fact, reasoning)"
+  - "Decide encoding gate placement: pre-buffer vs post-segmentation"
+  - "Implement encoding layer with tests"
+  - "After encoding: tackle retrieval integration (how memories enter context)"
+  - "After retrieval: tackle contradiction/supersession"
+  - "After contradiction: tackle compression/consolidation"
+
+files:
+  created:
+    - thoughts/shared/docs/nemori.md
+  modified:
+    - proofs/hermes-memory/python/tests/test_contraction.py
+    - proofs/hermes-memory/MEMORY_SYSTEM.md
+    - .gitignore
+
+# Key reference docs for next session:
+#   thoughts/shared/docs/nemori.md — full Nemori architecture analysis, file map, config, gaps, integration points
+#   proofs/hermes-memory/MEMORY_SYSTEM.md — formal verification docs (section 4.4.1 has composed scoring)
+#   /tmp/nemori/ — cloned repo (may need re-clone if /tmp cleaned)
+#
+# The 5 architecture pieces (in order):
+#   1. Encoding (NEXT) — what becomes a memory
+#   2. Retrieval integration — how memories enter context
+#   3. Contradiction/supersession — handling conflicting facts
+#   4. Compression/consolidation — episodic → semantic aging
+#   5. Dynamics wiring — R/S state, scoring, decay (Lean-proven system)
+#
+# Test verification:
+#   cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/ -v
+#   Expected: 127 passed in ~12s

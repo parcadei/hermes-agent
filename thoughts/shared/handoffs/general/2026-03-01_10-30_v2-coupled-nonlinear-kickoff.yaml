@@ -1,0 +1,110 @@
+root_span_id: 2dde120f-e51c-4423-8d51-18d311906760
+turn_span_id: 3a265187-54bf-419a-814d-7598e65ed05b
+session_id: 2dde120f-e51c-4423-8d51-18d311906760
+---
+session: general
+date: 2026-03-01
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Handoff from encoding hardening — scope V2 coupled nonlinear dynamical memory system"
+now: "Build V2 proof system (coupled nonlinear dynamics), then benchmark V1 vs V2 against LoCoMo + MemoryBench"
+
+test: bash /Users/cosimo/.hermes/hermes-agent/proofs/hermes-memory/python/run_tests.sh
+baseline: "1455 passed, 2 xfailed, 0 failed"
+
+done_this_session:
+  - task: "Resumed from encoding-hardening-complete handoff, reviewed full proof system state"
+    files: [thoughts/shared/handoffs/general/2026-02-28_07-15_encoding-hardening-complete.yaml]
+    details: "Read handoff, architecture.md, encoding spec.md, adversarial-findings.md. Verified clean working tree, HEAD at 3a8850d."
+  - task: "Produced ASCII architecture overview of entire proof system"
+    files: []
+    details: |
+      Mapped all 11 modules (8,857 lines impl) + 22 test files (19,398 lines tests) = 28,255 total.
+      Pipeline: encoding → recall → contradiction → consolidation → optimizer, orchestrated.
+      Supporting: core, engine, sensitivity, markov_chain.
+  - task: "Discussed graph-based dynamical storage architecture"
+    files: [thoughts/shared/ideas/graph-dynamical-storage.md]
+    details: |
+      Idea: embed at write time, build graph (edges = similarity), discard embeddings (~97% storage reduction).
+      Retrieval via graph traversal + spreading activation instead of cosine sim.
+      Entry point problem: need seed selection — 4 options explored (keyword/BM25, quantized embeddings,
+      activation-based, category routing). Category routing leverages encoding layer naturally.
+      Saved to thoughts/shared/ideas/graph-dynamical-storage.md.
+  - task: "Scoped V2 project direction"
+    files: []
+    details: |
+      V2 = coupled nonlinear dynamical system version of memory.
+      Plan: build V2 with Lean proofs first, then benchmark V1 vs V2 against LoCoMo and MemoryBench.
+      Starting with Lean proofs (not Python Hypothesis proofs like V1).
+
+blockers: []
+
+questions:
+  - "What specific coupling structure for V2? (e.g., memory-memory coupling, memory-query coupling, both?)"
+  - "Lean 4 or Lean 3 for the formal proofs?"
+  - "Which LoCoMo tasks to target first? (fact recall, temporal reasoning, multi-hop?)"
+  - "Should V1 PR to parcadei/hermes-agent happen before or in parallel with V2?"
+
+decisions:
+  - v2_is_coupled_nonlinear: |
+      V1 proof system uses independent dynamical equations per memory (decoupled).
+      V2 will couple memories — each memory's dynamics depend on neighbors.
+      This enables emergent behavior like memory consolidation via attractor basins.
+  - lean_proofs_first: |
+      V2 starts with formal Lean proofs before Python implementation.
+      Opposite order from V1 (which was Python Hypothesis proofs first).
+      Lean gives stronger guarantees for nonlinear dynamics properties.
+  - benchmark_v1_vs_v2: |
+      Both versions will be benchmarked against LoCoMo and MemoryBench
+      to measure whether coupled dynamics actually improves recall quality.
+
+findings:
+  - v1_proof_system_complete: |
+      6 modules, all audited and hardened. 1455 tests passing.
+      encoding (8 categories + emotional valence + lang detect),
+      recall (ACT-R + cosine + importance + recency),
+      contradiction (semantic conflict + temporal + belief revision),
+      consolidation (merge + compress + pool management),
+      optimizer (dynamics tuning + feedback + contraction),
+      orchestrator (pipeline glue, 9 findings fixed).
+  - graph_storage_fits_dynamical_model: |
+      The spreading activation in recall.py is already graph-compatible.
+      Encoding categories provide natural graph partitions.
+      Graph topology + dynamics may replace vector search entirely.
+
+worked:
+  - "ASCII architecture overview gave clear picture of what exists"
+  - "Idea capture to dedicated file before context loss"
+
+failed: []
+
+next:
+  - "Start V2 coupled nonlinear dynamical system — begin with Lean proofs for coupling invariants"
+  - "Define coupling structure: which memories interact, what governs coupling strength"
+  - "Set up LoCoMo + MemoryBench evaluation harness for both V1 and V2"
+  - "Consider graph-based storage architecture (thoughts/shared/ideas/graph-dynamical-storage.md) as V2 storage layer"
+  - "Optional: PR V1 proof system to parcadei/hermes-agent fork"
+
+files:
+  created:
+    - thoughts/shared/ideas/graph-dynamical-storage.md  # Graph-based dynamical storage idea
+    - thoughts/shared/handoffs/general/2026-03-01_10-30_v2-coupled-nonlinear-kickoff.yaml
+  modified: []
+
+# Key references:
+# Previous handoff: thoughts/shared/handoffs/general/2026-02-28_07-15_encoding-hardening-complete.yaml
+# Architecture: thoughts/shared/plans/memory-system/architecture.md
+# Encoding spec: thoughts/shared/plans/memory-system/encoding/spec.md
+# Adversarial findings: thoughts/shared/plans/memory-system/encoding/adversarial-findings.md
+# Graph storage idea: thoughts/shared/ideas/graph-dynamical-storage.md
+#
+# V1 PROOF SYSTEM (COMPLETE):
+#   encoding.py (1169L), recall.py (867L), contradiction.py (1466L),
+#   consolidation.py (1337L), optimizer.py (1171L), orchestrator.py (864L)
+#   core.py (201L), engine.py (526L), sensitivity.py (1034L), markov_chain.py (210L)
+#   Tests: 1455 passed, 2 xfailed, 0 failed across 22 test files
+#
+# V2 DIRECTION:
+#   Coupled nonlinear dynamics, Lean proofs first, benchmark against LoCoMo + MemoryBench

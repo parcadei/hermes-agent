@@ -67,3 +67,6 @@ import HermesNLCDM.TransferDynamics
 
 -- Phase 11: REM-Explore Perturbation-Response Mechanism
 import HermesNLCDM.PerturbationResponse
+
+-- Phase 12: Emotional Tagging — Prediction-Error-Based Initial Strength
+import HermesNLCDM.EmotionalTagging

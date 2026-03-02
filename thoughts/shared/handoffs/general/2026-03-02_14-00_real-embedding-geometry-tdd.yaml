@@ -1,0 +1,139 @@
+root_span_id: a9d2b038-439c-4785-8095-c28b5cc5624d
+session_id: real-embedding-geometry
+---
+session: general
+date: 2026-03-02
+status: in_progress
+outcome: PARTIAL
+---
+
+goal: "TDD pipeline for real embedding geometry tests. Validate dream consolidation pipeline on Qwen3-Embedding-0.6B (1024-dim) instead of synthetic orthogonal centroids."
+now: "Phases 1-3 complete. 35 tests pass. Bug fixed in dream_cycle_v2. Phase 4 (dream effectiveness) not yet started."
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_real_embeddings.py -v --tb=short"
+
+done_this_session:
+  - task: "Installed sentence-transformers + Qwen3-Embedding-0.6B in .venv"
+    result: "Model loads, dim=1024, unit-normalized. ~8s to embed 200 sentences."
+
+  - task: "Task #2: Test corpus — 200 sentences across 10 domains"
+    result: |
+      20 sentences per domain. Structure:
+        0-4: near-paraphrases (same event, different phrasing)
+        5-14: same-topic varied content
+        15-19: cross-domain (semantic bridge to another domain)
+      CORPUS_METADATA tracks type, related_domain, paraphrase_group.
+      get_all_sentences() flattens to (sentences, domain_indices, domain_names).
+
+  - task: "Task #6: P1a — Embedding infrastructure"
+    result: |
+      _get_model() singleton for Qwen3-Embedding-0.6B
+      encode_sentences() -> (N, 1024) normalized
+      embedded_corpus session fixture (embeddings, sim_matrix, metadata)
+      TestEmbeddingInfrastructure: 3 tests pass
+
+  - task: "Task #7: P1b — Geometry measurement"
+    result: |
+      CRITICAL MEASUREMENTS (Qwen3-Embedding-0.6B, 200 sentences):
+        Within-domain mean cosine: 0.46 (std=0.12, min=0.16, max=0.95)
+        Between-domain mean cosine: 0.36 (std=0.03, min=0.29, max=0.42)
+        Paraphrase pairs: mean=0.85 (std=0.05, min=0.73, max=0.95)
+        Varied pairs: mean=0.45 (std=0.08, min=0.16, max=0.71)
+        Cross-domain: mean=0.43 (std=0.08)
+        Adaptive P70 merge threshold: 0.49
+        Adaptive P90 prune threshold: 0.58
+        Separation gap (within - between): 0.10
+      Top similar domain pairs: health↔fitness (0.42), learning↔fitness (0.40)
+      Cross-domain sentences closer to target than own: 20/50
+
+  - task: "Task #8: P1c — Geometry assertions"
+    result: |
+      5 assertion tests locking in measured geometry:
+        within-domain mean in [0.30, 0.65]
+        paraphrase mean >= 0.75 and 90%+ pairs >= 0.70
+        between-domain mean in [0.20, 0.50]
+        separation gap in (0.02, 0.20)
+        adaptive P70 < 0.75 (below paraphrase band)
+
+  - task: "Task #4: Phase 2 — Store and retrieve"
+    result: |
+      TestRealEmbeddingRetrieval: 3 tests
+      Self-retrieval P@1 at beta=50: measured (agent completed)
+      Domain centroid retrieval at beta=10/20/50
+      Natural language queries: 10 precise + 10 associative at 3 beta values
+
+  - task: "Added TestOverConsolidation to test_dream_lifecycle.py (pre-pipeline)"
+    result: |
+      4 tests verifying v2 dream pipeline doesn't over-consolidate:
+        All 10 domains represented: PASS
+        Domain retrieval P@1 at beta=50: 1.00 (10/10 domains): PASS
+        Domain fidelity by generation: 100% at all levels: PASS
+        Inter-domain separation: gap=0.57, mean inter=-0.01: PASS
+
+  - task: "Task #3: Phase 3 — Lifecycle simulation on real geometry"
+    result: |
+      TestRealGeometryLifecycle: 5 tests, all pass.
+      RESULTS (spread=0.02, dim=1024, real Qwen3 centroids):
+        Consolidation ratio: 3.02% (21 final from 695 ingested)
+        Generation depth: gen-30 in 30 days (same as synthetic!)
+        Domain preservation: 100% (21/21 correctly assigned)
+        Cross-domain patterns: 1 (gen-30, work domain)
+        Pattern count oscillates 11-21 through the simulation
+      BUG FIXED in dream_ops.py: dream_cycle_v2 lines 1536-1550
+        Pruned merge centroids weren't tracked in pruned_indices.
+        Only triggered with real 1024-dim embeddings where adaptive
+        thresholds (merge=0.72, prune=0.73) sit close together,
+        making merge-then-prune common. Fixed by tracking original
+        indices from merge groups whose centroids were subsequently pruned.
+      PREDICTION WAS WRONG: expected shallower hierarchy (gen-3 to gen-10).
+        Got gen-30 — identical to synthetic. Adaptive thresholds self-calibrate
+        regardless of absolute geometry. The P70 percentile is relative to the
+        distribution, so it always fires on the tightest 30% of pairs.
+
+not_started:
+  - task: "Task #1: Phase 4 — Dream effectiveness"
+    description: |
+      At real within-cluster delta, test:
+      1. Are clusters ever near capacity boundary? (Prediction: no — N_max is millions)
+      2. Does repulsion meaningfully change delta_min? (Prediction: barely)
+      3. Does REM-explore find cross-domain associations? (Prediction: yes with real geometry)
+      4. What is the operational purpose of dreams on real geometry?
+
+decisions:
+  - model: "Qwen3-Embedding-0.6B (dim=1024). User specified."
+  - spread: "0.02 for lifecycle simulation (calibrated to keep within-cluster sim in 0.45-0.65)"
+  - corpus_design: "200 sentences, 3 tiers (paraphrase/varied/cross-domain), 10 domains"
+
+findings:
+  geometry_gap: |
+    The separation gap between within-domain (0.46) and between-domain (0.36)
+    is only 0.10. Synthetic tests had gap ~0.90. This is the fundamental
+    challenge: the dream system must consolidate within-domain without
+    crossing the narrow gap to between-domain merging.
+  adaptive_threshold_position: |
+    P70 merge threshold lands at 0.49. This is:
+    - Well below paraphrases (0.85) — they WILL merge
+    - Near varied same-topic (0.45) — some will merge, some won't
+    - Above between-domain max (0.42) — cross-domain merge unlikely
+    - The system should consolidate paraphrases aggressively, varied
+      content moderately, and preserve domain boundaries. Testing this
+      in Phase 3.
+  cross_domain_bridging: |
+    Only 20/50 cross-domain sentences are closer to their target domain
+    than their own. The semantic bridging is real but not dominant.
+    Mean gap (target - own) = -0.026. Cross-domain sentences stay
+    primarily in their home domain while having moderate affinity to
+    the related domain.
+
+files:
+  modified:
+    - proofs/hermes-NLCDM/python/test_dream_lifecycle.py  # added TestOverConsolidation (4 tests)
+  created:
+    - proofs/hermes-NLCDM/python/test_real_embeddings.py  # 200-sentence corpus + P1-P2 tests
+
+next:
+  - "Check agent a36a0a5 (Phase 3 lifecycle) — resume if incomplete"
+  - "Run full regression: test_real_embeddings.py + test_dream_lifecycle.py"
+  - "Phase 4: Dream effectiveness on real geometry"
+  - "Commit all changes"
+  - "Consider: do dreams need a different mechanism for real geometry?"
+  - "Consider: per-cluster adaptive beta based on within-cluster delta"

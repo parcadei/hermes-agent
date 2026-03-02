@@ -1,0 +1,123 @@
+root_span_id: monotonicity-bridge-wiring
+session_id: monotonicity-bridge-wiring
+---
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Proved MonotonicityChain.lean (11 theorems, 0 sorries) and wired V1 bridge functions into CoupledEngine."
+now: "Next: activate novelty_bonus with non-zero defaults, add integration tests for time-based decay in CoupledEngine, then reasoning trace storage design spec."
+test: |
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_dream_redesign.py test_vectorize_dsa.py test_coupled_engine.py test_strength_decay_dream.py test_dream_ops.py test_dream_safety.py test_dream_lifecycle.py test_proof_validation.py -v --tb=short
+
+done_this_session:
+  - task: "Created MonotonicityChain.lean — 11 theorems, 0 sorries"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/MonotonicityChain.lean]
+    details: |
+      Bridge theorem proving system safety is monotonically non-decreasing in time.
+      4-link composition chain using Mathlib's Monotone/Antitone composition:
+        Link 1: bridgeDecay_antitone — S(t)=S₀·e^(-βt) is Antitone in t (concrete proof)
+        Link 2: importance Monotone in strength (hypothesis — behavioral contract)
+        Link 3: active_count Monotone in importance (hypothesis — pruning contract)
+        Link 4: capacityMargin_antitone — N_max-N is Antitone in N (concrete proof)
+      Key theorems:
+        bridge_safety_monotone: capacity margin is Monotone in time (MAIN RESULT)
+        safety_preserved: once safe at t₀, safe for all t≥t₀
+        pattern_count_nonincreasing: N is non-increasing over time
+        monotonicity_chain_AMMA: general Anti-Mono-Mono-Anti→Mono composition
+      Build: 2291 jobs, clean pass.
+  - task: "Wired V1 bridge functions into CoupledEngine"
+    files: [proofs/hermes-NLCDM/python/coupled_engine.py]
+    details: |
+      Three bridge functions added as module-level helpers (_strength_decay, _importance_update, _novelty_bonus).
+      Changes to CoupledEngine:
+        - __init__: added decay_rate=0.01, importance_delta=0.05, novelty_N0=0.0, novelty_gamma=0.1
+        - MemoryEntry: added last_access_time field
+        - _compute_effective_importance(): computes decay + novelty at dream time
+        - dream(): now uses effective importances instead of static m.importance
+        - query(): updates importance via _importance_update on access, refreshes last_access_time
+        - save/load: serializes new fields with backward-compatible defaults
+      All 198 tests pass (126 core + 72 additional suites, 4 skipped).
+  - task: "Updated HermesNLCDM.lean root import"
+    files: [proofs/hermes-NLCDM/HermesNLCDM.lean]
+    details: "Added Phase 9 import for MonotonicityChain.lean. Note: another instance also added Phase 9b ConditionalMonotonicity."
+
+decisions:
+  - separate_lake_restatement: "Restated strengthDecay in NLCDM rather than cross-importing from hermes-memory. The two are separate Lake projects; restating 3 lines of math is cleaner than a cross-project dependency."
+  - abstract_middle_links: "Links 2-3 (importance monotone in strength, count monotone in importance) are hypotheses, not concrete proofs. These are stable architectural contracts — the specific formulas may change but monotonicity is invariant."
+  - conservative_defaults: "decay_rate=0.01 active by default (negligible in tests with ms timescales), novelty_N0=0.0 off by default (additive, would change test behavior). Production code opts into novelty."
+  - dynamic_importance: "Effective importance computed at dream time from base_importance + decay + novelty, not stored. Base importance updated on access via _importance_update."
+
+findings:
+  bridge_wiring_points: |
+    CoupledEngine.dream() line ~278: importances now computed via _compute_effective_importance
+    CoupledEngine.query() line ~232: importance updated on access via _importance_update
+    CoupledEngine.store() line ~146: last_access_time set to creation_time initially
+    dream_cycle_xb importances parameter: already supported, now fed dynamic values
+
+  monotonicity_chain_structure: |
+    The composition: Anti ∘ (Mono ∘ Mono ∘ Anti) = Anti ∘ Anti = Mono
+    Uses Mathlib.Order.Monotone.Defs: Monotone.comp_antitone, Antitone.comp
+    General pattern abstracted as monotonicity_chain_AMMA for reuse
+
+  another_instance_added_phase9b: |
+    While we worked, another instance added Phase 8 (BridgeFormation) and
+    Phase 9b (ConditionalMonotonicity) to HermesNLCDM.lean. Our Phase 9a
+    (MonotonicityChain) coexists cleanly.
+
+worked:
+  - "Loogle search confirmed all 4 Mathlib composition theorems available"
+  - "Conservative defaults (decay_rate=0.01, novelty_N0=0.0) preserved all 198 tests"
+  - "The abstract middle links pattern — proving composition with hypotheses for unstable details"
+
+failed: []
+
+next:
+  - step: "Add integration tests for time-based decay"
+    details: |
+      Currently decay is negligible in tests (ms timescales). Need tests that:
+      1. Store memories with explicit creation_time in the past
+      2. Call dream() and verify low-importance old memories get pruned preferentially
+      3. Call query() and verify importance_update fires correctly
+      4. Test novelty_bonus with non-zero N0
+      File: proofs/hermes-NLCDM/python/test_bridge_integration.py
+  - step: "Activate novelty_bonus for production"
+    details: |
+      Currently novelty_N0=0.0 (off). Need to determine good defaults.
+      The novelty bonus gives new memories a survival advantage in initial dream cycles.
+      Suggest: N0=0.2, gamma=0.05 (bonus halves every ~14 time units).
+  - step: "Reasoning trace storage design spec"
+    details: |
+      After wiring is stable, design how reasoning traces get stored as first-class
+      patterns in the Hopfield network. The 0→25 association result shows traces CREATE
+      cross-domain bridges. Spec should cover: trace encoding, storage format,
+      dream interaction, retrieval mechanism.
+  - step: "Push to parcadei/mimir"
+    details: "Push MonotonicityChain.lean + coupled_engine.py wiring changes."
+
+files:
+  created:
+    - proofs/hermes-NLCDM/HermesNLCDM/MonotonicityChain.lean
+    - thoughts/shared/handoffs/general/2026-03-02_18-00_monotonicity-chain-proven-bridge-wired.yaml
+  modified:
+    - proofs/hermes-NLCDM/HermesNLCDM.lean
+    - proofs/hermes-NLCDM/python/coupled_engine.py
+
+background_state:
+  - "parcadei/mimir repo LIVE — https://github.com/parcadei/mimir (private)"
+  - "Another instance added BridgeFormation.lean (Phase 8) and ConditionalMonotonicity.lean (Phase 9b)"
+  - "All NLCDM Lean proofs build clean (2291 jobs)"
+  - "198 Python tests passing across all test files"
+  - "1455/1455 tests passing in hermes-memory"
+
+key_references:
+  - "proofs/hermes-NLCDM/HermesNLCDM/MonotonicityChain.lean — the bridge theorem"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:39-60 — V1 bridge functions"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:120-138 — _compute_effective_importance"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:232-240 — query() importance update"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:278-290 — dream() effective importances"
+  - "proofs/hermes-memory/HermesMemory/StrengthDecay.lean:56 — original decay_antitone proof"
+  - "thoughts/shared/plans/memory-system/dream-redesign-spec.md — behavioral contracts"

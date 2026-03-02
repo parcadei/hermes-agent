@@ -1,0 +1,101 @@
+root_span_id: e4a9c6dc-351d-4582-b613-de49a4cd225d
+turn_span_id: 6acda823-be41-4f71-8c30-af1e9c508285
+session_id: e4a9c6dc-351d-4582-b613-de49a4cd225d
+---
+session: general
+date: 2026-03-01
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "NLCDM Phase 6 + Phase 5.7 COMPLETE — Lyapunov.lean (6 items) + WeightUpdate.lean (5 theorems), zero sorry, zero warnings"
+now: "Phase 5.8 (Temperature-Parametric Dynamics) — prove energy varies smoothly with β"
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build"
+
+done_this_session:
+  - task: "Phase 6 completed — Lyapunov.lean with 2 definitions + 4 theorems"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Lyapunov.lean]
+  - task: "Phase 5.7 completed — WeightUpdate.lean with 5 theorems, compiled first try"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/WeightUpdate.lean]
+  - task: "Wired both modules into root HermesNLCDM.lean"
+    files: [proofs/hermes-NLCDM/HermesNLCDM.lean]
+  - task: "Full lake build passes — 2284 jobs, zero errors, zero warnings"
+
+blockers: []
+
+questions:
+  - "Phase 5.8 scope: Temperature-parametric dynamics — how does energy change with β? Options: (a) localEnergy continuity in β, (b) full totalEnergy Lipschitz bound in β, (c) annealing schedule convergence"
+  - "Phase 5.9/5D scope: Spurious state targeting — how to characterize and avoid spurious fixed points?"
+
+decisions:
+  - subst_pitfall: "subst h where h : i = k consumes variable k — use rw [h] instead to preserve k in context"
+  - weight_invariant_approach: "Proved localEnergy_weight_invariant by unfold localEnergy logSumExp; rw [h_β, h_pat] — clean single-step proof"
+  - perturbation_calc_pattern: "Used Finset.sum_le_sum + split_ifs + linarith[(abs_le.mp h).2] for term-by-term coupling bound, then Finset.sum_add_distrib + simp[Finset.sum_const]; ring for N²ε computation"
+  - abs_bound_via_swap: "For |ΔE| ≤ N²ε, proved two one-sided bounds by swapping cfg↔cfg' using abs_sub_comm"
+  - unused_hyp_prefix: "_h_descent prefix to suppress lint warning on semantically meaningful but logically redundant hypothesis"
+
+findings:
+  - first_try_compile: "WeightUpdate.lean compiled on first Write — zero iteration needed. The Finset.sum_add_distrib + simp[Finset.sum_const]; ring pattern is reliable for N²ε bounds"
+  - rw_inside_lambda: "rw [h_pat] works for function-typed equalities (cfg'.patterns = cfg.patterns) even inside lambdas — no need for simp_rw"
+  - congr_1_for_sum_eq: "congr 1 on a+b=a+c correctly splits into rfl + the interesting subgoal"
+  - abs_le_decomposition: "abs_le.mp gives ⟨lower, upper⟩ — .2 extracts the upper bound (a-b ≤ ε), then linarith derives a ≤ b + ε"
+
+worked:
+  - "unfold localEnergy logSumExp; rw [h_β, h_pat] for weight invariance"
+  - "Finset.sum_le_sum + split_ifs + linarith[(abs_le.mp h).2] for per-term coupling bounds"
+  - "simp_rw [Finset.sum_add_distrib]; congr 1; simp [Finset.sum_const]; ring for N²ε calc"
+  - "abs_sub_comm to swap configs for symmetric bound"
+  - "Term-mode proof for lyapunov_robust — direct application of interleaved_descent"
+
+failed: []
+
+next:
+  - "Phase 5.8: Temperature-Parametric Dynamics — prove energy varies smoothly with β"
+  - "  Key insight: localEnergy depends on β via logSumExp = β⁻¹ · log(Σ exp(β·z_i))"
+  - "  Possible theorems:"
+  - "    - logSumExp_lipschitz_β: |lse(β', z) - lse(β, z)| bounded in terms of |β' - β|"
+  - "    - localEnergy_β_perturbation: bounded change in localEnergy when β changes"
+  - "    - totalEnergy_β_perturbation: |E(cfg') - E(cfg)| bounded when only β differs"
+  - "    - annealing_descent: β-increase (cooling) + coordinate descent → net descent"
+  - "  Challenge: logSumExp involves exp and log — may need Mathlib Real.exp_lipschitz or similar"
+  - "  Coupling energy does NOT depend on β — only local energy does"
+  - "After 5.8: Phase 5.9/5D (spurious state targeting) if time permits"
+
+phase6_theorems:
+  - "coordinateUpdate: update memory k via Hopfield, keep others fixed (Lyapunov.lean:37-39)"
+  - "lyapunov_nonincreasing: totalEnergy non-increasing under coordinate update (Lyapunov.lean:49-57)"
+  - "lyapunov_strict_descent: strict descent at non-fixed memories (Lyapunov.lean:71-115)"
+  - "isSystemEquilibrium: all memories are fixed points (Lyapunov.lean:124-126)"
+  - "equilibrium_coordinate_fixed: coordinate update = identity at equilibrium (Lyapunov.lean:129-137)"
+  - "not_equilibrium_energy_decreases: away from equilibrium, ∃ strict descent (Lyapunov.lean:140-151)"
+
+phase57_theorems:
+  - "localEnergy_weight_invariant: localEnergy depends only on β and patterns (WeightUpdate.lean:42-46)"
+  - "weight_perturbed_bound: E(cfg') ≤ E(cfg) + N²ε under bounded coupling change (WeightUpdate.lean:56-93)"
+  - "weight_perturbation_abs: |E(cfg') - E(cfg)| ≤ N²ε symmetric bound (WeightUpdate.lean:103-118)"
+  - "interleaved_descent: descent + perturbation → net descent when gap > N²ε (WeightUpdate.lean:131-143)"
+  - "lyapunov_robust: MAIN — Phase 6 strict descent survives weight plasticity (WeightUpdate.lean:156-176)"
+
+cumulative_proof_status:
+  phase1_energy: "COMPLETE — Energy.lean, EnergyBounds.lean, LocalMinima.lean"
+  phase2_dynamics: "COMPLETE — Dynamics.lean"
+  phase3_coupling: "COMPLETE — Coupling.lean"
+  phase4_capacity: "COMPLETE — Capacity.lean (6 theorems)"
+  phase5_modular: "COMPLETE — Modular.lean (12 theorems)"
+  phase5_5_block_diagonal: "COMPLETE — BlockDiagonal.lean (14 items)"
+  phase5_7_weight_update: "COMPLETE — WeightUpdate.lean (5 theorems)"
+  phase6_lyapunov: "COMPLETE — Lyapunov.lean (6 items)"
+  phase5_8_temperature: "NOT STARTED"
+
+key_signatures:
+  - "localEnergy {d N} (cfg : SystemConfig d N) (ξ : Fin d → ℝ) : ℝ := -logSumExp cfg.β (fun μ => ∑ i, cfg.patterns μ i * ξ i) + (1/2) * ∑ i, ξ i ^ 2"
+  - "logSumExp (β : ℝ) {N} (z : Fin N → ℝ) : ℝ := β⁻¹ * Real.log (∑ i, exp (β * z i))"
+  - "couplingEnergy {d} (wp : WeightParams) (x_i x_j : Fin d → ℝ) : ℝ — depends on wp, NOT on β"
+  - "totalEnergy_decomp : totalEnergy cfg memories = (∑ i, localEnergy cfg (memories i)) + coupling_sum — proved by rfl in Coupling.lean:135-141"
+  - "coordinateUpdate cfg memories k : Fin N → Fin d → ℝ — if i = k then hopfieldUpdate else memories i"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/HermesNLCDM/WeightUpdate.lean
+  modified:
+    - proofs/hermes-NLCDM/HermesNLCDM.lean

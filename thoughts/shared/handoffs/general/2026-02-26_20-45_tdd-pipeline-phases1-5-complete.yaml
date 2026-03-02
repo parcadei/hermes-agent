@@ -1,0 +1,76 @@
+root_span_id: 68143bb2-d538-42e8-8378-01b628f30dc4
+turn_span_id: 
+session_id: 68143bb2-d538-42e8-8378-01b628f30dc4
+---
+session: general
+date: 2026-02-26
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: TDD pipeline Phases 1-5 complete — all 3 extracted components built and tested, ready for wiring
+now: Resume at Phase 6 (wire into AIAgent) — modify run_agent.py to compose PromptAssembler, SessionPersister, execute_tool_calls
+test: /Users/cosimo/.hermes/hermes-agent/venv/bin/python3 -m pytest tests/ -q --tb=short
+
+done_this_session:
+  - task: "Phase 1: Circular import fix — extracted _run_async to agent/async_bridge.py, broke model_tools<->registry cycle"
+    files: [agent/async_bridge.py, model_tools.py, tools/registry.py, tests/test_import_structure.py]
+  - task: "Phase 2: Eager import fix — gutted tools/__init__.py (265 lines → 8 lines), fixed file_tools.py direct import"
+    files: [tools/__init__.py, tools/file_tools.py, tests/test_lazy_tools_init.py]
+  - task: "Phase 3: PromptAssembler extraction — _build_system_prompt + _invalidate_system_prompt → agent/prompt_assembler.py"
+    files: [agent/prompt_assembler.py, tests/agent/test_prompt_assembler.py]
+  - task: "Phase 4: SessionPersister extraction — 7 persistence methods → agent/session_persister.py, session_id bug fix verified"
+    files: [agent/session_persister.py, tests/agent/test_session_persister.py]
+  - task: "Phase 5: execute_tool_calls extraction — _execute_tool_calls → agent/tool_executor.py with frozen ToolExecConfig, AGENT_LOOP_TOOLS single source of truth (includes clarify)"
+    files: [agent/tool_executor.py, model_tools.py, tests/agent/test_tool_executor.py]
+
+blockers: []
+
+questions:
+  - "Phase 6 wiring is the highest-risk phase — should we do a dry-run diff before committing changes to run_agent.py?"
+  - "Should smoke test protocol (Phase 7.2) be automated or manual?"
+
+decisions:
+  - parallel_phases_3_4_5: "Phases 3, 4, 5 ran in parallel as kraken agents — no conflicts since each creates a new file without touching run_agent.py"
+  - lazy_import_tool_executor: "agent/tool_executor.py imports handle_function_call lazily inside execute_tool_calls() to break circular import: tool_executor -> model_tools -> tool_executor"
+  - clarify_in_agent_loop_tools: "AGENT_LOOP_TOOLS frozenset includes 'clarify' (bug fix B1/SC-7). model_tools.py now imports from agent.tool_executor"
+  - session_id_bug_fix: "SessionPersister.session_id setter atomically updates _session_log_file — verified by 2 dedicated tests"
+
+findings:
+  - test_count_growth: "172 → 183 (phases 1+2) → 195 (phase 3) → 234 (all phases). 62 new tests total."
+  - tool_executor_lazy_import: "handle_function_call must be imported lazily in tool_executor.py to avoid circular: tool_executor → model_tools → tool_executor (via AGENT_LOOP_TOOLS import)"
+  - send_message_deferred: "tools/send_message_tool.py:134 still has deferred 'from model_tools import _run_async' — works via re-export but could be cleaned up later"
+
+worked:
+  - "Running Phases 3, 4, 5 in parallel — zero conflicts, all three created independent files"
+  - "Giving each kraken agent exact test code + implementation spec from phased-plan.md"
+  - "Including tldr commands in agent prompts for blast radius verification"
+  - "TDD strict order (write test → red → implement → green → full suite) caught issues early"
+
+failed: []
+
+next:
+  - "Phase 6: Wire into AIAgent (run_agent.py) — compose PromptAssembler, SessionPersister, ToolExecConfig in __init__, replace method calls in run_conversation, delete extracted methods. See thoughts/shared/plans/aiagent-decomposition/phased-plan.md Phase 6 for exact wiring spec."
+  - "Phase 6 key changes: (1) Add imports for 3 new components, (2) Create instances in __init__, (3) Replace session_id with property delegating to persister, (4) Replace ~10 method calls in run_conversation/compress_context, (5) Add _on_tool_executed callback, (6) Delete ~10 extracted methods"
+  - "Phase 6 methods to DELETE from run_agent.py: _build_system_prompt, _invalidate_system_prompt, _execute_tool_calls, _persist_session, _save_session_log, _log_msg_to_db, _flush_messages_to_session_db, _save_trajectory, _convert_to_trajectory_format, _clean_session_content"
+  - "Phase 6 methods to KEEP on AIAgent: _compress_context (orchestrates components), flush_memories, run_conversation, _build_api_kwargs, _handle_max_iterations, _interruptible_api_call, _build_assistant_message, _extract_reasoning, chat, interrupt, clear_interrupt, is_interrupted, _hydrate_todo_store, _dump_api_request_debug, _mask_api_key_for_logs"
+  - "Phase 7: Integration validation — full test suite (234+ tests), smoke test protocol (3 conversations), import validation"
+  - "Agents should use tldr impact/whatbreaks/importers per .claude/CLAUDE.md instructions"
+
+files:
+  created:
+    - agent/async_bridge.py
+    - agent/prompt_assembler.py
+    - agent/session_persister.py
+    - agent/tool_executor.py
+    - tests/test_import_structure.py
+    - tests/test_lazy_tools_init.py
+    - tests/agent/__init__.py
+    - tests/agent/test_prompt_assembler.py
+    - tests/agent/test_session_persister.py
+    - tests/agent/test_tool_executor.py
+  modified:
+    - model_tools.py
+    - tools/__init__.py
+    - tools/file_tools.py
+    - tools/registry.py

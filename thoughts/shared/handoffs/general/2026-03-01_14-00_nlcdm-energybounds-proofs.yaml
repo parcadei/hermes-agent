@@ -1,0 +1,139 @@
+root_span_id: f14836bf-5468-4003-9282-4eab5c483415
+turn_span_id: 3c982053-9b56-47e1-b29d-0f9ab2288c3c
+session_id: f14836bf-5468-4003-9282-4eab5c483415
+---
+title: "NLCDM EnergyBounds.lean — Proving Phase 1 theorems"
+date: "2026-03-01T14:00:00Z"
+status: in_progress
+tags: [lean4, formal-verification, hermes-nlcdm, proofs]
+
+tasks:
+  - name: "Fix EnergyBounds.lean sorrys"
+    status: "in_progress — 5/8 proved, autoImplicit fix needed"
+  - name: "Fix LocalMinima.lean sorrys"
+    status: "pending — 3 sorrys"
+  - name: "Hook: compiler-in-the-loop Edit trigger"
+    status: "pending — identified fix"
+
+recent_changes:
+  - file: "proofs/hermes-NLCDM/HermesNLCDM/EnergyBounds.lean"
+    description: |
+      Proved 5 of 8 sorrys (working with `lake env lean` which had autoImplicit=true,
+      but `lake build` has autoImplicit=false per lakefile.lean:5). Last Write triggered
+      compiler hook and revealed the autoImplicit issue.
+
+      PROVED (logic correct, needs autoImplicit fix):
+      1. lse_ge_max — single_le_sum approach with β⁻¹ * (β * z j) rewrite
+      2. lse_le_max_plus — sum ≤ N*exp(β*max), log monotone, divide by β
+      3. dot_le_norms (Cauchy-Schwarz) — discriminant method, t = -dot/sqNorm v
+      4. localEnergy_bounded_below — Cauchy-Schwarz + AM-GM on ½r² - |M|r ≥ -½M²
+      5. smoothWeight_abs_le — |σ₁ - σ₂| ≤ 1 since 0 < σ < 1
+
+      PARTIALLY PROVED (has errors):
+      6. couplingEnergy_abs_le — approach works but dot_le_norms type mismatch after
+         `simp only [sqNorm]` unfolds sqNorm in goal but dot_le_norms returns sqNorm type.
+         Fix: don't simp sqNorm away, keep it abstract.
+
+      TRIVIALLY PROVED:
+      7. totalEnergy_bounded_below — ⟨totalEnergy cfg memories, le_refl _⟩
+
+      REMAINING IN LocalMinima.lean:
+      8. softmax_concentration (hard)
+      9. localEnergyGrad_small_at_pattern (hard, depends on 8)
+      10. hessian_positive_definite_at_pattern (hard)
+
+learnings:
+  - key: "autoImplicit false"
+    detail: |
+      lakefile.lean sets `autoImplicit = false`. All variables like β, M, R must be
+      declared explicitly via `variable (β : ℝ)` or in theorem signatures.
+      `lake env lean` may not respect this, but `lake build` does.
+      ALWAYS use `lake build` for verification, not `lake env lean`.
+
+  - key: "lse_ge_max proof strategy"
+    detail: |
+      Rewrite `z j = β⁻¹ * (β * z j)` using inv_mul_cancel_left₀,
+      then mul_le_mul_of_nonneg_left, Real.le_log_iff_exp_le,
+      Finset.single_le_sum with explicit (f := ...).
+
+  - key: "Cauchy-Schwarz discriminant method"
+    detail: |
+      For dot_le_norms: reduce to dot² ≤ sqNorm u * sqNorm v via sqrt_le_sqrt.
+      Then: ∀t, 0 ≤ Σ(u_i + t*v_i)² = sqNorm u + 2t·dot + t²·sqNorm v.
+      Specialize t = -dot/sqNorm v, field_simp + ring simplifies to
+      sqNorm u - dot²/sqNorm v ≥ 0. Handle v=0 case separately.
+
+  - key: "AM-GM for localEnergy bound"
+    detail: |
+      ½r² - |M|r = ½(r - |M|)² - ½M² ≥ -½M² ≥ -M².
+      nlinarith [sq_nonneg (r - |M|), sq_abs M] closes it.
+
+  - key: "couplingEnergy_abs_le approach"
+    detail: |
+      Don't unfold sqNorm with `simp only [sqNorm]` — it breaks dot_le_norms unification.
+      Instead, keep sqNorm abstract and prove:
+      |W(cos) * ni * nj| ≤ |cos| * ni * nj ≤ ni * nj
+      using smoothWeight_abs_le and div_mul_cancel₀.
+
+  - key: "compiler-in-the-loop hook"
+    detail: |
+      Located at ~/.claude/hooks/dist/compiler-in-the-loop.mjs
+      Only triggers on Write (line 184: `input.tool_name !== "Write"`).
+      Does NOT trigger on Edit. Fix: also accept "Edit" tool_name.
+      Also optionally runs Goedel-Prover via LMStudio at localhost:1234.
+
+  - key: "loogle binary location"
+    detail: |
+      ~/tools/loogle/.lake/build/bin/loogle
+      Needs ~10s cold start to load 343MB mathlib.idx.
+      Use for type-directed Mathlib lemma search.
+
+  - key: "Finset tactics"
+    detail: |
+      - positivity handles exp/sum positivity
+      - Finset.single_le_sum needs explicit (f := ...) annotation
+      - Finset.sum_le_sum takes (fun i _ => ...) not (fun i hi => ...)
+      - Finset.sup'_le for bounding sup' from above
+
+action_items:
+  - priority: 1
+    description: |
+      Fix autoImplicit issue in EnergyBounds.lean:
+      Add `variable (β M R : ℝ)` after `namespace HermesNLCDM` or add explicit
+      parameters to each theorem. Check Energy.lean — it passes β through
+      SystemConfig.β and logSumExp (β : ℝ) explicitly. The theorems that use
+      bare β (lse_ge_max, lse_le_max_plus) need explicit (β : ℝ) parameter.
+
+  - priority: 2
+    description: |
+      Fix couplingEnergy_abs_le: remove `simp only [sqNorm]` to keep types
+      compatible with dot_le_norms. The proof structure is sound, just needs
+      sqNorm to stay abstract.
+
+  - priority: 3
+    description: |
+      Verify with `lake build` (not `lake env lean`). The hook does this
+      automatically on Write.
+
+  - priority: 4
+    description: |
+      Tackle LocalMinima.lean 3 sorrys (hardest proofs).
+
+  - priority: 5
+    description: |
+      Fix compiler-in-the-loop hook to also trigger on Edit tool.
+      Change line 184 from `!== "Write"` to `!== "Write" && !== "Edit"`.
+
+artifacts:
+  - path: "proofs/hermes-NLCDM/HermesNLCDM/EnergyBounds.lean"
+    description: "Main file being edited — has working proofs but autoImplicit issues"
+  - path: "proofs/hermes-NLCDM/HermesNLCDM/Energy.lean"
+    description: "Definitions file — compiles clean, no sorrys"
+  - path: "proofs/hermes-NLCDM/HermesNLCDM/LocalMinima.lean"
+    description: "Next target — 3 sorrys remaining"
+  - path: "proofs/hermes-NLCDM/lakefile.lean"
+    description: "Sets autoImplicit=false (line 5)"
+  - path: "~/.claude/hooks/dist/compiler-in-the-loop.mjs"
+    description: "PostToolUse hook — triggers lake build on Write to .lean files"
+  - path: "~/.claude/settings.json"
+    description: "Hook configuration — PostToolUse matcher is Edit|Write"

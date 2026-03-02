@@ -1,0 +1,151 @@
+root_span_id: 5e7eca9e-5bd2-44c5-b337-b36c644bae7f
+turn_span_id: 1b93d905-c86a-4e93-8961-38b670a93c23
+session_id: 5e7eca9e-5bd2-44c5-b337-b36c644bae7f
+---
+session: general
+date: 2026-03-02
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "Phase 7 complete (TraceCentroid.lean, 0 sorry). Phases 8-10 designed: bridge formation, conditional monotonicity, transfer dynamics — corrected for destructive dream ops (prune/decay)."
+now: "Write BridgeFormation.lean (Phase 8), then ConditionalMonotonicity.lean (Phase 9), then TransferDynamics.lean (Phase 10). All Lean-first, Python testing after."
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build"
+
+done_this_session:
+  - task: "Fixed 3 compiler errors in TraceCentroid.lean — all theorems now compile with 0 sorry"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/TraceCentroid.lean]
+  - task: "Error 1 fix: localEnergy_eq — added `rfl` after `unfold localEnergy sqNorm` (goal was literally a=a)"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/TraceCentroid.lean:54]
+  - task: "Error 2 fix: dot_mean_eq_avg — replaced invalid `conv_lhs => ext i` with `simp_rw` pattern (matches codebase convention at Dynamics.lean:80,110,214)"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/TraceCentroid.lean:167-174]
+  - task: "Error 3 fix: sqNorm_mean_ge_of_pairwise — proved via bilinearity decomposition: ‖mean‖² = (1/K)·Σ_j ⟨mean,v_j⟩, each term ≥ σ by dot_mean_ge_of_pairwise"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/TraceCentroid.lean:247-301]
+  - task: "Added TraceCentroid to main HermesNLCDM.lean imports as Phase 7"
+    files: [proofs/hermes-NLCDM/HermesNLCDM.lean:54-55]
+  - task: "Analyzed dream pipeline destructive ops — corrected false monotonicity claim"
+    files: []
+
+decisions:
+  - simp_rw_over_conv_ext: "Lean 4 `conv { ext }` fails on Finset sums. Codebase pattern uses `simp_rw [show ∀ i, ... from fun i => by ring]` then `congr 1; ext`. See Dynamics.lean:80,110,214."
+  - bilinearity_proof_strategy: "sqNorm_mean_ge_of_pairwise proved via ‖mean‖² = (1/K)Σ_j ⟨mean,v_j⟩ rather than direct (1/K²) expansion. Cleaner because it reuses dot_mean_ge_of_pairwise."
+  - corrected_monotonicity: "Original claim 'bridge count is monotone across dream cycles' is FALSE. nrem_prune_xb deletes patterns (threshold=0.95), strength_decay kills traces. Correct theorem: CONDITIONAL monotonicity — bridges persist iff participating patterns survive importance/strength selection."
+
+findings:
+  destructive_dream_ops: |
+    The dream pipeline (dream_cycle_xb at dream_ops.py:1690-1820) has destructive operations:
+    1. nrem_prune_xb (line 940): removes near-duplicate patterns (sim > 0.95), keeps higher-importance member
+    2. nrem_merge_xb (line 1760): replaces groups of 3+ similar patterns with centroid
+    3. strength_decay (System A, core.py:108): exponential decay e^(-β·Δt) can kill patterns
+    Bridges CAN be destroyed if endpoint patterns are pruned or decay below threshold.
+    Merge PRESERVES bridges via sqNorm_mean_ge_of_pairwise (centroid inherits similarity structure).
+  phase7_theorems: |
+    TraceCentroid.lean (303 lines, 0 sorry) proves:
+    - sqNorm_eq_sum, localEnergy_eq: bridge lemmas between sqNorm and localEnergy
+    - lse_mono_alignment: lse monotone in pattern-query alignment
+    - trace_centroid_energy_well_strong: MAIN — alignment gap δ > β⁻¹ log N ⟹ E(centroid) < E(random)
+    - trace_centroid_energy_well_unit: unit vector specialization
+    - dot_mean_eq_avg, dot_mean_ge_of_pairwise: centroid alignment bounds
+    - trace_centroid_concentrated_gap: connects Phase 7 to Phase 5.9b
+    - sqNorm_mean_ge_of_pairwise: centroid preserves similarity structure
+  loogle_results: |
+    Useful Mathlib lemmas found via loogle-search:
+    - convexOn_exp: Real.exp is convex (for Jensen's inequality)
+    - ConvexOn.map_centerMass_le: Jensen via center of mass
+    - real_inner_self_eq_norm_sq: ⟨x,x⟩ = ‖x‖²
+    - exp_le_exp, Real.log_le_log: monotonicity of exp/log
+    - Finset.sum_le_sum: pointwise ≤ implies sum ≤
+    - Finset.sup'_le: sup' bounded by pointwise bound
+
+worked:
+  - "simp_rw with show/from/ring pattern for rewriting under Finset.sum — the standard codebase idiom"
+  - "Proving sqNorm via bilinearity (reuse dot_mean_ge_of_pairwise) instead of direct expansion"
+  - "rfl closes goals after unfold when both sides are definitionally equal"
+  - "Using tldr structure to see both System A and System B architecture"
+
+failed:
+  - "conv_lhs { arg 1; ext i } on Finset sums — Lean 4 ext conv tactic requires function/arrow type, not Finset"
+  - "Direct bilinear expansion ((1/K²)·ΣΣ) approach — too many intermediate rewrites, abandoned for bilinearity approach"
+  - "Assuming bridge monotonicity without checking destructive ops — dream pipeline has prune and decay"
+
+next:
+  - step: "Phase 8 — BridgeFormation.lean: formalize similarity matrix, define 'bridge' as above-threshold entry, prove centroid addition creates ≥2 new bridges"
+    details: |
+      Definitions needed:
+        - SimilarityMatrix (cfg : SystemConfig d N) : Fin N → Fin N → ℝ := fun μ ν => Σ_i patterns μ i * patterns ν i
+        - Bridge (S : SimilarityMatrix) (τ : ℝ) (μ ν : Fin N) : Prop := S μ ν ≥ τ ∧ μ ≠ ν
+        - BridgeCount (S) (τ) : ℕ := #{(μ,ν) | Bridge S τ μ ν}
+      Key theorem: bridge_formation_from_centroid
+        If c = normalize(α·x_s + (1-α)·x_t + noise) and ⟨c, x_s⟩ ≥ τ and ⟨c, x_t⟩ ≥ τ,
+        then adding c to the pattern store creates ≥2 new bridges (c↔x_s and c↔x_t).
+  - step: "Phase 9 — ConditionalMonotonicity.lean: bridge count is non-decreasing for importance-protected patterns"
+    details: |
+      Model dream_cycle_xb as sequence of operations on SystemConfig.
+      Key insight: prune removes low-importance duplicates, merge preserves bridges (via sqNorm_mean_ge_of_pairwise).
+      Theorem: conditional_bridge_monotonicity
+        For patterns with importance ≥ τ_imp, bridge count after dream cycle ≥ bridge count before.
+      Requires: formalizing 'importance-protected subset' and showing prune/merge preserve bridges within it.
+      IMPORTANT: This is conditional — global bridge count CAN decrease. The theorem says: within the protected set, bridges survive.
+  - step: "Phase 10 — TransferDynamics.lean: bridge connectivity enables cross-domain retrieval"
+    details: |
+      Define 'domain' as cluster of patterns, 'bridge path' as chain of above-threshold similarities.
+      Key theorem: transfer_via_bridge_path
+        If there exists a path of bridges from domain A to domain B, and query q starts near a domain A pattern,
+        then Hopfield update at sufficient β converges to a state with non-trivial softmax weight on domain B patterns.
+      This is the hardest phase — may need simulation-backed bounds or weaker statement about single-hop transfer.
+      Single-hop version: if ⟨q, c⟩ is high and c is a bridge between domains, then softmax assigns weight to both domains.
+  - step: "Loogle searches to run at session start"
+    details: |
+      loogle-search "Finset.card, Finset.filter" — for counting bridges
+      loogle-search "Fintype.card_fin" — for converting Fin K cardinality
+      loogle-search "Finset.sum_nonneg" — for bounding similarity sums
+      loogle-search "softmax, Finset.sum" — for transfer dynamics
+  - step: "After all 3 Lean phases complete, write Python discriminative tests for the pipeline claims"
+
+files:
+  created:
+    - thoughts/shared/handoffs/general/2026-03-02_15-51_ood-via-memory-lean-formalization.yaml
+  modified:
+    - proofs/hermes-NLCDM/HermesNLCDM/TraceCentroid.lean
+    - proofs/hermes-NLCDM/HermesNLCDM.lean
+
+background_state:
+  - "TraceCentroid.lean: compiles clean, 0 sorry, 303 lines, lake build succeeds (2262 jobs)"
+  - "Existing proof infrastructure: 15 modules, Phases 1-7 complete"
+  - "System A (hermes-memory): strength_decay at core.py:108, consolidation.py has merge/archive"
+  - "System B (NLCDM dream_ops.py): dream_cycle_xb at line 1680, pipeline = repulsion→prune→merge→unlearn→explore"
+  - "Python test_reasoning_trace_centroids.py: 13/14 pass, validates energy gap Δ=-0.397"
+  - "Previous session's vectorization (S-based fast path) in place, 162/162 tests pass"
+  - "Key Lean patterns: simp_rw with show/from/ring, Finset.sum_le_sum, calc blocks with linarith"
+
+architecture_notes: |
+  Two-system architecture for memory:
+
+  System A (hermes-memory/): Scalar dynamics — strength, importance, decay, selection.
+    Key: strength_decay(β, Δt) = e^(-βΔt). Patterns die if not reinforced.
+    Lean proofs in proofs/hermes-memory/ (separate lakefile).
+
+  System B (hermes-NLCDM/): Vector dynamics — patterns on S^{d-1}, Hopfield energy, dream ops.
+    Key: localEnergy(ξ) = -lse(β, X^Tξ) + ½‖ξ‖². Dream cycle curates X.
+    Lean proofs in proofs/hermes-NLCDM/ (this project).
+
+  The OOD-via-memory claim spans BOTH systems:
+    - System B creates trace centroids (energy wells) and discovers bridges (dream explore)
+    - System A's strength decay can kill traces before they consolidate
+    - The conditional monotonicity theorem must account for both
+
+  Dream pipeline order (dream_cycle_xb):
+    1. nrem_repulsion_xb — push close pairs apart (η=0.01, min_sep=0.3)
+    2. nrem_prune_xb — delete near-duplicates (threshold=0.95, keeps higher importance)
+    3. nrem_merge_xb — merge similar groups into centroids (threshold=0.90, min_group=3)
+    4. rem_unlearn_xb — destabilize mixture states (S-based fast path)
+    5. rem_explore_cross_domain_xb — discover cross-domain associations (read-only)
+
+  Destructive ops that can break bridges:
+    - Prune: deletes low-importance member of near-duplicate pair → bridge endpoint gone
+    - Strength decay (System A): kills unmaintained traces → bridge endpoint gone
+
+  Bridge-preserving ops:
+    - Merge: centroid inherits similarity (sqNorm_mean_ge_of_pairwise) → bridges survive
+    - Repulsion: moves patterns but preserves identity → bridges shift but persist
+    - Unlearn: pushes apart mixture-formers, doesn't delete → bridges persist if not mixture

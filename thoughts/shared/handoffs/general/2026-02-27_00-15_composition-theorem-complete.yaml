@@ -1,0 +1,84 @@
+root_span_id: f6c9ba4d-01e6-460c-adac-bfb47f6c3dba
+turn_span_id: 
+session_id: f6c9ba4d-01e6-460c-adac-bfb47f6c3dba
+---
+session: memory-system-composition-theorem
+date: 2026-02-27
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: Prove composition theorem for 3 failure-mode fixes (strength decay + soft selection + novelty bonus) in Lean 4
+now: Wire Lipschitz proofs into Mathlib's ContractingWith.fixedPoint for formal Banach fixed-point invocation
+test: cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-memory && lake build
+
+done_this_session:
+  - task: "ComposedSystem.lean — 12 theorems proving composition safety of all 3 fixes"
+    files: [proofs/hermes-memory/HermesMemory/ComposedSystem.lean]
+  - task: "Updated HermesMemory.lean with ComposedSystem import"
+    files: [proofs/hermes-memory/HermesMemory.lean]
+  - task: "Researched Mathlib4 coverage: ContractingWith exists, stationary distributions do NOT"
+    files: []
+
+blockers: []
+
+decisions:
+  - mean_field_approach: "Model composed system via expected strength update E[S'] = (1-qα)·e^(-βΔ)·S + qα·Smax rather than full stochastic process"
+  - avoid_division_in_proofs: "fixedPoint_lt_Smax uses denom-qα = (1-e)(1-qα) > 0 trick to avoid division, which Lean handles poorly"
+  - triangle_via_dist: "Use dist_triangle + Real.dist_eq for |a-c| ≤ |a-b| + |b-c| since abs_add doesn't exist in this Mathlib"
+  - loogle_for_lemma_names: "Use ~/tools/loogle/.lake/build/bin/loogle --read-index ~/tools/loogle/mathlib.idx to find correct Mathlib lemma names"
+
+findings:
+  - exp_lt_one: "Use exp_lt_exp.mpr (not exp_lt_one_of_neg which doesn't exist). Pattern: rw [he_def, ← exp_zero]; exact exp_lt_exp.mpr (by nlinarith)"
+  - abs_add_le: "Triangle inequality for |·| is abs_add_le (not abs_add). But easier to use dist_triangle + Real.dist_eq"
+  - mul_le_of_le_one_right: "For (1-qα)*e ≤ (1-qα) when e ≤ 1, use mul_le_of_le_one_right"
+  - lt_of_mul_lt_mul_right: "Expects a*c < b*c form (not a*c < c*b). Use ring to normalize"
+  - nlinarith_multiplication: "nlinarith cannot multiply inequalities. For a*b ≤ a*c, use mul_le_mul_of_nonneg_left explicitly"
+  - hook_false_alarm: "The compiler hook runs lean directly without lake's LEAN_PATH, showing 'unknown module prefix' errors. These are false alarms — lake build works fine"
+  - mathlib_contraction: "ContractingWith + LipschitzWith exist in Mathlib. ContractingWith.fixedPoint gives unique fixed point. ContractingWith.tendsto_iterate_efixedPoint gives convergence."
+  - missing_from_mathlib: "Kernel iteration, stationary distributions, Harris recurrence, Lyapunov stability, IFS, Birkhoff ergodic theorem — all missing"
+
+worked:
+  - "mul_le_of_le_one_right for bounding (1-qα)*e ≤ (1-qα) when e ≤ 1"
+  - "dist_triangle A B C + Real.dist_eq for triangle inequality avoiding abs_add"
+  - "denom - qα = (1-e)(1-qα) > 0 algebraic trick to avoid division in fixedPoint_lt_Smax"
+  - "Splitting Lipschitz proof into _in_S and _in_q then combining via triangle inequality"
+  - "loogle --read-index for finding correct lemma names (exp_lt_one_iff → exp_lt_exp, abs_add → abs_add_le)"
+
+failed:
+  - "exp_lt_one_of_neg — doesn't exist in this Mathlib"
+  - "abs_add — doesn't exist (it's abs_add_le)"
+  - "mul_le_mul_of_nonneg_left with associativity mismatch — (1-qα)*e*S is ((1-qα)*e)*S not (1-qα)*(e*S)"
+  - "nlinarith for multiplication bounds — needs explicit mul_le_mul calls"
+  - "div_le_div_right — doesn't exist with that name for ℝ"
+
+next:
+  - "Wire ContractingWith: define composed map on ℝ×ℝ product metric space, prove LipschitzWith K, invoke ContractingWith.fixedPoint for existence+uniqueness"
+  - "Derive markdown spec (Option B) from all 67 proven theorems"
+  - "Derive Python implementation (Option C) — each def → function, each theorem → property test"
+  - "Resolve 5 open decisions in docs/architecture.md (D1-D5)"
+
+files:
+  created:
+    - proofs/hermes-memory/HermesMemory/ComposedSystem.lean
+  modified:
+    - proofs/hermes-memory/HermesMemory.lean
+
+# Full Formalization Structure (67 theorems, 18 definitions, 0 sorries, 0 warnings)
+#
+# MemoryDynamics.lean — 25 theorems (retention, strength, sigmoid, scoring, feedback, invariants)
+# StrengthDecay.lean — 11 theorems (strength decay, combined dynamics, steady state)
+# SoftSelection.lean — 9 theorems (sigmoid monotonicity, soft selection, complementarity)
+# NoveltyBonus.lean — 10 theorems (novelty bonus, exploration window, cold-start survival)
+# ComposedSystem.lean — 12 theorems (domain invariance, fixed-point safety, Lipschitz bounds, composed guarantees)
+#
+# Key composition theorems:
+#   fixedPoint_lt_Smax: Any fixed point of expected update with q∈(0,1] has S < Smax
+#   composedSystem_safe: All 3 guarantees hold simultaneously at any fixed point
+#   expectedUpdate_lipschitz_full: |T(q,S)-T(q',S')| ≤ e^(-βΔ)|S-S'| + αSmax|q-q'|
+#   composedContractionFactor_lt_one: K < 1 when L·α·Smax < 1 - e^(-βΔ)
+#
+# Contraction wiring (TODO):
+#   Need: Define T on ℝ×ℝ with Prod.dist, prove LipschitzWith K T, conclude ContractingWith K T
+#   Mathlib has: ContractingWith.fixedPoint, ContractingWith.tendsto_iterate_efixedPoint
+#   This gives: unique fixed point + convergence = stationary distribution

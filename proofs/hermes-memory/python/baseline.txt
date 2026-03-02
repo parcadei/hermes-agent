@@ -1,0 +1,30 @@
+============================================================
+Hermes Memory — Test Baseline
+2026-02-28 07:54:28
+============================================================
+
+  encoding                        204 passed  OK  [6.6s]
+  recall                          201 passed  OK  [1.0s]
+  contradiction                   185 passed  OK  [0.7s]  (2 xfailed)
+  consolidation                   318 passed  OK  [0.9s]
+  consolidation_phase_c            59 passed  OK  [0.3s]
+  optimizer                        55 passed  OK  [166.1s]
+  contraction                      10 passed  OK  [2.4s]
+  coupling                          5 passed  OK  [1.0s]
+  composed_system                  12 passed  OK  [1.9s]
+  engine                           52 passed  OK  [1.1s]
+  markov_chain                     34 passed  OK  [0.4s]
+  memory_dynamics                  25 passed  OK  [2.6s]
+  monte_carlo                       5 passed  OK  [0.8s]
+  novelty_bonus                    10 passed  OK  [1.4s]
+  sensitivity                      46 passed  OK  [0.4s]
+  soft_selection                    9 passed  OK  [1.1s]
+  spectral                          6 passed  OK  [1.5s]
+  strength_decay                   11 passed  OK  [1.4s]
+
+------------------------------------------------------------
+  Full suite: 1455 passed, 2 xfailed in 192.27s (0:03:12)  [192.6s]
+
+============================================================
+  TOTALS (per-module):  1247 passed, 0 failed, 2 xfailed, 0 errors
+============================================================

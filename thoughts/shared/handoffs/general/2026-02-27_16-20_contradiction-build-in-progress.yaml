@@ -1,0 +1,90 @@
+root_span_id: 0d6eb5a6-b0bf-4060-a942-35e91866d3b6
+turn_span_id:
+session_id: 0d6eb5a6-b0bf-4060-a942-35e91866d3b6
+---
+session: general
+date: 2026-02-27
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: Build contradiction.py (piece 3/5) — Phase A complete, Phase B builder running
+now: Wait for builder agent to finish, then run Phase C audit. If builder failed, resume with agent ID a335f24.
+
+test: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/test_contradiction.py -q --tb=short
+
+done_this_session:
+  - task: "Phase A SPEC: Applied 6 adversarial fixes to spec.md"
+    files: [thoughts/shared/plans/memory-system/contradiction/spec.md]
+  - task: "Phase A TESTS: Fixed 8 silent-pass guards, added 16 adversarial tests + 6 behavioral tests"
+    files: [proofs/hermes-memory/python/tests/test_contradiction.py]
+  - task: "Phase B BUILD: Launched builder agent, contradiction.py written (1414 lines), test iteration in progress"
+    files: [proofs/hermes-memory/python/hermes_memory/contradiction.py]
+  - task: "Baseline verification: 560 existing tests still passing"
+    files: []
+
+blockers: []
+
+questions: []
+
+decisions:
+  - spec_fixes_applied: "6 spec fixes: name stop-words, value containment, per-category thresholds, try-all-strategies, remove access_bonus, thread safety"
+  - test_fixes_applied: "8 silent-pass guards fixed, 16 adversarial tests added, 6 behavioral tests added (category_weights, same-index resolution, per-category thresholds)"
+  - builder_agent_id: "a335f24 — can be resumed if session clears"
+  - total_public_symbols: "16 (was 15, added NAME_STOP_WORDS constant)"
+
+findings:
+  - test_count: "159 test methods in test_contradiction.py (was 165, some consolidated during adversarial additions)"
+  - baseline_intact: "560 non-slow tests passing after all Phase A changes"
+  - contradiction_py_written: "1414 lines, builder iterating on test failures"
+
+worked:
+  - "Parallel Phase A agents: spec updater + test fixer ran concurrently"
+  - "Spec agent completed in ~2 min (6 surgical edits)"
+  - "Test agent completed in ~6 min (50 tool calls, thorough)"
+
+failed: []
+
+next:
+  - "Check builder agent completion (a335f24) — should be passing most tests"
+  - "If builder incomplete: resume agent or run tests manually and fix failures"
+  - "Phase C AUDIT: Launch critic agent to review contradiction.py vs spec.md"
+  - "Verify all 159 tests pass + 560 baseline tests still pass"
+  - "Run ruff on contradiction.py"
+  - "Create handoff for piece 4/5 (compression/consolidation)"
+
+files:
+  created:
+    - proofs/hermes-memory/python/hermes_memory/contradiction.py
+  modified:
+    - thoughts/shared/plans/memory-system/contradiction/spec.md
+    - proofs/hermes-memory/python/tests/test_contradiction.py
+    - .claude/CLAUDE.md
+
+# Spec changes (spec.md):
+#   Section 4.1: Added NAME_STOP_WORDS guard for "I'm X" name extractor
+#   Section 4.2: Updated extraction algorithm to apply name stop-word guard
+#   Section 5.2: Added value containment check (substring → confidence *= 0.5)
+#   Section 3.2: Added category_thresholds field to ContradictionConfig
+#   Section 6.2 step 5e: Changed to try ALL strategies per pair
+#   Section 6.2 step 7: Category-aware threshold lookup
+#   Section 7.2: Removed inherited_access_bonus, documented as caller responsibility
+#   Section 10.3: Added NAME_STOP_WORDS constant, updated total to 16 symbols
+#   Section 12: Added thread safety statement
+#
+# Test changes (test_contradiction.py):
+#   8 silent-pass guards fixed (AP2-F13)
+#   TestAdversarialInputs class: 16 tests (AP3-F1, F2, F4, F5, F9 + AP2-F1, F2, F6, F8, F11, F14)
+#   TestDetectContradictions: +4 tests (category_weights behavioral, same-index resolution)
+#   TestContradictionConfig: +2 tests (per-category thresholds)
+#
+# Builder agent status:
+#   ID: a335f24
+#   contradiction.py: 1414 lines written
+#   Status: iterating on test failures (was at ~93k tokens when last checked)
+#   Output: /private/tmp/claude-501/-Users-cosimo--hermes-hermes-agent/tasks/a335f24.output
+#
+# Resume commands:
+#   Check builder: tail -20 /private/tmp/claude-501/-Users-cosimo--hermes-hermes-agent/tasks/a335f24.output
+#   Run tests: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/test_contradiction.py -q --tb=short
+#   Run baseline: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/ -q --tb=short -m "not slow" --ignore=tests/test_contradiction.py

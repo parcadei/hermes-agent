@@ -1,0 +1,141 @@
+root_span_id: f5679b92-c851-4be4-b128-04a185d994d3
+turn_span_id: 9de4076e-720a-4991-b4ab-8754210356ea
+session_id: f5679b92-c851-4be4-b128-04a185d994d3
+---
+session: general
+date: 2026-03-02
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "Added v2_contradiction as 6th condition in longitudinal eval — 142/142 tests passing, zero false positives, 27/27 true positive replacements"
+now: "Calibrate contradiction_threshold against real Qwen3-0.6B embeddings. Also discuss how NLCDM cosine-threshold contradiction relates to hermes-memory text-based contradiction — user wants to explore combining them."
+test: |
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_wiring_discriminative.py test_coupled_engine.py test_bridge_integration.py test_dream_ops.py test_strength_decay_dream.py test_longitudinal_eval.py -v --tb=short
+  # Expect: 142 passed
+
+done_this_session:
+  - task: "Added contradiction-aware ingestion functions to test_longitudinal_eval.py"
+    files: [proofs/hermes-NLCDM/python/test_longitudinal_eval.py]
+    details: |
+      Three new functions:
+      - build_contradiction_schedule(): periodic fact-update events (every 10 days, 3 domains)
+      - ingest_with_contradiction_detection(): single-pattern ingestion with cosine-threshold replace
+      - generate_contradiction_pattern(): creates fact updates via orthogonal perturbation (value_alpha=0.20 -> cos ~0.97)
+
+  - task: "Added v2_contradiction as 6th condition in run_longitudinal_eval"
+    files: [proofs/hermes-NLCDM/python/test_longitudinal_eval.py]
+    details: |
+      New params: contradiction_threshold=0.95, contradiction_value_alpha=0.20.
+      Uses contradiction-aware ingestion for ALL patterns + injects explicit contradictions on schedule.
+      Same dream cycle as v2_coupled. Separate RNGs (contradiction_rng seed+8888) to avoid coupling.
+      Tracks total_replacements and total_contradiction_events in checkpoint metrics.
+
+  - task: "Added 4 new H7 tests for contradiction condition"
+    files: [proofs/hermes-NLCDM/python/test_longitudinal_eval.py]
+    details: |
+      test_contradiction_retrieval_preserved (H7a): P@1 > 0, within margin of v2_coupled
+      test_contradiction_no_false_replacements_in_normal_ingestion (H7b): replacements <= 3x events
+      test_contradiction_consolidation (H7c): pattern count < baseline
+      test_contradiction_importance_spread (H7d): importance range > 0.01
+
+  - task: "Updated report printer for 6 conditions"
+    files: [proofs/hermes-NLCDM/python/test_longitudinal_eval.py]
+    details: |
+      Dynamic condition filtering (only prints conditions present in results).
+      Added contradiction_replacements and contradiction_events to checkpoint output.
+
+  - task: "Geometry calibration analysis"
+    details: |
+      Measured within-domain pairwise cosine with spread=0.04 in 128d:
+        mean=0.83, min=0.75, max=0.93
+      At threshold 0.85: 18.4% false positive rate (too aggressive)
+      At threshold 0.90: 0.1% false positive rate
+      At threshold 0.95: 0% false positive rate (chosen)
+      value_alpha=0.20 produces cos ~0.97 to original (reliably above 0.95)
+      value_alpha=0.32 produces cos ~0.90 (BELOW 0.95 — would miss contradictions)
+
+decisions:
+  threshold_0_95: |
+    Chosen because within-domain max cosine is 0.93. Threshold 0.95 gives zero
+    false positives in normal ingestion. Only explicit contradiction patterns
+    (value_alpha=0.20 -> cos ~0.97) exceed it.
+  value_alpha_0_20: |
+    Lowered from 0.32 (conflict resolution test) to 0.20 because threshold is
+    higher (0.95 vs 0.85). cos = (1-α)/sqrt((1-α)²+α²) ≈ 0.97 at α=0.20.
+  separate_rng: |
+    contradiction_rng uses seed+8888 to avoid shifting main RNG state.
+    Ingestion path still consumes main rng in same order as ingest_memories
+    (domain-by-domain, pattern-by-pattern), but replacements change the patterns
+    array, causing natural divergence from v2_coupled trajectory.
+
+findings:
+  zero_false_positives: |
+    At threshold 0.95, ALL 27 replacements came from explicit contradiction events.
+    Zero false positives from normal same-domain ingestion. The gap between
+    within-domain max (0.93) and contradiction cos (0.97) is clean.
+  p1_within_margin: |
+    V2 contradiction P@1=0.8889 vs V2 coupled P@1=0.9375 (delta 0.049).
+    Small-sample artifact: ~16-28 gen-0 patterns, one miss shifts P@1 by 0.04-0.06.
+  two_contradiction_systems: |
+    hermes-memory/contradiction.py: text-based (subject extraction, polarity, NLP heuristics)
+    hermes-NLCDM/coupled_engine.py: cosine-threshold (geometric, embedding-based)
+    Spec at thoughts/shared/plans/memory-system/contradiction/spec.md explicitly says
+    "no embeddings" for hermes-memory. User wants to discuss combining both approaches.
+
+worked:
+  - "Threshold 0.95 — zero false positives with spread=0.04 geometry"
+  - "value_alpha=0.20 — reliably exceeds 0.95 threshold"
+  - "Separate RNGs for contradiction generation"
+  - "Tracking replacement count in checkpoint metrics for diagnostic"
+
+failed:
+  - "Initial value_alpha=0.32 from conflict resolution test — cos ~0.90, below 0.95 threshold"
+
+next:
+  - step: "Calibrate contradiction_threshold against real Qwen3-0.6B embeddings"
+    details: |
+      Model available in NLCDM .venv (sentence-transformers, Qwen/Qwen3-Embedding-0.6B).
+      170k pre-computed embeddings at embeddings_170k.npy (1024-dim float32).
+      Need to embed ~50 contradiction pairs:
+        - "CEO of Acme is Alice" vs "CEO of Acme is Bob" (same-topic-different-answer)
+        - "CEO of Acme is Alice" vs "Acme revenue is $10M" (same-domain-different-topic)
+      Measure the cosine gap between these categories.
+      If gap exists: set threshold inside it.
+      If gap is too narrow: need text heuristics as prerequisite filter.
+
+  - step: "Discuss combining NLCDM and hermes-memory contradiction approaches"
+    details: |
+      User expressed intent to use both systems together.
+      hermes-memory has text-based detection (subject_overlap, polarity, value_update).
+      NLCDM has cosine-threshold detection.
+      Possible architecture: text filter first (high recall), then cosine validator (high precision).
+      This is a new architectural decision not in existing specs.
+
+  - step: "Consider importance-weighted query scoring in CoupledEngine"
+    details: |
+      From previous handoff: CoupledEngine.query() uses pure cosine.
+      Adding importance weighting (score = cos_sim * importance^alpha) would help
+      conflict resolution even without contradiction-aware store.
+
+files:
+  modified:
+    - proofs/hermes-NLCDM/python/test_longitudinal_eval.py
+
+background_state:
+  - "20 Lean modules (Phases 1-12), 2295 jobs build clean, 0 sorry"
+  - "142/142 Python tests passing (was 138, +4 new contradiction longitudinal tests)"
+  - "Contradiction-aware store in CoupledEngine: off by default (coupled_engine.py:99)"
+  - "V2 Coupled P@1=0.938 baseline unchanged"
+  - "V2 Contradiction P@1=0.889 in longitudinal eval (small-sample delta from V2 Coupled)"
+  - "embeddings_170k.npy available (Qwen3-0.6B, 1024-dim, float32)"
+
+key_references:
+  - "proofs/hermes-NLCDM/python/test_longitudinal_eval.py:95-165 — contradiction functions"
+  - "proofs/hermes-NLCDM/python/test_longitudinal_eval.py:340-500 — v2_contradiction condition in run_longitudinal_eval"
+  - "proofs/hermes-NLCDM/python/test_longitudinal_eval.py:1107-1195 — H7 contradiction tests"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:99-100 — contradiction_aware params"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:241-264 — store() contradiction detection"
+  - "proofs/hermes-memory/python/hermes_memory/contradiction.py — text-based contradiction system"
+  - "thoughts/shared/plans/memory-system/contradiction/spec.md — contradiction spec (text-only, no embeddings)"
+  - "proofs/hermes-NLCDM/python/embed_170k.py — embedding script (Qwen3-0.6B)"

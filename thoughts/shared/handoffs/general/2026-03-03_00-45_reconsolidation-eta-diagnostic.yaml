@@ -1,0 +1,159 @@
+root_span_id: cd3fd3d3-fc3a-4eca-ad16-a0b711270ec3
+turn_span_id: 632f9b6c-38df-4334-9235-2f40d0debc01
+session_id: cd3fd3d3-fc3a-4eca-ad16-a0b711270ec3
+---
+session: general
+date: 2026-03-03
+status: complete
+outcome: PARTIAL_PLUS
+---
+
+goal: "Reverted emotional tagging, implemented reconsolidation in CoupledEngine, diagnosed η safety via sweep, found and fixed RNG divergence bug in longitudinal eval"
+now: "Reconsolidation mechanism is correct but simulation can't measure its effect — needs MemoryAgentBench with real query distributions. Predictive coding diagnostic passed (1.4% P@1 drop). Next: design a simulation that CAN measure reconsolidation benefit, or go straight to MemoryAgentBench integration."
+test: |
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_wiring_discriminative.py test_coupled_engine.py test_bridge_integration.py test_dream_ops.py test_strength_decay_dream.py test_longitudinal_eval.py -v --tb=short
+  # Expect: 136 passed
+
+done_this_session:
+  - task: "Reverted emotional_tagging default to False in CoupledEngine"
+    files: [proofs/hermes-NLCDM/python/coupled_engine.py]
+    details: "Line 95: emotional_tagging=True → False. Methods _prediction_error and _emotional_S0 kept as Lean-proven dead code."
+
+  - task: "Implemented reconsolidation in CoupledEngine.query()"
+    files: [proofs/hermes-NLCDM/python/coupled_engine.py]
+    details: |
+      Added reconsolidation=False, reconsolidation_eta=0.01 params to __init__ (lines 97-98).
+      After top-k retrieval, each retrieved pattern: emb += eta*(query - emb), renormalize.
+      Cache invalidated after updates. Lines 303-313.
+
+  - task: "Added v2_reconsolidation as 5th condition in longitudinal eval"
+    files: [proofs/hermes-NLCDM/python/test_longitudinal_eval.py]
+    details: |
+      New condition uses V2 coupled dream + pattern migration on wake-phase queries.
+      Added reconsolidation_eta param to run_longitudinal_eval (line 250).
+      Added 3 reconsolidation tests (H6a-c): retrieval, consolidation, importance spread.
+      Updated print_longitudinal_report for 5 conditions.
+
+  - task: "Diagnosed and fixed RNG divergence bug"
+    files: [proofs/hermes-NLCDM/python/test_longitudinal_eval.py]
+    details: |
+      Original reconsolidation used main rng for perturbation noise → consumed RNG state →
+      diverged entire trajectory from V2 coupled. Caused P@1 drop 0.938→0.550, pattern
+      count increase 26→30, REM association drop 202→113. All artifacts of different random
+      scenario, not reconsolidation damage.
+      Fix: separate recon_rng = np.random.default_rng(seed + 999) for perturbation noise.
+      After fix: P@1=0.9375 (identical to V2 coupled), 26 patterns, 201 REM associations.
+
+  - task: "η sweep diagnostic with drift tracking"
+    files: [proofs/hermes-NLCDM/python/test_longitudinal_eval.py]
+    details: |
+      TestReconsolidationEtaDiagnostic sweeps η ∈ {0.01, 0.001, 0.0001}.
+      All three produce identical P@1=0.9375. Per-step reconsolidation drift: 0.000025 cosine.
+      Reconsolidation is safe but unmeasurable in this simulation because synthetic queries
+      (pattern + small noise) are already ~98% identical to stored patterns.
+
+  - task: "Predictive coding viability diagnostic"
+    files: [proofs/hermes-NLCDM/python/test_longitudinal_eval.py]
+    details: |
+      TestPredictiveCodingDiagnostic: removes 30% of patterns closest to centroids.
+      P@1 drops only 1.4% (0.9615→0.9474). Predictive coding is viable — cluster
+      thinning that killed emotional tagging does NOT apply.
+
+  - task: "Verified RNG bug did NOT affect emotional tagging results"
+    details: |
+      Each condition in run_longitudinal_eval starts with fresh rng = default_rng(seed).
+      _emotional_S0() is purely deterministic (no RNG calls). Emotional tagging P@1
+      degradation (0.938→0.667 in longitudinal, 0.87 ceiling in CMA-ES) is legitimate,
+      not an RNG artifact.
+
+decisions:
+  rng_isolation: |
+    Reconsolidation perturbations use separate recon_rng to avoid shifting main RNG state.
+    Critical for fair comparison: conditions must share identical random trajectory except
+    for the mechanism being tested.
+  eta_0_01_validated: |
+    η=0.01 is safe — per-step drift 0.000025, P@1 identical to V2 coupled.
+    But the simulation can't measure reconsolidation benefit because synthetic queries
+    are too similar to stored patterns. Real benefit requires real query distribution.
+  predictive_coding_viable: |
+    Removing 30% patterns closest to centroids causes only 1.4% P@1 drop.
+    Unlike emotional tagging (which autonomously deprioritizes via prediction error),
+    predictive coding only stores residuals — the mechanism is different enough
+    that the cluster thinning problem doesn't apply at 30% removal.
+
+findings:
+  rng_divergence_pitfall: |
+    Any extra rng.standard_normal() call inside a condition loop shifts every
+    subsequent random draw. In a 100-day simulation with ~10 rng calls per day,
+    a single extra call on day 1 makes day 2+ completely different. This produced
+    a convincing-looking "reconsolidation failure" that was entirely an RNG artifact.
+    ALWAYS use separate RNG streams for condition-specific stochastic operations.
+  reconsolidation_unmeasurable_in_simulation: |
+    With synthetic queries (pattern + 0.02 noise), reconsolidation shift is
+    η * 0.02 = 0.0002 per retrieval. Over 50 retrievals: 0.01 total drift.
+    On unit sphere with inter-pattern separation ~0.10, this is 10% of the gap
+    but in a random direction (noise-driven), not toward a stable query centroid.
+    Need queries with systematic bias (e.g., user always retrieves pattern X
+    but with slight topic drift) to measure reconsolidation benefit.
+  emotional_tagging_confirmed_real: |
+    RNG bug was reconsolidation-specific. Emotional tagging results are unaffected.
+    CMA-ES P@1 ceiling at 0.87 and longitudinal P@1=0.667 are both legitimate.
+
+worked:
+  - "Separate RNG for condition-specific stochastic operations"
+  - "Per-step drift tracking to isolate reconsolidation drift from dream drift"
+  - "η sweep across 2 orders of magnitude to prove η-independence"
+  - "Predictive coding diagnostic via centroid thinning proxy"
+
+failed:
+  - "Reconsolidation measurement in synthetic simulation — queries too similar to stored patterns"
+  - "Initial drift tracking via initial_embeddings dict — measured dream merge drift, not recon drift"
+
+next:
+  - step: "Design simulation with systematic query drift to measure reconsolidation"
+    details: |
+      Need queries where user consistently retrieves topic X but with gradual
+      semantic drift (e.g., "machine learning" → "deep learning" → "transformers").
+      Reconsolidation should make patterns track this drift. Measure by checking
+      if reconsolidated patterns have higher P@1 for late-stage queries vs stored originals.
+  - step: "MemoryAgentBench integration"
+    details: |
+      Real benchmark with natural queries. Reconsolidation should help conflict
+      resolution: patterns queried more frequently migrate toward actual usage,
+      resolving version conflicts in favor of most-accessed version.
+      CoupledEngine already has reconsolidation=False default — flip to True for bench.
+  - step: "Implement predictive coding (now validated safe)"
+    details: |
+      Diagnostic showed 1.4% P@1 drop from 30% centroid thinning — viable.
+      Store residuals: new_pattern = pattern - projection_onto_nearest_abstraction.
+      Need to define "abstraction" (cluster centroids? merged patterns?).
+  - step: "Lean proof: reconsolidation preserves basin stability"
+    details: |
+      Need to prove: for η < f(δ_min, β, N), reconsolidation update
+      ξ → ξ + η(q - ξ) keeps ξ within its original basin of attraction.
+      Key lemma: if ||q - ξ|| < δ_min/2, then post-update ξ' is still
+      closest to ξ's original centroid.
+
+files:
+  modified:
+    - proofs/hermes-NLCDM/python/coupled_engine.py
+    - proofs/hermes-NLCDM/python/test_longitudinal_eval.py
+
+background_state:
+  - "20 Lean modules (Phases 1-12), 2295 jobs build clean, 0 sorry"
+  - "136/136 Python tests passing (was 131, +5 new)"
+  - "pycma 4.4.4 installed in .venv"
+  - "Emotional tagging reverted to False in CoupledEngine defaults"
+  - "Reconsolidation implemented but off by default (reconsolidation=False)"
+  - "V2 Coupled P@1=0.938 is the proven baseline (unchanged)"
+  - "Predictive coding validated safe via centroid thinning diagnostic"
+
+key_references:
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:95-98 — emotional_tagging=False, reconsolidation params"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py:303-313 — reconsolidation in query()"
+  - "proofs/hermes-NLCDM/python/test_longitudinal_eval.py:282-284 — recon_rng isolation"
+  - "proofs/hermes-NLCDM/python/test_longitudinal_eval.py:330-347 — reconsolidation wake-phase logic"
+  - "proofs/hermes-NLCDM/python/test_longitudinal_eval.py:800-857 — H6 reconsolidation tests"
+  - "proofs/hermes-NLCDM/python/test_longitudinal_eval.py:860-930 — η sweep diagnostic"
+  - "proofs/hermes-NLCDM/python/test_longitudinal_eval.py:935-1040 — _run_reconsolidation_with_drift"
+  - "proofs/hermes-NLCDM/python/test_longitudinal_eval.py:1043-1118 — predictive coding diagnostic"

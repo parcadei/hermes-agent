@@ -1,0 +1,136 @@
+root_span_id: phases-8-10-bridge-transfer
+session_id: phases-8-10-bridge-transfer
+---
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Phases 8-10 complete (BridgeFormation, ConditionalMonotonicity, TransferDynamics). 586 lines, 0 sorry, 2293 jobs build clean. 18 modules total."
+now: "Wire Python: strength_decay → importances in dream_cycle_xb, importance_update into CoupledEngine, novelty_bonus into store(). Then reasoning trace storage design spec."
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build"
+
+done_this_session:
+  - task: "Phase 8 — BridgeFormation.lean (208 lines, 0 sorry)"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/BridgeFormation.lean]
+    details: |
+      Definitions: dotSim, isBridge, bridgeSet, bridgeCount, extendPatterns
+      Key theorems:
+        - centroid_creates_two_bridges: centroid c with ⟨c,x_s⟩≥τ and ⟨c,x_t⟩≥τ creates ≥2 new bridges
+        - centroid_alignment_preserved: mean of K vectors preserves alignment ≥σ to target
+        - cross_domain_bridge: centroid of cross-domain traces bridges both domains
+  - task: "Phase 9 — ConditionalMonotonicity.lean (222 lines, 0 sorry)"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/ConditionalMonotonicity.lean]
+    details: |
+      Definitions: Importance, protectedSet, restrictPatterns, restrictedBridgeCount
+      Key theorems:
+        - conditional_bridge_monotonicity: MAIN — bridge count within importance-protected set P is non-decreasing under dream ops, provided P ⊆ T (survivors)
+        - selection_preserves_protected_bridges: subset selection keeping P⊆T preserves all bridges within P
+        - merge_preserves_universal_bridge: centroid merge preserves bridges to universally-bridged targets
+        - bridge_count_grows_on_insert: inserting pattern with k bridges adds ≥k new bridge pairs
+  - task: "Phase 10 — TransferDynamics.lean (156 lines, 0 sorry)"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/TransferDynamics.lean]
+    details: |
+      Key theorems:
+        - softmax_weight_lower_bound: p_μ ≥ 1/(1+(N-1)·exp(-βδ)) when μ has alignment gap δ
+        - hopfieldUpdate_dot: ⟨T(ξ), target⟩ = Σ p_μ · ⟨x_μ, target⟩ (decomposition)
+        - transfer_via_bridge: MAIN — ⟨T(ξ), target⟩ ≥ σ/(1+(N-1)·exp(-βδ)) through bridge pattern
+        - cross_domain_retrieval: corollary for cross-domain pattern retrieval
+  - task: "Updated HermesNLCDM.lean with Phase 8, 9a, 9b, 10 imports"
+    files: [proofs/hermes-NLCDM/HermesNLCDM.lean]
+
+decisions:
+  - conditional_not_global_monotonicity: "Global bridge count CAN decrease (prune/decay destroy bridges). Theorem is correctly conditional: within importance-protected subset, bridges survive."
+  - single_hop_transfer: "Phase 10 uses single-hop transfer (one Hopfield update step) instead of multi-step convergence. Gives quantitative bound σ/(1+(N-1)·exp(-βδ)) which approaches σ as β→∞."
+  - dotSim_not_cosineSim: "Used raw dot product (dotSim) instead of cosineSim for bridge definitions. For unit vectors they're equal, and dotSim avoids division-by-zero complications."
+  - phase_numbering: "Another session created MonotonicityChain.lean as Phase 9. Numbered our phases as 9a (MonotonicityChain), 9b (ConditionalMonotonicity) to avoid collision."
+
+findings:
+  lean_patterns_used: |
+    - Fin.mk.inj for extracting val equality from Fin equality
+    - add_le_add_left needs (proof, term) not (term, proof) — asymmetric
+    - Nat.cast_sub needs explicit proof that subtrahend ≤ minuend
+    - Anonymous constructor ⟨...⟩ CANNOT construct function types (→ False / ≠)
+    - Use And.intro explicitly when second conjunct is ≠
+    - div_le_div_iff₀ (not div_le_div_iff) in current Mathlib
+    - push_cast + omega fails on ℝ goals — need Nat.cast_sub then simp
+  proof_architecture: |
+    Phase 8-10 complete the OOD-via-memory proof chain:
+    Phase 7 (TraceCentroid): traces create energy wells at centroids
+    Phase 8 (BridgeFormation): centroids create ≥2 cross-domain bridges
+    Phase 9b (ConditionalMonotonicity): bridges persist for important patterns across dream cycles
+    Phase 10 (TransferDynamics): bridges enable cross-domain retrieval via Hopfield update
+
+    Full chain: dream explore → centroid → bridges → conditional persistence → cross-domain retrieval
+  existing_monotonicity_chain: |
+    MonotonicityChain.lean was created by another session (from the other handoff).
+    It proves the V1↔V2 monotonicity chain: time→decay→importance→prune→capacity.
+    Complements our Phase 9b which handles bridge monotonicity specifically.
+
+worked:
+  - "linarith with explicit mul_nonneg witnesses for ↑N-1 ≥ 0 terms"
+  - "Finset.single_le_sum for extracting single-term lower bounds from sums of non-negatives"
+  - "Using Finset.sum_le_sum + Finset.ne_of_mem_erase for bounding sums over erased sets"
+  - "simp_rw with show/from/ring for distributing multiplication through Finset.sum (codebase pattern)"
+  - "calc blocks with linarith for multi-step inequality chains"
+
+failed:
+  - "div_le_div_iff does not exist — use div_le_div_iff₀"
+  - "Anonymous constructor ⟨rfl, proof_of_neq⟩ fails because ≠ is → False, not an inductive type"
+  - "add_le_add_left has signature b≤c → ∀a, b+a≤c+a (right addition), not left — use linarith instead"
+  - "push_cast; omega for Nat.cast subtraction on ℝ — omega doesn't work on reals after push_cast"
+  - "Fintype.card_fin rewrite fails after card_erase because goal has #univ not Fintype.card — use Finset.card_univ first"
+
+next:
+  - step: "Wire Python: connect proven V1 functions to V2 dream pipeline"
+    details: |
+      1. strength_decay(S₀, β, t) → importances parameter in dream_cycle_xb
+      2. importance_update into CoupledEngine to replace uniform 0.5
+      3. novelty_bonus into CoupledEngine.store()
+      4. MemoryOrchestrator to call CoupledEngine with real importance values
+      Key files:
+        - proofs/hermes-memory/python/hermes_memory/core.py (bridge functions)
+        - proofs/hermes-NLCDM/python/dream_ops.py:1690 (dream_cycle_xb, importances param)
+        - proofs/hermes-NLCDM/python/coupled_engine.py (CoupledEngine.dream() entry point)
+  - step: "Reasoning trace storage design spec"
+    details: |
+      After wiring, design how reasoning traces get stored as first-class patterns
+      in the Hopfield network. The 0→25 association result shows traces CREATE
+      cross-domain bridges. Design spec: trace encoding, storage format, dream interaction, retrieval.
+  - step: "Python discriminative tests for the full pipeline claims"
+    details: |
+      Write tests that verify the Phase 8-10 mathematical claims empirically:
+      - Bridge formation: centroid creates ≥2 bridges (test_bridge_formation.py)
+      - Conditional monotonicity: bridges survive dream cycle for high-importance patterns
+      - Transfer dynamics: Hopfield update through bridge reaches target domain
+  - step: "Push to parcadei/mimir after wiring"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/HermesNLCDM/BridgeFormation.lean
+    - proofs/hermes-NLCDM/HermesNLCDM/ConditionalMonotonicity.lean
+    - proofs/hermes-NLCDM/HermesNLCDM/TransferDynamics.lean
+    - thoughts/shared/handoffs/general/2026-03-02_17-45_phases-8-10-bridge-transfer-complete.yaml
+  modified:
+    - proofs/hermes-NLCDM/HermesNLCDM.lean
+
+background_state:
+  - "18 Lean modules, Phases 1-10 complete, 2293 jobs build clean, 0 sorry"
+  - "MonotonicityChain.lean exists (created by another session) as Phase 9a"
+  - "parcadei/mimir repo LIVE — https://github.com/parcadei/mimir (private)"
+  - "162/162 Python tests passing across all NLCDM test files"
+  - "1455/1455 tests passing in hermes-memory"
+  - "V1 bridge functions (strength_decay, importance_update, novelty_bonus) have 0 production callers"
+  - "DSA vectorization complete: 149-204x speedup on rem_unlearn_xb"
+
+key_references:
+  - "proofs/hermes-NLCDM/HermesNLCDM/BridgeFormation.lean — Phase 8 bridge definitions and theorems"
+  - "proofs/hermes-NLCDM/HermesNLCDM/ConditionalMonotonicity.lean — Phase 9b conditional monotonicity"
+  - "proofs/hermes-NLCDM/HermesNLCDM/TransferDynamics.lean — Phase 10 transfer via bridge"
+  - "proofs/hermes-NLCDM/HermesNLCDM/TraceCentroid.lean — Phase 7 (predecessor)"
+  - "proofs/hermes-memory/python/hermes_memory/core.py — V1 bridge functions to wire"
+  - "proofs/hermes-NLCDM/python/dream_ops.py:1690 — dream_cycle_xb importances parameter"
+  - "proofs/hermes-NLCDM/python/coupled_engine.py — CoupledEngine.dream() entry point"
+  - "thoughts/shared/handoffs/general/2026-03-02_16-30_tldr-integration-map-monotonicity-chain.yaml — previous handoff with integration map"
+  - "thoughts/shared/handoffs/general/2026-03-02_15-51_ood-via-memory-lean-formalization.yaml — Phase 7 handoff (this session's input)"

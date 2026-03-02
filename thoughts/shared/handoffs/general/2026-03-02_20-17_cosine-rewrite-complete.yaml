@@ -1,0 +1,108 @@
+root_span_id: 88a6fdad-a7e4-4de3-aa48-e473c370fccb
+turn_span_id: null
+session_id: cosine-rewrite-session
+---
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Cosine rewrite for TransferDynamics.lean (Phase 10b) complete. All Lean proofs and Python tests pushed to parcadei/mimir."
+now: "Next priorities: time-based decay integration tests, activate novelty_bonus (N0=0.2, gamma=0.05), or tighten cosine bound with concentration argument."
+test: |
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_h3_real_embeddings.py test_bridge_integration.py -v --tb=short
+
+done_this_session:
+  - task: "Cosine rewrite for Phase 10 (TransferDynamics.lean)"
+    files:
+      - proofs/hermes-NLCDM/HermesNLCDM/TransferDynamics.lean
+    details: |
+      Added 5 new theorems (0 sorry):
+      1. sq_weighted_mean_le — Jensen for x² via variance >= 0
+      2. hopfieldUpdate_normSq_le_one — ||T(xi)||^2 <= 1 for unit patterns
+      3. cosineSim_ge_of_dot_ge — cosine >= dot when ||u|| <= 1, ||v|| = 1
+      4. transfer_via_bridge_cosine — MAIN: cosineSim(T(xi), target) >= sigma/(1+(N-1)exp(-beta*delta))
+      5. cross_domain_retrieval_cosine — corollary for cross-domain
+      Also added isUnitVec definition and dotSim_eq_sum_sq helper.
+  - task: "Committed Lean Phases 5-11 to hermes-agent repo"
+    files: []
+    details: "Commit 95b4761 on refactor/aiagent-decomposition. 15 files, 3728 lines."
+  - task: "Pushed Phases 7-11 Lean proofs to parcadei/mimir main"
+    files: []
+    details: "Commit 71ae746 on mimir main. 7 new Lean files, 1653 lines."
+  - task: "Pushed Python validation suite to parcadei/mimir main"
+    files: []
+    details: "Commit b3cc0ff. coupled_engine, bridge, H3, discriminative tests (26 passing)."
+
+decisions:
+  cosine_bound_approach: |
+    Used ||T(xi)|| <= 1 (convex combination of unit vectors) to get
+    cosineSim >= dotSim >= bound. Same formula, now for cosine.
+    Proved via Jensen per-coordinate (sq_weighted_mean_le) rather than
+    Mathlib's Even.convexOn_pow to avoid import issues.
+  mimir_repo_structure: |
+    proofs/ has its own .git pointing at parcadei/mimir.
+    hermes-agent repo has separate .git with fork remote.
+    Must push from proofs/ directory for mimir, not parent.
+
+findings:
+  loogle_available: |
+    ~/tools/loogle/ has a built binary for searching Mathlib lemmas.
+    Used it to confirm Real.sqrt_le_one, Even.convexOn_pow, Finset.sum_sub_distrib exist.
+  sqrt_le_one_api_change: |
+    Real.sqrt_le_one is now an iff (no positivity argument needed) in Lean 4.29/recent Mathlib.
+    Old API: (Real.sqrt_le_one h_nn).mpr — New API: Real.sqrt_le_one.mpr
+  simp_rw_pitfall: |
+    simp_rw applies ALL rewrites exhaustively. If one rewrite (like <- Finset.mul_sum)
+    succeeds once and can't apply again, simp_rw errors with "no progress".
+    Fix: use simp_rw for under-binder rewrites, then rw for structural ones.
+
+worked:
+  - "Variance >= 0 approach for sq_weighted_mean_le — clean algebraic proof"
+  - "Per-coordinate Jensen for hopfieldUpdate_normSq_le_one — avoids Cauchy-Schwarz"
+  - "Loogle for finding Mathlib lemma names and confirming availability"
+  - "cosineSim already defined in Energy.lean:120 — no new definition needed"
+
+failed:
+  - "simp_rw with multiple structural rewrites in one call — use rw instead"
+  - "unfold_let is not a valid Lean 4 tactic — use rw [<- hm_def] or simp only"
+
+next:
+  - step: "Integration tests for time-based decay"
+    details: "From monotonicity-chain handoff. Lower priority."
+  - step: "Activate novelty_bonus (N0=0.2, gamma=0.05)"
+    details: "Wire into CoupledEngine."
+  - step: "Concentration argument for tighter cosine bound"
+    details: |
+      When p_c is close to 1 (high beta or large delta), cos(T(xi), target) approx sigma.
+      Need to formalize: if p_c >= 1-eps, then cos >= sigma - O(eps).
+      This would give meaningful bounds at large N where current formula is vacuous.
+  - step: "Python tribunal thoughts not committed to mimir"
+    details: "hermes-NLCDM/python/thoughts/ still untracked on mimir."
+
+files:
+  created:
+    - proofs/hermes-NLCDM/HermesNLCDM/TransferDynamics.lean (Phase 10b additions)
+    - thoughts/shared/handoffs/general/2026-03-02_20-17_cosine-rewrite-complete.yaml
+  modified:
+    - proofs/hermes-NLCDM/HermesNLCDM.lean (imports for Phases 5-11)
+
+background_state:
+  - "19 Lean modules, Phases 1-11 complete, 0 sorry, 2294 build jobs"
+  - "26 Python tests passing (8 H3 real-embedding + 18 bridge integration)"
+  - "V1 bridge functions wired into CoupledEngine (decay_rate=0.01, novelty_N0=0.0)"
+  - "parcadei/mimir repo synced: Lean proofs + Python tests on main"
+  - "hermes-agent commit 95b4761 on refactor/aiagent-decomposition"
+  - "Phase 11 (creativity) closes the perturbation-response mechanism gap"
+  - "cosineSim defined in Energy.lean:120, dotSim in BridgeFormation.lean:40"
+  - "softmax in LocalMinima.lean:38, softmax_sum_one in LocalMinima.lean:51"
+
+key_references:
+  - "proofs/hermes-NLCDM/HermesNLCDM/TransferDynamics.lean — Phase 10 + 10b cosine rewrite"
+  - "proofs/hermes-NLCDM/python/test_h3_real_embeddings.py — 8 real-embedding H3 tests"
+  - "proofs/hermes-NLCDM/python/test_bridge_integration.py — 18 discriminative tests"
+  - "proofs/hermes-NLCDM/HermesNLCDM/Energy.lean:120 — cosineSim definition"
+  - "proofs/hermes-NLCDM/HermesNLCDM/LocalMinima.lean:38 — softmax definition"
+  - "~/tools/loogle/.lake/build/bin/loogle — Mathlib lemma search"

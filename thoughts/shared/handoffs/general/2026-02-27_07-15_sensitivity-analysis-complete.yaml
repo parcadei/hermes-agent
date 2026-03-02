@@ -1,0 +1,109 @@
+root_span_id: 7afefa71-de5f-4cd7-82ba-be5760689687
+turn_span_id: 
+session_id: 7afefa71-de5f-4cd7-82ba-be5760689687
+---
+session: general
+date: 2026-02-27
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: Built sensitivity analysis engine (Task 1 from optimization pipeline) — pure-math retrieval engine + OAT parameter sensitivity for 14-parameter hybrid dynamical memory system
+now: Build benchmark scenario suite (Task 2) — 120-200 synthetic numerical scenarios across 4 competencies for CMA-ES optimization
+test: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/ -q --tb=short -m "not slow"
+
+done_this_session:
+  - task: "Phase 1 SPEC: Created 1761-line behavioral spec for engine.py and sensitivity.py with full contracts"
+    files: [thoughts/shared/plans/memory-system/sensitivity/spec.md]
+  - task: "Phase 2 TESTS: Wrote 98 failing tests (52 engine + 46 sensitivity) across 17 test classes"
+    files: [proofs/hermes-memory/python/tests/test_engine.py, proofs/hermes-memory/python/tests/test_sensitivity.py]
+  - task: "Phase 3 ADVERSARIAL: 3 Brenner passes found 14+7+7 findings including 2 broken scenarios, score-clamping bug, classification rule errors"
+    files: [thoughts/shared/plans/memory-system/sensitivity/adversarial-pass1.md, thoughts/shared/plans/memory-system/sensitivity/adversarial-pass2.md, thoughts/shared/plans/memory-system/sensitivity/adversarial-pass3.md]
+  - task: "Phase 5 BUILD: Implemented engine.py (526 lines) and sensitivity.py (1034 lines), all 315 non-slow tests passing"
+    files: [proofs/hermes-memory/python/hermes_memory/engine.py, proofs/hermes-memory/python/hermes_memory/sensitivity.py]
+  - task: "Phase 5.5 AUDIT: 0 critical findings, 3 optional documentation suggestions. Verified core.py delegation is correct."
+    files: []
+  - task: "Committed as 97f2cb8 on refactor/aiagent-decomposition"
+    files: []
+
+blockers: []
+
+questions:
+  - "Benchmark suite: should scenarios be hardcoded or procedurally generated from difficulty parameters?"
+  - "CMA-ES: use pycma library or implement from scratch? pycma is well-tested but adds a dependency."
+  - "Should the 5 insensitive parameters be fixed at defaults now, or wait for benchmark validation?"
+  - "Per-category dynamics regimes (MEMORY_SYSTEM.md Section 12.1): should sensitivity analysis be re-run per category with different (alpha, beta) defaults?"
+
+decisions:
+  - score_not_clamped: "Boosted score (base + novelty) can exceed 1.0. Clamping would kill novelty bonus for high-scoring memories, violating cold-start survival guarantee."
+  - pairwise_tournament: "N>2 memories use sequential pairwise tournament via soft_select. Lean proofs cover N=2; N>2 is empirically validated, not formally proven."
+  - oat_sensitivity: "One-at-a-time perturbation chosen over Morris/Sobol. Misses parameter interactions but sufficient for identifying insensitive params to fix at defaults."
+  - weight_renormalization: "When perturbing w1-w4, other weights are renormalized to maintain sum=1. This violates OAT assumption (noted in report)."
+  - dynamics_only_visibility: "8/14 parameters are invisible to static scoring (only affect contraction margin). Classification uses margin erosion rule: sensitive if margin drops below 50% of baseline."
+
+findings:
+  - broken_scenarios: "AR-1 and SF-2 had wrong expected winners. Calculated actual scores to verify. Fixed: AR-1 M0 last_access_time=5.0/strength=3.0; SF-2 M1 last_access_time=20.0."
+  - eight_invisible_params: "alpha, beta, delta_t, s_max, s0, temperature, feedback_sensitivity, survival_threshold don't appear in score_memory(). Their sensitivity is ONLY detectable through contraction margin changes."
+  - sensitivity_results: "Critical: beta, delta_t, temperature (contraction boundary). Sensitive: alpha, s_max (contraction-coupled), w1, w2, w4 (affect scenario winners). Insensitive: feedback_sensitivity, novelty_decay, novelty_start, s0, survival_threshold, w3."
+  - free_params_for_cmaes: "~5-6 truly free parameters for CMA-ES: w1, w2, w4 (ranking), alpha, beta, temperature (stability). Rest can be fixed at defaults."
+  - test_statistical_fix: "test_select_large_score_gap at T=5.0 had win probability ~54.5%, not 80%. Fixed by using T=0.5 with contraction-safe params for that specific test."
+
+worked:
+  - "TDD pipeline with parallel test writing (2 agents) — both test files written simultaneously"
+  - "3 parallel Brenner passes — each found distinct issues, no redundancy"
+  - "Adversarial score calculation caught 2 broken scenarios BEFORE implementation"
+  - "Reusing core.py primitives (no reimplementation) — audit confirmed 100% delegation"
+
+failed: []
+
+next:
+  - "Build benchmark scenario suite (Task 2/8): 30-50 scenarios per competency (AR, TTL, SF, STAB), ~150 total. Synthetic numerical tables, no text."
+  - "Define objective function (Task 3/8): takes parameter vector, runs all scenarios, returns fraction correct"
+  - "Encode hard constraints (Task 4/8): contraction condition + all range constraints as callable constraint function"
+  - "Pick safe starting point (Task 5/8): baseline params already satisfy contraction (margin=0.0452)"
+  - "Run CMA-ES (Task 6/8): over ~6 free parameters, 1000-5000 trials, should complete in minutes"
+  - "Validate (Task 7/8): check winning params against analytical formulas (S*, W), held-out scenarios"
+  - "Integration test (Task 8/8): plug tuned params into full system with real text/embeddings"
+  - "Consider: the 5 insensitive params can likely be fixed now, reducing CMA-ES search space further"
+
+files:
+  created:
+    - proofs/hermes-memory/python/hermes_memory/engine.py
+    - proofs/hermes-memory/python/hermes_memory/sensitivity.py
+    - proofs/hermes-memory/python/tests/test_engine.py
+    - proofs/hermes-memory/python/tests/test_sensitivity.py
+    - thoughts/shared/plans/memory-system/sensitivity/spec.md
+    - thoughts/shared/plans/memory-system/sensitivity/adversarial-pass1.md
+    - thoughts/shared/plans/memory-system/sensitivity/adversarial-pass2.md
+    - thoughts/shared/plans/memory-system/sensitivity/adversarial-pass3.md
+  modified:
+    - .gitignore
+    - proofs/hermes-memory/python/tests/test_contraction.py
+
+# Key reference docs for next session:
+#   thoughts/shared/plans/memory-system/sensitivity/spec.md — full spec (1761 lines, post-adversarial)
+#   thoughts/shared/plans/memory-system/sensitivity/adversarial-pass2.md — critical: actual score calculations for scenarios
+#   proofs/hermes-memory/MEMORY_SYSTEM.md — formal verification + contraction condition
+#   thoughts/shared/plans/memory-system/architecture.md — overall 5-piece architecture
+#
+# The 8 optimization tasks (from knowledge document Section 12):
+#   1. Sensitivity analysis — DONE (this session). 315 tests, engine.py + sensitivity.py
+#   2. Benchmark scenario suite (NEXT) — 120-200 synthetic scenarios
+#   3. Objective function — parameter vector → score
+#   4. Hard constraints — callable constraint checker
+#   5. Safe starting point — baseline params (already have this)
+#   6. CMA-ES optimization — ~6 free params, minutes to run
+#   7. Validation — analytical formulas + held-out scenarios
+#   8. Integration test — real text/embeddings
+#
+# The 5 architecture pieces (memory system):
+#   1. Encoding — DONE (previous session). 227 tests, encoding.py
+#   2. Retrieval integration — engine.py is the scoring core; still need recall.py (how memories enter prompt)
+#   3. Contradiction/supersession — not started
+#   4. Compression/consolidation — not started
+#   5. Dynamics wiring — Rust+PyO3 (the optimization pipeline feeds into this)
+#
+# Test verification:
+#   cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/ -q --tb=short -m "not slow"
+#   Expected: 315 passed in ~11s (non-slow)
+#   Full suite: 325 total (10 slow deselected)

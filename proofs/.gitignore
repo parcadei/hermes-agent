@@ -1,0 +1,27 @@
+# Lean build cache
+.lake/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+.hypothesis/
+.coverage
+.pytest_cache/
+
+# Large data files
+embeddings_170k.npy
+*.npy
+
+# OS
+.DS_Store
+
+# IDE
+.scout/
+.claude/
+
+# Coverage
+.coverage
+htmlcov/

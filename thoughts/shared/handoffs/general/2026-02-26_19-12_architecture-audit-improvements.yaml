@@ -1,0 +1,62 @@
+root_span_id: 347b328b-2d21-45ee-8a47-a9b411c2088c
+turn_span_id: 
+session_id: 347b328b-2d21-45ee-8a47-a9b411c2088c
+---
+session: general
+date: 2026-02-26
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: Architectural audit of hermes-agent — mapped full system, identified 10 improvement areas
+now: Pick first improvement to implement (recommend AIAgent decomposition or session state unification)
+test: cat docs/architecture.md && git log --oneline -3
+
+done_this_session:
+  - task: Full codebase analysis using tldr (structure, deps, call graph, module extraction)
+    files: [cli.py, run_agent.py, model_tools.py, toolsets.py, hermes_state.py, agent/context_compressor.py, agent/prompt_builder.py, agent/prompt_caching.py, gateway/run.py, gateway/session.py, gateway/config.py, gateway/delivery.py, gateway/hooks.py, gateway/mirror.py, gateway/pairing.py, gateway/platforms/base.py, gateway/platforms/discord.py, gateway/channel_directory.py, tools/registry.py, tools/memory_tool.py, tools/delegate_tool.py]
+  - task: Created comprehensive architecture.md documenting all subsystems
+    files: [docs/architecture.md]
+  - task: Set up fork remote (parcadei/hermes-agent) and pushed docs
+    files: []
+  - task: Fixed global git email to GitHub noreply address
+    files: []
+
+blockers: []
+
+questions:
+  - Which improvement to tackle first? Recommendation is AIAgent decomposition (#1), session state unification (#2), or async conversion (#5)
+  - Should improvements be PRed back to NousResearch/hermes-agent upstream or kept in fork?
+
+decisions:
+  - fork_setup: Added parcadei/hermes-agent as 'fork' remote, kept NousResearch as 'origin'
+  - git_email: Set global to 227596144+parcadei@users.noreply.github.com
+
+findings:
+  - aiagent_god_object: "run_agent.py AIAgent has 30+ methods, 50+ fields — handles conversation loop, prompt assembly, compression, memory, tool execution, session persistence, trajectory saving, interrupt handling, delegation, logging. Primary decomposition target."
+  - triple_session_storage: "Session data stored in 3 places: SessionDB (SQLite+FTS5 in hermes_state.py), SessionStore (JSON+SQLite in gateway/session.py), JSONL transcripts (gateway/mirror.py). Can drift out of sync."
+  - circular_import: "model_tools.py ↔ tools/registry.py circular dependency — registry imports _run_async from model_tools. Works via Python import caching but fragile."
+  - import_side_effect_registration: "_discover_tools() imports all tool modules to trigger registry.register() at module scope. Order-dependent, not statically analyzable, single broken module blocks all tools."
+  - sync_async_friction: "AIAgent is sync, gateway is async. Bridge via _run_async() + ThreadPoolExecutor. Creates thread safety concerns with MemoryStore and SessionDB writes."
+  - memory_substring_matching: "MemoryStore replace/remove use substring matching — fragile. No semantic search, no tagging. File-backed with § delimiters at ~/.hermes/memories/"
+  - coarse_context_compression: "Compressor protects first 2 + last 4 messages, summarizes all middle messages into 800 tokens via aux LLM. No importance weighting or selective preservation."
+  - regex_only_security: "_scan_memory_content() and _scan_context_content() use ~15 regex patterns. Trivially bypassable. skills_guard.py has LLM audit but memory/context don't."
+  - duplicated_command_handling: "GatewayRunner._handle_message() re-implements slash commands separately from HermesCLI.process_command(). 9+ commands duplicated."
+  - untyped_tool_results: "handle_function_call() returns string. No typed success/error distinction — LLM must read text to detect failures."
+
+worked:
+  - tldr extract gave excellent module-level summaries (classes, methods, fields, call graphs) without reading full files
+  - tldr deps and tldr calls revealed the circular import and dependency structure clearly
+
+failed: []
+
+next:
+  - Pick improvement #1 (AIAgent decomposition) or #2 (session state unification) to implement first
+  - For AIAgent decomposition — extract PromptAssembler, SessionPersister, ToolExecutor, CompressionManager as separate classes
+  - For session state unification — consolidate SessionDB, SessionStore, and JSONL transcripts into single SQLite backend
+  - Break circular import between model_tools.py and tools/registry.py (move _run_async to a shared utils module)
+  - Consider creating GitHub issues on parcadei/hermes-agent for each improvement to track work
+
+files:
+  created: [docs/architecture.md, thoughts/shared/handoffs/general/2026-02-26_19-12_architecture-audit-improvements.yaml]
+  modified: []

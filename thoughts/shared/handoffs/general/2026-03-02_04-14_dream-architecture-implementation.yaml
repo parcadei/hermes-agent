@@ -1,0 +1,89 @@
+root_span_id: 7148dcbb-3037-4e25-9062-fbe66c6bcbee
+turn_span_id: ef54514c-08c6-43ba-b9d2-3164ff017a7c
+session_id: 7148dcbb-3037-4e25-9062-fbe66c6bcbee
+---
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Implement neuroscience-informed dream architecture redesign — SHY repulsion, pruning, merging, cross-domain REM explore"
+now: "Commit changes, then consider formalizing 'repulsion increases capacity' as Lean theorem"
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_coupled_engine.py test_dream_ops.py test_dream_validation.py test_benchmark.py test_proof_validation.py test_capacity_boundary.py test_dream_redesign.py -v"
+
+done_this_session:
+  - task: "Wrote behavioral spec (28 contracts, 5 global invariants, 7 risks)"
+    files: [thoughts/shared/plans/memory-system/dream-redesign-spec.md]
+
+  - task: "Wrote 34 failing tests across 6 test classes"
+    files: [proofs/hermes-NLCDM/python/test_dream_redesign.py]
+
+  - task: "Implemented 4 new dream_ops functions + DreamReport dataclass"
+    result: |
+      - DreamReport: frozen dataclass (patterns, associations, pruned_indices, merge_map)
+      - nrem_repulsion_xb: SHY-based global repulsion with R1 postcondition guard
+      - nrem_prune_xb: greedy near-duplicate removal with P3 second-pass verification
+      - nrem_merge_xb: union-find connected-component clustering → centroid replacement
+      - rem_explore_cross_domain_xb: PGO-wave perturbation-response correlation
+    files: [proofs/hermes-NLCDM/python/dream_ops.py]
+
+  - task: "Updated dream_cycle_xb to 5-stage pipeline returning DreamReport"
+    result: "repulsion → prune → merge → rem_unlearn (unchanged) → rem_explore_cross_domain"
+    files: [proofs/hermes-NLCDM/python/dream_ops.py]
+
+  - task: "Updated CoupledEngine.dream() to handle variable-size X"
+    result: "Removes pruned entries, replaces merged groups with centroid MemoryEntry, backward-compatible dict return"
+    files: [proofs/hermes-NLCDM/python/coupled_engine.py]
+
+  - task: "Fixed 2 tuple-unpacking callers in test_proof_validation.py"
+    files: [proofs/hermes-NLCDM/python/test_proof_validation.py]
+
+  - task: "Audit: fixed 3 issues (R1 postcondition guard, label ordering, input validation)"
+    files: [proofs/hermes-NLCDM/python/dream_ops.py]
+
+  - task: "Full regression: 146 passed, 4 skipped (pre-existing Lean), 0 failures"
+
+decisions:
+  - preserve_old_functions: "nrem_replay_xb, rem_explore_xb kept unchanged — other code may use them"
+  - r1_postcondition_guard: "nrem_repulsion_xb falls back to original if delta_min decreases (O(N^2) check only for N<=300)"
+  - deterministic_tie_breaking: "Label majority vote ties broken by smallest label value"
+  - importance_weighted_centroids_deferred: "Spec says simple mean, importance-weighted centroid deferred to v2"
+
+findings:
+  repulsion_effect_at_tight_clusters: |
+    spread=0.04 (cos_within=0.83): repulsion increased δ_min by 59% (0.126→0.200)
+    spread=0.02 (cos_within=0.95): merge reduced N by 31% (100→69), P@1 improved 0.050→0.072
+    spread=0.10 (cos_within=0.42): nothing fires — patterns already well-separated
+  operations_fire_at_right_regimes: |
+    Repulsion activates when within-cluster cosine > 0.7 (min_sep=0.3 threshold)
+    Prune activates when cosine > 0.95 (near-duplicates)
+    Merge activates when groups of 3+ have pairwise cosine > 0.90
+  old_nrem_confirmed_dead: |
+    Original NREM-replay (Hopfield update) still confirmed zero effect on P@1 at every β_nrem.
+    New SHY-based repulsion has measurable positive effect at tight cluster regimes.
+
+worked:
+  - "TDD pipeline: spec → failing tests → implement → audit → fix"
+  - "Parallel agent execution (spec, tests, implementation as separate agents)"
+  - "Postcondition guard on R1 — cheap safety net for repulsion"
+
+failed:
+  - "Audit CRITICAL #2 was false positive — prune second-pass logic is correct"
+
+next:
+  - "Commit all changes (dream_ops.py, coupled_engine.py, test_dream_redesign.py, test_proof_validation.py)"
+  - "Consider importance-weighted centroids in nrem_merge_xb (v2 enhancement)"
+  - "Formalize 'repulsion increases capacity' as Lean theorem (trivially true from capacity formula)"
+  - "Formalize 'SHY convergence: repeated downscaling + pruning reaches fixed point'"
+  - "Tune operation thresholds for the hermes-agent production use case (spread may differ from test setup)"
+  - "Update test_benchmark.py if dream_cycle_xb signature changes affect it"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/python/test_dream_redesign.py
+    - thoughts/shared/plans/memory-system/dream-redesign-spec.md
+  modified:
+    - proofs/hermes-NLCDM/python/dream_ops.py
+    - proofs/hermes-NLCDM/python/coupled_engine.py
+    - proofs/hermes-NLCDM/python/test_proof_validation.py

@@ -1,0 +1,77 @@
+root_span_id: 442e2022-02d4-4aba-b3b5-d61c19ba0fb1
+turn_span_id: 
+session_id: 442e2022-02d4-4aba-b3b5-d61c19ba0fb1
+---
+session: general
+date: 2026-02-26
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: TDD pipeline Phases 0-3 complete for AIAgent decomposition — spec hardened by 4 adversarial passes, revised from 4 classes to 2+1
+now: Resume at Phase 3.25 (discriminative validation) then Phase 4 (phased plan) and Phase 5 (build loop)
+test: /Users/cosimo/.hermes/hermes-agent/venv/bin/python3 -m pytest tests/ -q --tb=short
+
+done_this_session:
+  - task: "Phase 0: Coverage baseline — 12% coverage across 8 refactor targets, 172 tests pass"
+    files: [thoughts/shared/plans/aiagent-decomposition/coverage-gaps.md, thoughts/shared/plans/aiagent-decomposition/existing-behavior.md, thoughts/shared/plans/aiagent-decomposition/coverage.lcov]
+  - task: "Phase 1: Behavioral spec — 1093-line spec with current contracts, proposed interfaces, import fixes"
+    files: [thoughts/shared/plans/aiagent-decomposition/spec.md]
+  - task: "Phase 3 Pass 1 (Brenner Level-Split + Paradox): 10 findings — clarify tool mismatch, cache contract implicit, session_id atomicity"
+    files: [thoughts/shared/plans/aiagent-decomposition/brenner-pass1.md]
+  - task: "Phase 3 Pass 2 (Brenner Scale + Materialize): 16 findings — pre-existing session_log_file bug, vacuous circular import test, flush uses main model at full context cost"
+    files: [thoughts/shared/plans/aiagent-decomposition/brenner-pass2.md]
+  - task: "Phase 3 Pass 3 (Brenner Exclusion + Transpose): CRITICAL revision — decomposition shrunk from 4 classes to 2 classes + 1 function"
+    files: [thoughts/shared/plans/aiagent-decomposition/brenner-pass3.md]
+  - task: "Phase 3 Pass 4 (CK Architecture Review): Viability 9/10, confirmed revised decomposition ready, found O(N^2) JSON log writes"
+    files: [thoughts/shared/plans/aiagent-decomposition/ck-pass4.md]
+
+blockers: []
+
+questions:
+  - "Phase 3.25: What hypotheses need discriminative validation before building? Key candidates: (1) callback pattern actually reduces coupling, (2) execute_tool_calls as function handles all 5 agent-loop tools correctly, (3) SessionPersister atomicity fixes the session_log_file bug"
+  - "Skip Phase 3.5 (prior art)? This is a straightforward OOP decomposition, not novel architecture"
+  - "Should Phase 6 (decompose run_conversation itself) be in scope for this pipeline or deferred?"
+
+decisions:
+  - decomposition_revised: "4 classes → 2 classes + 1 function. CompressionManager dropped (34 lines, zero state, 5 callbacks = worse than inline). ToolExecutor becomes module-level function with frozen dataclass config (zero mutable state)."
+  - final_components: "PromptAssembler (class, owns cache), SessionPersister (class, owns session_id + DB), execute_tool_calls() (function + ToolExecConfig dataclass), _compress_context stays on AIAgent"
+  - circular_import_fix: "Extract _run_async to agent/async_bridge.py — both model_tools.py and tools/registry.py import from shared module"
+  - eager_import_fix: "Gut tools/__init__.py to empty docstring — 17 eager imports redundant with model_tools._discover_tools() lazy loading"
+
+findings:
+  - coverage_baseline: "12% across 8 targets. run_agent.py at 6% (85/1329 stmts). hermes_state.py at 0%. tools/registry.py best at 69%. Only 13 tests touch refactor target code."
+  - preexisting_bug: "After compression, session_id updates but session_log_file does NOT (run_agent.py:1384). SessionPersister fixes this automatically via property setter."
+  - clarify_mismatch: "model_tools._AGENT_LOOP_TOOLS has 4 members but _execute_tool_calls handles 5 inline (including clarify). Flagged independently by Pass 1 and Pass 2."
+  - on_tool_executed_missing: "Nudge counter resets (_turns_since_memory, _iters_since_skill) have no mechanism in extracted interface. Flagged by Pass 1 and Pass 3."
+  - ashby_gap: "run_conversation has 15 code paths. Decomposition addresses only 3. Remaining 12 stay monolithic. Future Phase 6 needed."
+  - json_log_on2: "SessionPersister writes full JSON after every tool iteration = O(N^2). Mitigated with save_interval parameter."
+  - vacuous_test: "Proposed circular import test (python -c 'from tools.registry import registry') already passes today. Need structural assertion instead."
+  - flush_cost: "flush_memories sends full conversation (~100K tokens) to main model. ~$1.50 per compression event at Opus pricing."
+
+worked:
+  - "Parallel agent launches (3 Brenner passes simultaneously) saved significant wall-clock time"
+  - "tldr extract gave accurate module-level analysis for spec generation"
+  - "Independent adversarial passes found the same issues (clarify mismatch, on_tool_executed) — high confidence findings"
+  - "Pass 3 Exclusion-Test was most valuable — killed 2 of 4 proposed classes with concrete evidence (zero mutable state)"
+
+failed: []
+
+next:
+  - "Phase 3.25: Discriminative validation — test 3 key hypotheses with existing code: (1) parameter count of execute_tool_calls vs current field access count, (2) SessionPersister setter atomicity, (3) PromptAssembler cache invalidation paths"
+  - "Phase 4: Create phased-plan.yaml incorporating all adversarial findings. Suggested phase order: (1) circular import fix, (2) eager import fix, (3) PromptAssembler extraction, (4) SessionPersister extraction, (5) execute_tool_calls extraction, (6) cleanup + run_conversation sub-handlers"
+  - "Phase 5: Build loop — TDD per phase. Tests first from spec, then implement, then validate"
+  - "Phase 5.5: Audit — Brenner hygiene + CK control audit on implementation"
+  - "Phase 6: Integration validation — 172 existing tests must still pass, smoke test protocol for stdout equivalence"
+
+files:
+  created:
+    - thoughts/shared/plans/aiagent-decomposition/coverage-gaps.md
+    - thoughts/shared/plans/aiagent-decomposition/existing-behavior.md
+    - thoughts/shared/plans/aiagent-decomposition/coverage.lcov
+    - thoughts/shared/plans/aiagent-decomposition/spec.md
+    - thoughts/shared/plans/aiagent-decomposition/brenner-pass1.md
+    - thoughts/shared/plans/aiagent-decomposition/brenner-pass2.md
+    - thoughts/shared/plans/aiagent-decomposition/brenner-pass3.md
+    - thoughts/shared/plans/aiagent-decomposition/ck-pass4.md
+  modified: []

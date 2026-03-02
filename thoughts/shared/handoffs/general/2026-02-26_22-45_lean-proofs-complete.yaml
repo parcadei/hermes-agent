@@ -1,0 +1,94 @@
+root_span_id: d9f78060-68df-4da0-b19c-89a8937a6d70
+turn_span_id: 
+session_id: d9f78060-68df-4da0-b19c-89a8937a6d70
+---
+session: memory-system-formalization
+date: 2026-02-26
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: Machine-verified Lean 4 formalization of Hermes memory system dynamics (25 theorems, 0 sorries, 0 warnings)
+now: Derive markdown spec (Option B) and Python implementation (Option C) from the verified Lean formalization
+test: cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-memory && lake build
+
+done_this_session:
+  - task: Analyzed memory equations from research doc through VSM/cybernetics lens
+    files: []
+  - task: Identified 4 problems with existing equations (ACT-R amputation, frozen strength, frozen weights, sigmoid squashing)
+    files: []
+  - task: Framed memory system as hybrid dynamical system (continuous ODE decay + discrete access events)
+    files: []
+  - task: Created Lean 4 project with Mathlib dependency
+    files: [proofs/hermes-memory/lakefile.lean, proofs/hermes-memory/lean-toolchain, proofs/hermes-memory/HermesMemory.lean]
+  - task: Wrote and proved all 25 theorems across 6 sections with 0 sorries
+    files: [proofs/hermes-memory/HermesMemory/MemoryDynamics.lean]
+
+blockers: []
+
+questions:
+  - Should we derive the markdown spec (Option B) next, or jump straight to Python implementation (Option C)?
+  - The Lean formalization adds a strength update rule (S' = S + alpha*(Smax - S)) not in the original research doc - confirm this is desired
+  - Memory system architecture plan (docs/architecture.md) has 5 open decisions (D1-D5) that need resolution before build
+
+decisions:
+  - lean_over_markdown: "Chose Option A (Lean formalization) over Option B (markdown spec) because machine-verified proofs prevent broken intuition from propagating into implementation"
+  - strength_update_rule: "Added S' = S + alpha*(Smax - S) as discrete dynamics at access events - equivalent to (1-alpha)*S + alpha*Smax, converges geometrically to Smax"
+  - importance_feedback: "Modeled as clamp(imp + delta*signal, 0, 1) — algodonic signal from Beer's VSM perspective"
+  - scoring_weights_constrained: "ScoringWeights structure enforces w_i >= 0 and sum = 1 as type-level invariants"
+
+findings:
+  - original_equations_are_4_models: "7 equations from research doc are really 3 independent models (cosine sim, exp decay, ACT-R activation) + 1 linear combiner"
+  - system_is_hybrid_dynamical: "Continuous flow (dR/dt = -R/S giving R(t) = exp(-t/S)) between events, discrete jumps (R=1, S updated) at access events"
+  - mathlib_naming_drift: "Many Lean 4 Mathlib lemma names have changed from what's in docs — div_le_div_iff, div_le_iff don't exist, need le_of_mul_le_mul_right + field_simp workarounds"
+  - tendsto_const_nhds_inference: "Lean can't infer implicit args for tendsto_const_nhds in mul/sub chains — must bind to explicit typed have first"
+  - field_simp_for_division: "field_simp is the most reliable way to clear denominators in Lean, then nlinarith/linarith for the polynomial arithmetic"
+
+worked:
+  - "le_of_mul_le_mul_right for division inequalities — multiply both sides by positive denominator product, use field_simp to verify equalities, nlinarith for the resulting polynomial"
+  - "Filter.tendsto_atBot + Filter.eventually_atTop for explicit epsilon-delta style limit proofs when composition lemmas are hard to find"
+  - "tendsto_exp_atBot.comp for composing exp with linear functions going to -infinity"
+  - "tendsto_pow_atTop_nhds_zero_of_lt_one for geometric convergence (1-alpha)^n -> 0"
+  - "Explicit Tendsto type annotations to help Lean infer implicit arguments in tendsto_const_nhds chains"
+
+failed:
+  - "div_le_div_iff, div_le_iff, le_div_iff_le_mul_of_pos — all unknown identifiers in this Mathlib version"
+  - "simp_rw [strengthIter_closed] — can't rewrite inside bare function argument to Tendsto; need ext+exact to build function equality first"
+  - "mul_le_mul_right as an iff — it's not an iff in current Mathlib, it's a plain inequality"
+  - "simp at this for simplifying mul_zero/sub_zero in Tendsto targets — sometimes makes no progress; rwa with explicit lemma names more reliable"
+
+next:
+  - Derive markdown spec (Option B) from proven Lean — translate each definition and theorem into a clean mathematical specification document
+  - Derive Python implementation (Option C) from proven Lean — each Lean def becomes a Python function, each theorem becomes a property test
+  - Resolve 5 open decisions in docs/architecture.md (D1-D5) before memory system build
+  - Build memory system Phases 1-6 from architecture.md using the verified formalization as ground truth
+  - Consider extending formalization with sigmoid monotonicity, score monotonicity in individual components, and spreading activation (ACT-R extension)
+
+files:
+  created:
+    - proofs/hermes-memory/lakefile.lean
+    - proofs/hermes-memory/lean-toolchain
+    - proofs/hermes-memory/HermesMemory.lean
+    - proofs/hermes-memory/HermesMemory/MemoryDynamics.lean
+  modified: []
+
+# Lean Formalization Structure (for next session reference)
+#
+# proofs/hermes-memory/HermesMemory/MemoryDynamics.lean — 325 lines, 6 sections:
+#   Section 1 (Retention): retention, retention_pos, retention_at_zero, retention_le_one,
+#     retention_mem_Icc, retention_antitone, retention_mono_strength, retention_tendsto_zero
+#   Section 2 (Strength): strengthUpdate, strengthUpdate_alt, strength_increases, strength_le_max,
+#     strength_nondecreasing, strengthIter, strengthIter_closed, strengthIter_tendsto
+#   Section 3 (Sigmoid): sigmoid, sigmoid_denom_pos, sigmoid_pos, sigmoid_lt_one,
+#     sigmoid_mem_Ioo, sigmoid_mem_Icc
+#   Section 4 (Scoring): ScoringWeights (structure), score, score_nonneg, score_le_one, score_mem_Icc
+#   Section 5 (Feedback): clamp01, importanceUpdate, clamp01_mem_Icc, importanceUpdate_mem_Icc
+#   Section 6 (Invariants): system_score_bounded, system_score_bounded_after_feedback
+#
+# Key definitions:
+#   retention(t, S) = exp(-t/S)
+#   strengthUpdate(alpha, S, Smax) = S + alpha*(Smax - S)
+#   sigmoid(x) = 1 / (1 + exp(-x))
+#   score(w, rel, rec, imp, act) = w1*rel + w2*rec + w3*imp + w4*sigmoid(act)
+#   clamp01(x) = max(0, min(x, 1))
+#   importanceUpdate(imp, delta, signal) = clamp01(imp + delta*signal)

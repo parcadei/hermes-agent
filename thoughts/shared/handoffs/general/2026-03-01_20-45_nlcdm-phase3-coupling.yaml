@@ -1,0 +1,91 @@
+root_span_id: 4e3e88f3-1303-4563-90db-3b614fc38dfb
+turn_span_id: d5399610-e2ad-4de0-b38b-979c44f00a13
+session_id: 4e3e88f3-1303-4563-90db-3b614fc38dfb
+---
+session: general
+date: 2026-03-01
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: NLCDM Phase 3 complete — pairwise coupling symmetry, sign properties, coordinate descent in Coupling.lean, zero sorry, zero warnings
+now: Commit Phase 3, then start Phase 4 (conditional capacity) or Python P1 (embedding separation stats)
+
+test: cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build
+
+done_this_session:
+  - task: "Proved cosine similarity symmetry: cos(u,v) = cos(v,u)"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Coupling.lean]
+  - task: "Proved coupling energy symmetry: E_coupling(u,v) = E_coupling(v,u)"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Coupling.lean]
+  - task: "Proved coupling energy sign properties: W>0 → E≤0 (attraction), W<0 → E≥0 (repulsion), W=0 → E=0"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Coupling.lean]
+  - task: "Proved shared basin theorem (positive coupling) and separated basins theorem (negative coupling)"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Coupling.lean]
+  - task: "Proved frozen-coupling descent: all local energies ↓ + coupling frozen → total energy ↓"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Coupling.lean]
+  - task: "Proved MAIN THEOREM coupled_single_update_descent: coordinate descent for coupled system via double-sum decomposition into row-k and col-k terms"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Coupling.lean]
+  - task: "Wired Coupling.lean into root module"
+    files: [proofs/hermes-NLCDM/HermesNLCDM.lean]
+
+blockers: []
+
+questions:
+  - "Should Phase 4 (conditional capacity) or Python P1 (embedding separation) be next?"
+  - "The coupled_single_update_descent requires h_coupling_bound as hypothesis — should Phase 4 prove this bound from norm constraints, or is the hypothesis-based approach sufficient?"
+
+decisions:
+  - coordinate_descent_approach: "Used alternating minimization / coordinate descent instead of simultaneous update. Update one memory k while freezing others. This is cleaner to prove and matches Gauss-Seidel style optimization."
+  - coupling_bound_as_hypothesis: "Made the coupling bound an explicit hypothesis rather than deriving it from norm constraints. This keeps the theorem general — any sufficient bound works. A future theorem can instantiate it."
+  - double_sum_decomposition: "Decomposed the double sum ∑_i ∑_j into row-k terms (i=k), col-k terms (j=k), and unchanged terms (i≠k ∧ j≠k). Used Finset.add_sum_erase to extract the k-th row, then the k-th column from remaining rows."
+  - split_if_sub_lemma: "Proved inline helper: ∑(if P then a-b else 0) = ∑(if P then a else 0) - ∑(if P then b else 0). Used Finset.sum_sub_distrib + split_ifs."
+
+findings:
+  - hook_false_positive_confirmed: "Hook reported 'compiles successfully' but lake build failed. Lines 399 had a bogus lambda expression. Always verify with lake build."
+  - nlinarith_for_sign_properties: "nlinarith closes coupling energy sign goals (involving products of sqrt * smoothWeight) when given explicit mul_nonneg hypotheses for the sqrt terms."
+  - finset_add_sum_erase_pattern: "To extract one term from a Finset.univ sum: rw [← Finset.add_sum_erase _ _ (Finset.mem_univ k)]. This gives f(k) + ∑_{i ∈ univ.erase k} f(i)."
+  - finset_ne_of_mem_erase: "Finset.ne_of_mem_erase gives i ≠ k from i ∈ univ.erase k. Essential for the coupling decomposition."
+  - lt_irrefl_for_self_coupling: "show ¬(k.val < k.val) from lt_irrefl _ eliminates self-coupling terms (k < k is False)."
+  - couplingEnergy_comm_via_ring: "After rewriting cosineSim_comm, the remaining couplingEnergy symmetry is pure algebra — ring closes it."
+
+worked:
+  - "Finset.add_sum_erase to extract row-k and col-k from double sums"
+  - "nlinarith with explicit mul_nonneg for sign property proofs"
+  - "split_ifs for classifying coupling terms by i=k, j=k, or neither"
+  - "Inline split_if_sub helper for decomposing conditional sums"
+  - "Always verifying with lake build after hook reports success"
+
+failed:
+  - "Hook false positive: reported success when lambda expression was malformed (line 399)"
+  - "Attempted simp_rw with anonymous Prop lambda — Lean cannot synthesize Decidable for abstract Prop"
+  - "Finset.sum_comm alone doesn't close coupling_sum_symmetric — need manual split_ifs with omega for val comparisons"
+
+next:
+  - "Commit Phase 3 work (Coupling.lean + HermesNLCDM.lean update)"
+  - "Phase 4 (per HermesNLCDM.lean roadmap): Conditional Capacity — prove capacity bounds N_max as function of β, d, pattern separation δ"
+  - "Phase 5: Modular Structure — block-diagonal decomposition of W matrix"
+  - "Phase 5.5: Block-Diagonal Decomposition"
+  - "Phase 6: Full System Lyapunov"
+  - "Python P1 (can run parallel): Embedding separation statistics — empirical δ(N), N_max where P(δ ≥ δ_min) ≥ 0.99"
+  - "Python P_threshold (PRIORITY per previous handoff): Sweep τ_high/τ_low coupling thresholds"
+
+phase3_theorem_map:
+  - "Coupling.lean: dot_comm (dot product commutativity)"
+  - "Coupling.lean: cosineSim_comm (cosine similarity symmetry)"
+  - "Coupling.lean: couplingEnergy_comm (coupling energy symmetry)"
+  - "Coupling.lean: couplingEnergy_nonpos_of_weight_pos (W>0 → E≤0)"
+  - "Coupling.lean: couplingEnergy_nonneg_of_weight_neg (W<0 → E≥0)"
+  - "Coupling.lean: couplingEnergy_zero_of_weight_zero (W=0 → E=0)"
+  - "Coupling.lean: shared_basin_of_positive_coupling (positive coupling → shared basin)"
+  - "Coupling.lean: separated_basins_of_negative_coupling (negative coupling → separated basins)"
+  - "Coupling.lean: totalEnergy_decomp (E_total = Σ E_local + Σ_{i<j} E_coupling)"
+  - "Coupling.lean: totalEnergy_local_descent_frozen_coupling (frozen coupling descent)"
+  - "Coupling.lean: coupling_unchanged_when_not_k (unchanged terms helper)"
+  - "Coupling.lean: coupled_single_update_descent (MAIN: coordinate descent — Phase 3)"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/HermesNLCDM/Coupling.lean
+  modified:
+    - proofs/hermes-NLCDM/HermesNLCDM.lean

@@ -1,0 +1,94 @@
+root_span_id: 0d6eb5a6-b0bf-4060-a942-35e91866d3b6
+turn_span_id:
+session_id: 0d6eb5a6-b0bf-4060-a942-35e91866d3b6
+---
+session: general
+date: 2026-02-27
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: Build contradiction.py (piece 3/5) — TDD pipeline phases A+B+C
+now: Phase A — incorporate 8 adversarial fixes into spec+tests, then Phase B build contradiction.py
+
+test: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/ -q --tb=short -m "not slow" --ignore=tests/test_contradiction.py
+
+done_this_session:
+  - task: "Resumed from adversarial-complete handoff, analyzed all 3 adversarial passes (39 findings)"
+    files: [thoughts/shared/handoffs/general/2026-02-27_15-20_contradiction-adversarial-complete.yaml]
+  - task: "Verified baseline: 560 tests passing, contradiction.py does NOT exist yet"
+    files: []
+  - task: "Ingested cross-domain research synthesis (Graphiti, Mem0, MARK, AGM, NLI literature)"
+    files: []
+
+blockers: []
+
+questions: []
+
+decisions:
+  - research_validates_design: "Cross-domain research (Graphiti bitemporal, MARK trust/persistence, AGM entrenchment, reconsolidation) validates the spec's approach. No spec changes needed from research."
+  - decoupled_deactivation: "contradiction.py returns superseded_indices frozenset; does NOT modify MemoryState. Caller sets active=False. Resolves AP1-F1."
+  - try_all_strategies: "Pipeline tries ALL applicable strategies per pair (not first match). Highest-confidence wins. Fixes AP1-F12."
+  - per_category_thresholds: "Add per-category threshold dict to ContradictionConfig. Resolves AP1-F3."
+  - remove_access_bonus: "inherited_access_bonus removed from resolve_contradictions(). Caller concern. Fixes AP1-F2."
+  - name_extractor_guard: "Add stop-word exclusion for 'I'm X' pattern. Fixes AP3-F2 greedy name trap."
+  - value_containment_check: "VALUE_UPDATE checks substring containment before declaring different values. Fixes AP3-F4."
+  - silent_pass_removal: "Remove all 'if result.has_contradiction:' guards from 8 tests. Assert directly. Fixes AP2-F13."
+
+findings:
+  - baseline_tests: "560 non-slow tests passing (encoding+optimizer+recall+etc). test_contradiction.py has 165 tests, all will fail until module built."
+  - adversarial_summary: "39 findings across 3 passes: 3 critical, 13 high, 14 medium, 5 low. 8 MUST-FIX before build."
+  - research_alignment: "Score decay over deletion, category-aware resolution, entrenchment=composite score — all validated by literature. Novel: no existing system ties resolution rules to memory categories."
+  - known_v1_limitations: "Paraphrase blindness (AP3-F1, 60-70% miss rate), double negatives (AP3-F5), max_candidates scaling (AP3-F6), non-Latin text (AP3-F8)."
+
+worked:
+  - "Reading all 3 adversarial passes + spec + tests in parallel for fast context loading"
+  - "TDD pipeline continuation pattern from previous sessions"
+
+failed: []
+
+next:
+  - "PHASE A: Incorporate adversarial fixes into spec (8 critical fixes from handoff decisions)"
+  - "PHASE A: Update spec sections 4.1 (name guard), 5.2 (containment check), 6.2 (all strategies), 7.2 (remove access bonus), 7.3 (per-category thresholds)"
+  - "PHASE A: Add ~25 adversarial test cases to test_contradiction.py"
+  - "PHASE A: Fix 8 silent-pass test guards (AP2-F13) — replace 'if result.has_contradiction:' with assert"
+  - "PHASE A: Add category_weights behavioral tests (AP2-F10)"
+  - "PHASE A: Add same-index conflict resolution tests (AP2-F5)"
+  - "PHASE B: Implement contradiction.py — 15 public symbols, pass all ~190 tests"
+  - "PHASE C: Audit implementation vs spec (critic + judge verification)"
+  - "Create handoff for piece 4/5 (compression/consolidation)"
+
+files:
+  created: []
+  modified: []
+
+# Key reference docs:
+#   thoughts/shared/plans/memory-system/contradiction/spec.md — 15-section spec, 15 public symbols
+#   thoughts/shared/plans/memory-system/contradiction/adversarial-pass1.md — 14 findings (spec gaps)
+#   thoughts/shared/plans/memory-system/contradiction/adversarial-pass2.md — 14 findings (test coverage)
+#   thoughts/shared/plans/memory-system/contradiction/adversarial-pass3.md — 11 findings (empirical)
+#   thoughts/shared/plans/memory-system/architecture.md — overall 5-piece architecture
+#   proofs/hermes-memory/python/tests/test_contradiction.py — 165 failing tests (TDD)
+#   proofs/hermes-memory/python/hermes_memory/encoding.py — encoding gate (dependency)
+#   proofs/hermes-memory/python/hermes_memory/engine.py — MemoryState (dependency)
+#
+# CRITICAL ADVERSARIAL FIXES (Phase A must-do):
+#   1. Name extractor stop-word guard (AP3-F2) — spec 4.1
+#   2. Value containment check in VALUE_UPDATE (AP3-F4) — spec 5.2
+#   3. Per-category thresholds in ContradictionConfig (AP1-F3) — spec 3.2 + 6.2 + 7.3
+#   4. Try all strategies per pair, not first match (AP1-F12) — spec 6.2 step 5e
+#   5. Remove 8 silent-pass guards from tests (AP2-F13)
+#   6. Remove inherited_access_bonus from resolve_contradictions (AP1-F2) — spec 7.2
+#   7. Add category_weights behavioral tests (AP2-F10)
+#   8. Add same-index conflict resolution tests (AP2-F5)
+#
+# PUBLIC SYMBOLS (15 total — contradiction.py must export all):
+#   Classes: ContradictionConfig, SubjectExtraction, ContradictionDetection,
+#            ContradictionResult, SupersessionRecord
+#   Enums: ContradictionType, SupersessionAction
+#   Functions: detect_contradictions, resolve_contradictions, extract_subject,
+#              subject_overlap, detect_polarity
+#   Constants: FIELD_EXTRACTORS, DEFAULT_CATEGORY_WEIGHTS, POLARITY_KEYWORDS
+#
+# Test command (existing suite): cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/ -q --tb=short -m "not slow" --ignore=tests/test_contradiction.py
+# Expected: 560 passed

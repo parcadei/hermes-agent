@@ -1,0 +1,154 @@
+root_span_id: 7934278e-aa3f-4810-800c-ffaf66676eb6
+turn_span_id: fd229dc1-89e7-4e52-a21a-9fdaa765c111
+session_id: 7934278e-aa3f-4810-800c-ffaf66676eb6
+---
+session: general
+date: 2026-03-01
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "Scaffold hermes-NLCDM (NonLinear Coupled Dynamical Memory) and start Lean Phase 1"
+now: "Fix remaining 8 sorrys in EnergyBounds.lean and LocalMinima.lean — Energy.lean compiles clean"
+
+test: |
+  # Lean (from proofs/hermes-NLCDM/):
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM && lake build
+  # Python (from proofs/hermes-NLCDM/python/):
+  cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && uv run pytest tests/ -q --tb=short
+
+baseline: "Python: 15 passed. Lean Energy.lean: compiles clean (0 sorry). EnergyBounds.lean: 5 sorrys. LocalMinima.lean: 3 sorrys."
+
+done_this_session:
+  - task: "Ingested full research synthesis (12 sections, ~30 papers)"
+    files: []
+    details: |
+      Covers: Classical Hopfield, Modern Hopfield (Ramsauer 2020), Lyapunov/Contraction theory,
+      Lotka-Volterra competition, Sparse/Modular architecture, CLS, Psychedelics/Entropy,
+      Adversarial review (7 criticisms), Integration architecture, Lean proof strategy (6 phases).
+  - task: "Counter-reviewed 4 pushback points on synthesis"
+    files: []
+    details: |
+      Accepted: Phase 5.5 (block-diagonal decomposition) addition, τ threshold sensitivity.
+      Rejected: Section 8 being "just metaphor" (it's empirical calibration), Lean infra gaps
+      (Mathlib has graph Laplacians, PSD proofs). Updated synthesis incorporated all fixes.
+  - task: "Scaffolded proofs/hermes-NLCDM/ with Lean 4 + Python"
+    files:
+      - proofs/hermes-NLCDM/lakefile.lean
+      - proofs/hermes-NLCDM/lean-toolchain
+      - proofs/hermes-NLCDM/HermesNLCDM.lean
+      - proofs/hermes-NLCDM/HermesNLCDM/Energy.lean
+      - proofs/hermes-NLCDM/HermesNLCDM/EnergyBounds.lean
+      - proofs/hermes-NLCDM/HermesNLCDM/LocalMinima.lean
+      - proofs/hermes-NLCDM/python/pyproject.toml
+      - proofs/hermes-NLCDM/python/nlcdm_core.py
+      - proofs/hermes-NLCDM/python/tests/test_energy.py
+  - task: "Energy.lean compiles clean — sigmoid, smoothWeight, energy defs"
+    files: [proofs/hermes-NLCDM/HermesNLCDM/Energy.lean]
+    details: |
+      Proved: sigmoid_pos, sigmoid_lt_one, sigmoid_strictMono (via div_lt_div_of_pos_left + exp_lt_exp),
+      sigmoid_continuous, smoothWeight_continuous, smoothWeight_zero.
+      Defined: smoothWeight (smooth sigmoid thresholds), WeightParams, MemoryState, SystemConfig,
+      cosineSim, logSumExp, localEnergy (Modern Hopfield), couplingEnergy, totalEnergy.
+  - task: "Python harness: 15/15 tests passing"
+    files: [proofs/hermes-NLCDM/python/tests/test_energy.py]
+    details: |
+      Tests mirror Lean properties: sigmoid bounds/monotonicity, smooth weight regimes
+      (attractive/neutral/repulsive), lse bounds, energy boundedness, softmax sum/concentration.
+      Found and fixed: repulsive regime sign semantics — W(s) for s < τ_low gives positive weight
+      (amplifying the negative similarity); repulsion comes from E_coupling formula, not W sign.
+
+blockers: []
+
+questions:
+  - "Which sorry to prioritize next? lse_le_max_plus and smoothWeight_abs_le are foundational."
+  - "Should we search Mathlib for div_lt_div_iff or use the Loogle skill?"
+  - "When to start Python Phase P_threshold (τ sweep)? Can parallel with Lean sorry-fixing."
+
+decisions:
+  - smooth_weight_semantics: |
+      W(s) > 0 for s >> τ_high (attractive) AND s << τ_low (amplifies negative sim).
+      Repulsion comes from E_coupling = -½ W · norms, not from W being negative.
+      This is correct behavior — verified empirically in Python tests.
+  - lean_toolchain: "v4.29.0-rc2, same as V1 hermes-memory project"
+  - div_lt_div_of_pos_left: |
+      Used instead of div_lt_div_iff (not found in current Mathlib).
+      Proof: 0 < 1 → 0 < (1+exp(-b)) → (1+exp(-b)) < (1+exp(-a)) → 1/(1+exp(-a)) < 1/(1+exp(-b))
+
+findings:
+  - energy_lean_compiles: |
+      Energy.lean: 0 sorrys, all definitions and 6 theorems compile.
+      Key proof pattern: positivity + exp_lt_exp + linarith for sigmoid properties.
+  - finset_iio_issue: |
+      Finset.Iio on Fin types caused parse errors. Replaced with
+      explicit if j.val < i.val conditional sum.
+  - smooth_weight_repulsive_sign: |
+      smooth_weight(params, -1.0) returns positive value (~1.0).
+      This is correct: W(s) = s·σ(attractive) - s·σ(repulsive).
+      For s=-1: attractive≈0, repulsive≈-1, W = 0-(-1) = +1.
+      The energy formula E_coupling = -½W·norms makes this repulsive.
+
+worked:
+  - "positivity tactic handles all exp/sum positivity goals"
+  - "div_lt_div_of_pos_left for reciprocal monotonicity"
+  - "uv sync for Python deps (hypothesis, scipy)"
+  - "simp [smoothWeight] for zero-at-zero proof"
+
+failed:
+  - "div_lt_div_iff — not found in current Mathlib (renamed or removed)"
+  - "ring_nf; simp for smoothWeight_zero left extra goals — simp alone works"
+  - "Finset.Iio in def caused unexpected 'in' parse error"
+  - "pip not available in hermes venv — use uv instead"
+
+next:
+  - "Fix 8 remaining sorrys: EnergyBounds.lean (5) + LocalMinima.lean (3)"
+  - "Priority sorrys: lse_le_max_plus, localEnergy_bounded_below, softmax_concentration"
+  - "Use /loogle-search to find Mathlib lemmas for sorry proofs"
+  - "Start Python Phase P_threshold: sweep τ_high/τ_low parameter space"
+  - "After Phase 1 complete: begin Lean Phase 2 (single update convergence)"
+  - "Research synthesis document NOT saved to file — user has it in conversation. Save to thoughts/shared/plans/memory-system/nlcdm-research-synthesis.md"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/lakefile.lean
+    - proofs/hermes-NLCDM/lean-toolchain
+    - proofs/hermes-NLCDM/HermesNLCDM.lean
+    - proofs/hermes-NLCDM/HermesNLCDM/Energy.lean
+    - proofs/hermes-NLCDM/HermesNLCDM/EnergyBounds.lean
+    - proofs/hermes-NLCDM/HermesNLCDM/LocalMinima.lean
+    - proofs/hermes-NLCDM/python/pyproject.toml
+    - proofs/hermes-NLCDM/python/conftest.py
+    - proofs/hermes-NLCDM/python/nlcdm_core.py
+    - proofs/hermes-NLCDM/python/tests/__init__.py
+    - proofs/hermes-NLCDM/python/tests/test_energy.py
+    - thoughts/shared/handoffs/general/2026-03-01_12-30_nlcdm-scaffold-phase1.yaml
+  modified: []
+
+# KEY CONTEXT FOR NEXT SESSION:
+#
+# The user provided a massive research synthesis document (not saved to file yet).
+# It covers Sections 1-12 plus a counter-review. Key content:
+#   - Modern Hopfield energy: E(ξ) = -lse(β, X^T ξ) + ½ξ^Tξ
+#   - Smooth weight function: W(s) = s·σ(k(s-τ_high)) - s·σ(k(τ_low-s))
+#   - Lean proof phases: 1(energy) → 2(update) → 3(coupling) → 4(capacity)
+#     → 5(modular) → 5.5(block-diagonal) → 6(full Lyapunov)
+#   - Python phases: P_threshold(τ sweep) → P1(embedding sep) → P2(capacity)
+#     → P3(basins) → P4(dynamics) → P5(float error) → P6(benchmarks)
+#   - Lean/Python split: Lean proves conditionals, Python validates probabilities
+#   - Design decisions: sigmoid smooth thresholds (not hard cutoffs),
+#     LaSalle invariance to exclude saddles, Phase 5.5 for tractable Phase 6
+#
+# SORRY INVENTORY (8 total):
+# EnergyBounds.lean:
+#   1. lse_le_max_plus (line ~35) — lse upper bound
+#   2. dot_le_norms (line ~52) — Cauchy-Schwarz
+#   3. localEnergy_bounded_below (line ~58) — main energy bound
+#   4. smoothWeight_abs_le (line ~65) — |W(s)| ≤ |s|
+#   5. totalEnergy_bounded_below (line ~80) — full system bound
+# LocalMinima.lean:
+#   6. softmax_concentration (line ~66) — finite-β bound
+#   7. localEnergyGrad_small_at_pattern (line ~99) — gradient bound
+#   8. hessian_positive_definite_at_pattern (line ~135) — 2nd order condition
+#
+# V1 proof system at proofs/hermes-memory/ is SEPARATE and COMPLETE (1455 tests).
+# V2 (hermes-NLCDM) is the new coupled system being built here.

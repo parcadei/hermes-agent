@@ -1,0 +1,71 @@
+root_span_id: 20678e5d-08d2-460a-b7a1-a014b15593bf
+turn_span_id: f4441e9b-fc9c-4d1a-8991-2cdccd0cd9c4
+session_id: 20678e5d-08d2-460a-b7a1-a014b15593bf
+---
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Phases 4-5 complete: dream effectiveness + morning pass on real Qwen3 embeddings. 49 tests pass."
+now: "Commit all changes. Then: wire temporal dynamics from hermes-memory into dream pipeline. Consider per-cluster adaptive beta."
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_real_embeddings.py test_dream_lifecycle.py -v --tb=short"
+
+done_this_session:
+  - task: "Phase 4 — Dream effectiveness on real geometry (9 tests)"
+    files: [proofs/hermes-NLCDM/python/test_real_embeddings.py]
+  - task: "Phase 5 — Morning pass: re-embed vs centroid (4 tests)"
+    files: [proofs/hermes-NLCDM/python/test_real_embeddings.py]
+
+decisions:
+  - capacity_finding: "PREDICTION WRONG. N_max formula gives <1 at real geometry (δ_min=0.30, β=10). System IS near effective capacity. Dreams are essential for retrieval viability, not optional optimization."
+  - centroid_beats_reembed: "Geometric centroid outperforms any text re-embedding for retrieval. Concatenation loses 0.09-0.25 cosine similarity vs centroid. Architecture: centroid=retrieval surface, lineage text=interpretability metadata."
+  - morning_pass_architecture: "Don't replace centroid with LLM summary embedding. Keep centroid for retrieval, store summary text as metadata for agent readability."
+
+findings:
+  capacity_reversal: |
+    At real geometry (δ_min≈0.30, β=10), exp(β·δ)≈20. With 21 patterns
+    competing, softmax can barely discriminate. P@1=0.05 at β=10.
+    Dreams maintain retrieval by reducing N and raising δ_min.
+    Without dreams, pattern accumulation collapses retrieval.
+  repulsion_irrelevant: |
+    Zero pairs within repulsion range (cosine>0.70) after adaptive
+    merge/prune. Repulsion is a no-op at this geometry. The merge+prune
+    operations handle all the separation work.
+  rem_explore_works: |
+    5 cross-domain associations found (hobbies↔work, health↔work,
+    learning↔work). Perturbation response correlation >0.3.
+    Work domain is hub (gen-30 pattern). This ONLY works on real
+    geometry — orthogonal synthetic centroids produce zero associations.
+  centroid_superiority: |
+    Centroid→domain cosine: 0.83-0.87. Re-embed(concat)→domain: 0.62-0.76.
+    Re-embed(label)→domain: 0.58-0.70. Centroid discrimination margin: 0.26.
+    Label margin: 0.06. BUT end-to-end retrieval is 10/10 for both —
+    the gap only matters at scale with many competing domains.
+  two_proof_systems: |
+    hermes-memory has StrengthDecay.lean (temporal fading: S(t)=S₀·e^(-β·t)),
+    MemoryDynamics.lean (forgetting curve R(t)=e^(-t/S)), NoveltyBonus, SoftSelection.
+    hermes-NLCDM has energy/capacity/attractor proofs. Together they cover
+    the full memory system but aren't wired together yet.
+
+worked:
+  - "Testing dream operations individually (merge, prune, repulsion, explore) to decompose contribution"
+  - "Using paraphrase groups as natural merge candidates for morning pass test"
+  - "Natural language query set (10 domain-specific questions) for end-to-end retrieval comparison"
+
+failed:
+  - "Initial capacity prediction (N_max=millions) was completely wrong — real geometry has tight effective capacity"
+  - "Morning pass hypothesis (re-embed beats centroid) disproved — centroid is geometrically optimal"
+
+next:
+  - "Commit all Phase 4+5 changes (29 tests in test_real_embeddings.py, 20 in test_dream_lifecycle.py)"
+  - "Wire StrengthDecay from hermes-memory into dream pipeline (temporal fading for old patterns)"
+  - "Consider: per-cluster adaptive beta (higher β for well-separated clusters, lower for tight ones)"
+  - "Consider: repulsion min_sep parameter should adapt like merge/prune thresholds"
+  - "Scale testing: 1000+ patterns, ANN approximations for O(N²) operations"
+  - "Integration: hook memory system into Hermes agent loop (store experiences, sleep between sessions)"
+
+files:
+  modified:
+    - proofs/hermes-NLCDM/python/test_real_embeddings.py  # added Phase 4 (9 tests) + Phase 5 (4 tests) = 13 new tests

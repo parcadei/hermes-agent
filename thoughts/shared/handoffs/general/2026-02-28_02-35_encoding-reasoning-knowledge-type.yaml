@@ -1,0 +1,86 @@
+root_span_id: ce2ed0a6-0759-4d25-833a-29b3e9fbea43
+turn_span_id:
+session_id: ce2ed0a6-0759-4d25-833a-29b3e9fbea43
+---
+session: general
+date: 2026-02-28
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Add 'reasoning' to KNOWLEDGE_TYPE_TO_CATEGORY via TDD — fix encoding metadata path gap"
+now: "Build orchestrator (memory lifecycle manager) with store() and query() API + 2 bridge functions"
+
+test: cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-memory/python && source .venv/bin/activate && python -m pytest tests/test_encoding.py -q --tb=short
+baseline: "107 passed (was 100), 0 failed, 0 regressions"
+
+done_this_session:
+  - task: "Added 'reasoning' -> 'reasoning' to KNOWLEDGE_TYPE_TO_CATEGORY"
+    files: [proofs/hermes-memory/python/hermes_memory/encoding.py]
+    details: |
+      Single line addition at encoding.py:89. Now 11 knowledge_types mapped (was 10).
+      Smart agents can classify reasoning via metadata path (source_type="semantic",
+      knowledge_type="reasoning") and get correct importance 0.40 instead of falling
+      through to "context" -> fact (0.60).
+  - task: "Added 7 TDD tests in TestReasoningKnowledgeTypeShortcut"
+    files: [proofs/hermes-memory/python/tests/test_encoding.py]
+    details: |
+      Tests cover: mapping exists, correct category/confidence/importance via shortcut,
+      should_store=True, short text bypasses length/connective checks,
+      reasoning vs context importance ordering (0.4 < 0.6).
+
+blockers: []
+
+questions:
+  - "Carried from prior session: Are the 5 encoding observations (no emotion category, 'no ' too aggressive, etc.) worth filing as issues or intentional design choices?"
+
+decisions:
+  - tdd_not_full_pipeline: "Used targeted TDD (baseline → failing tests → implement → validate) instead of full /tdd-pipeline. The change is a single dict entry with clear spec backing — adversarial passes and prior art scan would be overkill."
+  - semantic_reasoning_bypasses_length_check: "Verified that _apply_write_policy already has special case at encoding.py:763-767 — when source_type='semantic' and knowledge_type is in mapping, returns True without length/connective checks. This is correct: LLM already validated the content."
+
+findings:
+  - write_policy_semantic_bypass: |
+      encoding.py:758-767: _apply_write_policy has existing logic to bypass
+      reasoning length/connective checks for semantic memories. Adding
+      "reasoning" to the mapping automatically activates this path.
+  - full_shortcut_path: |
+      evaluate() line 504: semantic shortcut triggers → category="reasoning", confidence=0.85
+      _apply_write_policy line 763: semantic+reasoning → always True
+      Result: should_store=True, importance=0.4, no length/connective gating
+
+worked:
+  - "Targeted TDD for small well-specified changes — fast and complete"
+  - "Reading _apply_write_policy to understand the semantic bypass BEFORE writing tests"
+  - "Testing the contrast (reasoning vs context importance) to document the actual bug"
+
+failed: []
+
+next:
+  - "Build orchestrator (memory lifecycle manager) with store() and query() API"
+  - "Implement bridge 1: map_contradictions_to_candidates(flagged_indices, candidates) → set is_contested=True"
+  - "Implement bridge 2: semantic_extraction_to_memory_state(extraction) → MemoryState for recall"
+  - "Optional: Tighten 'no ' correction pattern to reduce false positives"
+  - "Full baseline rerun: cd proofs/hermes-memory/python && ./run_tests.sh (expect ~1150 passed)"
+
+files:
+  created: []
+  modified:
+    - proofs/hermes-memory/python/hermes_memory/encoding.py  # Added "reasoning": "reasoning" to KNOWLEDGE_TYPE_TO_CATEGORY
+    - proofs/hermes-memory/python/tests/test_encoding.py  # Added TestReasoningKnowledgeTypeShortcut (7 tests)
+
+# Key references:
+# Integration interface map: thoughts/shared/handoffs/general/2026-02-28_02-23_optimizer-hardening-integration-review.yaml
+# Encoding spec: thoughts/shared/plans/memory-system/encoding/spec.md (Section 5.6, KNOWLEDGE_TYPE_TO_CATEGORY)
+# Cascade analysis: thoughts/shared/plans/memory-system/audit/cascade-effects-analysis.md
+#
+# Module status (all 5 done + audited):
+#   1. encoding.py — Done + reasoning gap fixed (this session)
+#   2. recall.py — Done
+#   3. contradiction.py — Done
+#   4. consolidation.py — Done + audited + remediated
+#   5. optimizer.py — Done + audited + hardened
+#   Integration review: COMPLETE (4 green, 2 red gaps documented)
+#
+# Remaining orchestrator bridge functions:
+#   1. flagged_indices: frozenset[int] → is_contested: bool (per candidate)
+#   2. SemanticExtraction → MemoryState (first_observed→creation_time, last_updated→last_access_time, compute strength)

@@ -1,0 +1,114 @@
+root_span_id: 0bd711b5-22a1-4092-8dff-518e76eaa55e
+turn_span_id: 
+session_id: 0bd711b5-22a1-4092-8dff-518e76eaa55e
+---
+session: general
+date: 2026-02-27
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: Built recall.py (piece 2/5) — adaptive retrieval with score-gap depth selection, three-tier detail, budget control
+now: Integration test — wire tuned params + recall into full pipeline with real text/embeddings
+test: cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/ -q --tb=short -m "not slow"
+
+done_this_session:
+  - task: "Phase 1 SPEC: 982-line recall spec with 10 public symbols, 17 sections"
+    files: [thoughts/shared/plans/memory-system/recall/spec.md]
+  - task: "Phase 2 TESTS: 161 failing tests across 13 classes (TDD)"
+    files: [proofs/hermes-memory/python/tests/test_recall.py]
+  - task: "Phase 3 ADVERSARIAL: 3 Brenner passes (28 findings: 2 critical, 6 high, 10 medium)"
+    files: [thoughts/shared/plans/memory-system/recall/adversarial-pass1.md, thoughts/shared/plans/memory-system/recall/adversarial-pass2.md, thoughts/shared/plans/memory-system/recall/adversarial-pass3.md]
+  - task: "Test update: 161 → 201 tests incorporating all adversarial mitigations"
+    files: [proofs/hermes-memory/python/tests/test_recall.py]
+  - task: "Phase 5 BUILD: Implemented recall.py (879 lines), all 201 tests pass"
+    files: [proofs/hermes-memory/python/hermes_memory/recall.py]
+  - task: "Phase 5.5 AUDIT: Critic found 2 fixable issues (config defaults, undocumented gating). Both fixed."
+    files: [thoughts/shared/plans/memory-system/recall/audit-findings.md]
+
+blockers: []
+
+questions:
+  - "Integration test: how to wire recall into PromptAssembler? Need real MemoryEntry objects with content strings."
+  - "Should RecallConfig be stored as JSON/YAML or constructed in code?"
+  - "Per-category parameter regimes (MEMORY_SYSTEM.md Section 12.1) — should recall thresholds differ for factual vs experiential?"
+  - "Epsilon 0.01 has near-zero headroom (0.0002). Next optimizer run should include epsilon-fallback-rate constraint."
+
+decisions:
+  - adaptive_k_gap_detection: "Sort composite scores, find largest gap, cut there + buffer B=2. Based on Taguchi et al. EMNLP 2025."
+  - within_k_normalization: "Normalize scores within selected k memories for tier assignment, not across all. Prevents dilution from irrelevant memories."
+  - positional_fallback: "When all k scores identical, distribute ceil(k/3) per tier instead of all-HIGH. AP1-F3."
+  - demotion_before_drop: "Budget constraint demotes HIGH→MEDIUM→LOW before dropping any memory. Preserves existence signals."
+  - empty_memories_before_gate: "recall() checks empty memories BEFORE gating. Empty DB with trivial message → gated=False, k=0 (not gated=True). AP1-F5."
+  - budget_overflow_field: "RecallResult includes budget_overflow when min_k forces over-budget. Consumer must handle. AP1-F1."
+  - chars_per_token_configurable: "Default 4 (English). Set to 2 for CJK/code-heavy content. AP2-F1."
+  - top_slice_truncation: "adaptive_k truncates scores to [:max_k+buffer+1] before gap detection. Prevents O(n) degeneration on large pools. AP2-F3."
+  - no_temperature_dependency: "Temperature only affects soft_select (dynamics), NOT score_memory. Spec's original temperature interaction section was wrong. AP3-E1."
+
+findings:
+  - temperature_false_premise: "CRITICAL: Temperature=4.9265 has ZERO effect on score_memory(). Only affects soft_select() in dynamics. Spec Section 7 completely rewritten."
+  - budget_contradiction: "CRITICAL: min_k guarantee and budget<=total_budget are contradictory when min_k LOW memories exceed budget. Resolved with priority hierarchy + overflow field."
+  - epsilon_fragility: "Minimum observed max_gap is 0.0102 (only 0.0002 above epsilon=0.01). Any weight change could push to constant fallback."
+  - adaptive_k_bias: "Adaptive-k optimizes recall (never miss relevant) over precision (may include irrelevant). Mean k=6.3 with tuned params."
+  - demotion_worthless_no_content: "MEDIUM→LOW demotion saves ~1 token when content=None. MIN_DEMOTION_SAVINGS_TOKENS=5 skips pointless demotions."
+  - test_count_progression: "161 (initial) → 201 (post-adversarial) → 201 final. 560 total suite (encoding+optimizer+recall)."
+
+worked:
+  - "TDD pipeline: spec → 161 failing tests → 3 adversarial passes → 40 more tests → build → audit → fix"
+  - "Parallel adversarial passes: Pass 2 and Pass 3 ran concurrently, found different failure classes"
+  - "Critic audit caught real issues: default config deviation and undocumented gating logic"
+  - "Adversarial Pass 3 empirically tested hypotheses using existing engine.py code — killed the temperature assumption with 4 lines"
+
+failed:
+  - "Parallel spec edits caused duplicate section numbering (both Passes 2 and 3 wrote '## 19'). Fixed manually."
+
+next:
+  - "Integration test: Wire recall into full system with real text/embeddings and MemoryEntry content"
+  - "Build recall.py piece of architecture.md integration (PromptAssembler.build() injection)"
+  - "Consider per-category parameter regimes (factual vs experiential may need different thresholds)"
+  - "Contradiction/supersession (piece 3/5): Not started"
+  - "Compression/consolidation (piece 4/5): Not started"
+  - "Dynamics wiring in Rust+PyO3 (piece 5/5): Optimization + recall results feed here"
+  - "Recalibrate epsilon with optimizer — add fallback-rate constraint (< 5% over 500 pools)"
+
+files:
+  created:
+    - proofs/hermes-memory/python/hermes_memory/recall.py
+    - proofs/hermes-memory/python/tests/test_recall.py
+    - thoughts/shared/plans/memory-system/recall/spec.md
+    - thoughts/shared/plans/memory-system/recall/adversarial-pass1.md
+    - thoughts/shared/plans/memory-system/recall/adversarial-pass2.md
+    - thoughts/shared/plans/memory-system/recall/adversarial-pass3.md
+    - thoughts/shared/plans/memory-system/recall/audit-findings.md
+  modified:
+    - proofs/hermes-memory/python/tests/test_recall.py
+
+# Key reference docs:
+#   thoughts/shared/plans/memory-system/recall/spec.md — 1632-line spec with 20 sections (3 adversarial)
+#   thoughts/shared/plans/memory-system/recall/audit-findings.md — final audit (PASS after fixes)
+#   thoughts/shared/plans/memory-system/architecture.md — overall 5-piece architecture
+#   proofs/hermes-memory/MEMORY_SYSTEM.md — formal verification + contraction condition
+#
+# The 5 architecture pieces (memory system):
+#   1. Encoding — DONE. 227 tests, encoding.py
+#   2. Retrieval — DONE. engine.py + optimizer.py + recall.py. 201+132 tests.
+#   3. Contradiction/supersession — not started
+#   4. Compression/consolidation — not started
+#   5. Dynamics wiring — Rust+PyO3 (optimization + recall results feed here)
+#
+# TUNED PARAMETERS (production config, from optimizer session):
+#   w1 = 0.4109, w2 = 0.0500, w3 = 0.3000, w4 = 0.2391
+#   alpha = 0.5000, beta = 1.0000, temperature = 4.9265
+#   delta_t = 1.0, s_max = 10.0, s0 = 1.0 (pinned)
+#
+# RECALL DEFAULTS:
+#   adaptive_k: min_k=1, max_k=10, gap_buffer=2, epsilon=0.01
+#   tiers: high_threshold=0.7, mid_threshold=0.4 (within-k normalized)
+#   budget: total=800 tokens, shares 55/30/15, chars_per_token=4
+#   gating: min_length=8, trivial patterns (25 words)
+#   format: high_max_chars=400, medium=200, low=80
+#
+# Test verification:
+#   cd proofs/hermes-memory/python && .venv/bin/python -m pytest tests/ -q --tb=short -m "not slow"
+#   Expected: 560 passed in ~79s (non-slow)
+#   Full suite: 579 total (19 slow deselected)

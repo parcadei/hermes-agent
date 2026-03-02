@@ -1,0 +1,126 @@
+root_span_id: f6c9ba4d-01e6-460c-adac-bfb47f6c3dba
+turn_span_id: 
+session_id: f6c9ba4d-01e6-460c-adac-bfb47f6c3dba
+---
+session: memory-system-formalization
+date: 2026-02-26
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: Extended Lean 4 formalization to address 3 failure modes — lock-in, thrashing, cold-start (55 theorems, 0 sorries, 0 warnings)
+now: Derive markdown spec (Option B) and Python implementation (Option C) from the verified Lean formalization
+test: cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-memory && lake build
+
+done_this_session:
+  - task: Identified 3 failure modes in original formalization (lock-in, thrashing, cold-start starvation)
+    files: []
+  - task: "StrengthDecay.lean — Anti-Lock-in: 11 theorems proving strength decay, combined dynamics, steady state S* < Smax, and fixpoint"
+    files: [proofs/hermes-memory/HermesMemory/StrengthDecay.lean]
+  - task: "SoftSelection.lean — Anti-Thrashing: 9 theorems proving sigmoid monotonicity, soft selection, complementarity P(A)+P(B)=1, equal scores = 50/50"
+    files: [proofs/hermes-memory/HermesMemory/SoftSelection.lean]
+  - task: "NoveltyBonus.lean — Anti-Cold-Start: 10 theorems proving novelty bonus decay, exploration window positivity, bonus above threshold, cold-start survival"
+    files: [proofs/hermes-memory/HermesMemory/NoveltyBonus.lean]
+  - task: Updated HermesMemory.lean with new imports
+    files: [proofs/hermes-memory/HermesMemory.lean]
+
+blockers: []
+
+questions:
+  - Should we derive the markdown spec (Option B) next, or jump straight to Python implementation (Option C)?
+  - Memory system architecture plan (docs/architecture.md) has 5 open decisions (D1-D5) that need resolution before build
+
+decisions:
+  - strength_decay_model: "dS/dt = -beta*S between events, solution S(t) = S0*exp(-beta*t). Combined with access update gives affine contraction map."
+  - combined_dynamics: "S_{n+1} = (1-alpha)*exp(-beta*Delta)*S_n + alpha*Smax — contraction factor gamma = (1-alpha)*exp(-beta*Delta) in (0,1)"
+  - steady_state_formula: "S* = alpha*Smax / (1 - (1-alpha)*exp(-beta*Delta)) — proved S* < Smax (anti-lock-in) and S* is fixpoint"
+  - soft_selection_via_sigmoid: "P(select A over B) = sigma((s1-s2)/T) — reuses sigmoid from MemoryDynamics, proved monotonicity and complementarity"
+  - novelty_bonus_design: "N(t) = N0*exp(-gamma*t) — decaying bonus added to score. Exploration window W = ln(N0/epsilon)/gamma"
+  - unused_hypotheses_as_underscores: "Some theorem parameters (like ht0, hεN in noveltyBonus_above_threshold) are needed for the theorem statement's mathematical meaning but not used in the proof body — use _ prefix"
+
+findings:
+  - field_simp_ring_failure: "field_simp followed by ring can fail when field_simp introduces Nat.rawCast terms. Workaround: manual calc chain with mul_right_cancel0 and div_mul_cancel0"
+  - exp_eq_one_iff_missing: "exp_eq_one_iff doesn't exist in this Mathlib. Use exp_le_exp in both directions + exp_zero rewrite to prove exp(x) != 1"
+  - div_lt_iff_missing: "div_lt_iff doesn't exist. Use lt_of_mul_lt_mul_right with the positive denominator after establishing (a/d)*d < b*d via field_simp+linarith"
+  - log_pos_iff_expects_nonneg: "Real.log_pos_iff expects 0 <= x (not 0 < x). Use .le on a strict positivity proof"
+  - norm_num_for_arithmetic: "simp can't close 1+1=2 in sigmoid_at_zero. Need norm_num after simp for concrete arithmetic"
+  - explicit_implicit_args: "When Lean can't infer implicit args (e.g., gamma in noveltyBonus_pos), use @ for explicit application"
+  - rfl_for_definitional_equality: "have hcf : combinedFactor a b d = (1-a)*exp(-b*d) := rfl works when the equation is definitional. Don't use 'by unfold; rfl' which sometimes leaves goals open"
+
+worked:
+  - "mul_right_cancel0 for proving equalities by cancelling nonzero factors — essential for fixpoint proofs"
+  - "div_mul_cancel0 for (a/b)*b = a when b != 0"
+  - "calc chains with ring for algebraic identities too complex for nlinarith"
+  - "exp_neg + exp_log + inv_div chain for proving exp(-log(a/b)) = b/a"
+  - "field_simp for clearing denominators in complementarity proof, then nlinarith with hexp_mul hint"
+  - "le_of_mul_le_mul_right for cross-multiplication in division inequalities"
+  - "norm_num for concrete numeric arithmetic after simp"
+
+failed:
+  - "field_simp; ring in steadyState_is_fixpoint — produces Nat.rawCast terms that ring can't handle"
+  - "exp_eq_one_iff — doesn't exist in this Mathlib version"
+  - "div_lt_iff — doesn't exist in this Mathlib version"
+  - "by unfold combinedFactor for rfl-level equality — sometimes leaves goals open, use rfl directly"
+
+next:
+  - Derive markdown spec (Option B) from proven Lean — translate each definition and theorem into a clean mathematical specification document
+  - Derive Python implementation (Option C) from proven Lean — each Lean def becomes a Python function, each theorem becomes a property test
+  - Resolve 5 open decisions in docs/architecture.md (D1-D5) before memory system build
+  - Build memory system Phases 1-6 from architecture.md using the verified formalization as ground truth
+
+files:
+  created:
+    - proofs/hermes-memory/HermesMemory/StrengthDecay.lean
+    - proofs/hermes-memory/HermesMemory/SoftSelection.lean
+    - proofs/hermes-memory/HermesMemory/NoveltyBonus.lean
+  modified:
+    - proofs/hermes-memory/HermesMemory.lean
+
+# Full Formalization Structure (for next session reference)
+#
+# proofs/hermes-memory/HermesMemory/MemoryDynamics.lean — 325 lines, 6 sections, 25 theorems:
+#   Section 1 (Retention): retention, retention_pos, retention_at_zero, retention_le_one,
+#     retention_mem_Icc, retention_antitone, retention_mono_strength, retention_tendsto_zero
+#   Section 2 (Strength): strengthUpdate, strengthUpdate_alt, strength_increases, strength_le_max,
+#     strength_nondecreasing, strengthIter, strengthIter_closed, strengthIter_tendsto
+#   Section 3 (Sigmoid): sigmoid, sigmoid_denom_pos, sigmoid_pos, sigmoid_lt_one,
+#     sigmoid_mem_Ioo, sigmoid_mem_Icc
+#   Section 4 (Scoring): ScoringWeights (structure), score, score_nonneg, score_le_one, score_mem_Icc
+#   Section 5 (Feedback): clamp01, importanceUpdate, clamp01_mem_Icc, importanceUpdate_mem_Icc
+#   Section 6 (Invariants): system_score_bounded, system_score_bounded_after_feedback
+#
+# proofs/hermes-memory/HermesMemory/StrengthDecay.lean — 220 lines, 2 sections, 11 theorems:
+#   Section 7 (Strength Decay): strengthDecay, strengthDecay_pos, strengthDecay_at_zero,
+#     strengthDecay_le_init, strengthDecay_antitone, strengthDecay_tendsto_zero
+#   Section 7b (Combined Dynamics): combinedFactor, combinedFactor_pos, combinedFactor_lt_one,
+#     steadyStateStrength, steadyState_denom_pos, steadyState_pos, steadyState_lt_Smax,
+#     steadyState_is_fixpoint
+#
+# proofs/hermes-memory/HermesMemory/SoftSelection.lean — 133 lines, 1 section, 9 theorems:
+#   Section 8 (Soft Selection): sigmoid_monotone, softSelect, softSelect_pos, softSelect_lt_one,
+#     softSelect_mem_Ioo, softSelect_complementary, softSelect_monotone_score,
+#     softSelect_equal_scores, sigmoid_at_zero, softSelect_equal_is_half
+#
+# proofs/hermes-memory/HermesMemory/NoveltyBonus.lean — 155 lines, 2 sections, 10 theorems:
+#   Section 9 (Novelty Bonus): noveltyBonus, noveltyBonus_pos, noveltyBonus_at_zero,
+#     noveltyBonus_le_init, noveltyBonus_antitone, noveltyBonus_tendsto_zero
+#   Section 9b (Exploration Window): explorationWindow, explorationWindow_pos,
+#     noveltyBonus_above_threshold, boostedScore, boostedScore_ge_novelty,
+#     boostedScore_ge_base, coldStart_survival
+#
+# Key new definitions:
+#   strengthDecay(beta, S0, t) = S0 * exp(-beta*t)
+#   combinedFactor(alpha, beta, Delta) = (1-alpha) * exp(-beta*Delta)
+#   steadyStateStrength(alpha, beta, Delta, Smax) = alpha*Smax / (1 - combinedFactor)
+#   softSelect(s1, s2, T) = sigmoid((s1-s2)/T)
+#   noveltyBonus(N0, gamma, t) = N0 * exp(-gamma*t)
+#   explorationWindow(N0, gamma, epsilon) = log(N0/epsilon) / gamma
+#   boostedScore(baseScore, N0, gamma, t) = baseScore + noveltyBonus(N0, gamma, t)
+#
+# Key theorems:
+#   steadyState_lt_Smax: S* < Smax (anti-lock-in — established memories plateau below max)
+#   steadyState_is_fixpoint: S* is fixed point of combined decay+update map
+#   sigmoid_monotone: sigmoid is monotone increasing (continuity foundation)
+#   softSelect_complementary: P(A over B) + P(B over A) = 1
+#   noveltyBonus_above_threshold: within exploration window, bonus >= epsilon
+#   coldStart_survival: zero-score memory has boosted score >= epsilon within window

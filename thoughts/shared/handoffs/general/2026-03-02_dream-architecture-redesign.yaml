@@ -1,0 +1,251 @@
+root_span_id: capacity-boundary-dream-redesign
+session_id: capacity-boundary-dream-redesign
+---
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Build capacity boundary test, discover NREM-as-replay is a no-op, redesign dream architecture based on neuroscience"
+now: "Implement new dream_cycle_xb with SHY-based NREM and cross-domain REM-explore"
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_coupled_engine.py test_dream_ops.py test_dream_validation.py test_benchmark.py test_proof_validation.py test_capacity_boundary.py -v"
+
+done_this_session:
+  - task: "Built test_capacity_boundary.py — 10 tests across 4 phases"
+    result: |
+      Phase 1: Capacity wall found at N=19/cluster (β=10, dim=128, spread=0.10).
+        P@1 drops 1.0→0.025 over N=17-35. Sharp cliff.
+        Formula N_max ≈ 1 vs empirical 19 — 16x gap (formula is sufficient condition).
+
+      Phase 2: Dream has ZERO effect on P@1 at boundary. Δ=+0.000 at every density.
+        NREM uses β_nrem=2×β=20. At β_nrem=20 with cos_sim≈0.63 within cluster,
+        softmax self-weight ≈ 99.9%. Attractor = pattern itself. Pulling toward self = no-op.
+
+      Phase 3: Clean degradation curve. Dream still Δ=+0.000 at every overpack level.
+
+      Phase 4: NREM β sweep revealed the physics:
+        β_nrem=5-10: 3.7% spread compression/cycle, HURTS P@1 (0.700→0.478)
+        β_nrem=15+: no-op (attractor = self)
+        10 cycles at β_nrem=5, pull=0.10: 44.5% centroid collapse
+        NO β_nrem value improves P@1. The operation is structurally incapable.
+    files: [proofs/hermes-NLCDM/python/test_capacity_boundary.py]
+
+  - task: "Diagnosed why NREM-as-hopfieldUpdate cannot improve P@1"
+    result: |
+      softmax(β, X^T ξ) when ξ is already a row of X can ONLY produce:
+        - High β: ξ itself (self-weight dominates) → no-op
+        - Low β: convex combination biased toward cluster centroid → centroid collapse
+      Neither increases pattern separation. The operation is fundamentally incapable
+      of improving discriminability. This isn't a parameter tuning issue — it's structural.
+
+  - task: "Full test suite: 112 passed, 4 skipped, 0 regressions"
+
+decisions:
+  - nrem_replay_dead: |
+      NREM-as-hopfieldUpdate (nrem_replay_xb) is proven useless for P@1.
+      Cannot be fixed by tuning β_nrem or pull_strength. Must be replaced.
+  - dream_zero_effect: |
+      Current dream_cycle_xb has zero measurable effect on P@1 at any density level.
+      NREM is no-op, REM phases don't affect P@1 either. Dream value is confined to
+      cluster coherence on ambiguous queries (which was already validated in test_benchmark.py).
+
+findings:
+  capacity_wall_empirical: |
+    β=10, dim=128, spread=0.10, 5 orthogonal clusters:
+    Wall at N=19/cluster. P@1 curve:
+    N=15: 1.000, N=17: 0.871, N=19: 0.695, N=20: 0.640, N=25: 0.112
+
+  formula_gap: |
+    N_max = exp(β·δ)/(4·β·M²) with δ_min_within ≈ 0.38 gives N_max ≈ 1.2.
+    Empirical capacity is 16x higher. Formula uses worst-case δ (within-cluster)
+    but patterns from different clusters (δ ≈ 1.0) don't interfere at all.
+    The formula is a sufficient condition, not tight.
+
+  nrem_physics: |
+    With spread=0.10 (cos_within ≈ 0.63):
+      β_nrem=5: displacement=0.016, compression=1.1%
+      β_nrem=8-10: displacement=0.020-0.023, compression=3.7%
+      β_nrem=15: displacement=0.0002, compression=0.0%
+      β_nrem=20+: displacement=0.0, compression=0.0%
+    Transition zone: β_nrem ≈ 12-15.
+    Below transition: centroid collapse (hurts P@1).
+    Above transition: no-op.
+
+  tight_clusters_explored: |
+    With spread=0.04 (cos_within ≈ 0.82):
+      β=10: P@1=0.20 at N=5/cluster (too cold for discrimination)
+      β=30: wall at N=13/cluster
+      β=50: P@1=1.0 even at N=59/cluster
+    NREM at β_nrem=5-20 has visible effect (neighbors have significant softmax weight).
+    But still hurts P@1 — same structural issue regardless of cluster tightness.
+
+architecture_redesign:
+  source: "Neuroscience-informed redesign based on three theories"
+
+  theory_mapping:
+    SHY_tononi: |
+      Synaptic Homeostasis Hypothesis. During wakefulness, connections strengthen (learning).
+      NREM globally weakens ALL connections. Strong ones survive, weak ones get pruned.
+      Signal-to-noise improves. Maps to: global repulsion + pruning on X.
+    active_systems_consolidation_born: |
+      NREM replays recent memories to transfer hippocampus → neocortex.
+      Maps to: episodic → semantic consolidation (System A clusters similar episodic
+      memories, extracts gist, creates centroid-positioned semantic memory).
+    rem_creativity_lewis: |
+      During REM, hippocampus releases control. Random PGO waves fire across
+      cortical networks. No hippocampal steering = unexpected cross-domain connections.
+      Maps to: randomly co-activate patterns from DIFFERENT clusters, test for
+      structural similarity in energy landscape. Report novel associations.
+    rem_reverse_learning_crick: |
+      REM removes parasitic patterns (mixture fixed points with wide basins).
+      Already implemented as rem_unlearn_xb. Correct as-is.
+
+  new_dream_cycle:
+    phase_1_nrem_consolidation: |
+      System A operation. Cluster similar episodic memories. Extract gist.
+      Create new semantic memory at centroid with elevated importance.
+      Remove consolidated episodic memories from X.
+      This is hippocampus → neocortex transfer.
+
+    phase_2_nrem_downscaling: |
+      System B operation on X. Global repulsion:
+        for each pair (i,j) where cosine(i,j) > threshold:
+          direction = normalize(x_i - x_j)
+          x_i += η · direction  (if low importance)
+          x_j -= η · direction  (if low importance)
+          high-importance patterns are anchored (not moved)
+        re-normalize all to unit sphere
+      Then prune: among pairs still too close after repulsion,
+      remove the lower-importance one.
+      This is Tononi's SHY — global downscaling where strong survive.
+
+    phase_3_rem_unlearn: |
+      Keep existing rem_unlearn_xb. Thermal noise at T = β⁻¹·log(N)/2.
+      Destabilize mixture fixed points (spurious attractors).
+      This is Crick-Mitchison reverse learning. Already correct.
+
+    phase_4_rem_explore: |
+      NEW. Not low-β retrieval (that just returns blurry mixtures).
+      Instead: randomly sample one pattern from cluster A, one from cluster B.
+      Compute structural similarity in energy landscape:
+        - Do they respond similarly to same perturbations?
+        - Do they share basin geometry?
+        - Are there intermediate patterns connecting them?
+      If unexpected structural similarity found, report as discovered association.
+      System A can create bridging memory encoding the relationship.
+      This is PGO-wave-driven random co-activation during REM.
+
+  proof_implications: |
+    Existing proofs still apply to the RESULT of any dream operation:
+    - After repulsion: X' has larger δ → capacity formula gives larger N_max
+    - After pruning: X' has fewer rows → utilization drops below boundary
+    - After merging: X' has fewer, better-separated rows → all theorems hold
+    The proofs don't need to change. The operations do.
+
+    New theorems to consider formalizing:
+    - "If X' is obtained from X by increasing pairwise separation, capacity increases"
+      (trivially true from capacity formula but worth formalizing)
+    - "Repulsion preserves pattern ordering" (patterns don't cross each other)
+    - "SHY convergence: repeated downscaling + pruning reaches a fixed point"
+
+implementation_plan:
+  step_1_dream_ops:
+    description: "Add three new functions to dream_ops.py"
+    functions:
+      - name: nrem_repulsion_xb
+        signature: "(patterns, importances, eta=0.01, min_sep=0.3) → np.ndarray"
+        behavior: |
+          For each pair (i,j) closer than min_sep (cosine distance):
+            direction = normalize(x_i - x_j)
+            Move low-importance pattern(s) by η along direction
+            Anchor high-importance patterns (importance >= 0.7)
+          Re-normalize all patterns to unit sphere.
+          Returns updated (N, dim) patterns.
+
+      - name: nrem_prune_xb
+        signature: "(patterns, importances, threshold=0.95) → (pruned_patterns, kept_indices)"
+        behavior: |
+          Find pairs with cosine similarity > threshold.
+          Among each pair, keep the higher-importance one.
+          Returns (N', dim) patterns and list of kept original indices.
+
+      - name: nrem_merge_xb
+        signature: "(patterns, importances, threshold=0.90, min_group=3) → (merged_patterns, merge_map)"
+        behavior: |
+          Find groups of 3+ patterns with pairwise cosine > threshold.
+          Replace each group with centroid at max(importances) + 0.1 boost.
+          Returns (N'', dim) patterns and dict mapping new_idx → [old_indices].
+
+      - name: rem_explore_cross_domain_xb
+        signature: "(patterns, labels_or_clusters, n_probes, rng) → associations"
+        behavior: |
+          For n_probes iterations:
+            Sample pattern i from cluster A, pattern j from cluster B (A ≠ B)
+            Compute structural similarity:
+              - Perturb both by same noise, measure response correlation
+              - Check if energy landscape connects them (intermediate state)
+            If similarity > threshold, record (i, j, similarity) as association
+          Returns list of cross-domain associations.
+
+  step_2_dream_cycle:
+    description: "Update dream_cycle_xb signature and flow"
+    new_signature: |
+      dream_cycle_xb(patterns, beta, tagged_indices, importances, seed)
+      → DreamReport(patterns, associations, pruned_indices, merge_map)
+    flow: |
+      1. NREM repulsion (push apart, anchor tagged)
+      2. NREM prune (remove near-duplicates)
+      3. NREM merge (consolidate groups into semantic centroids)
+      4. REM unlearn (destabilize mixture FPs) — unchanged
+      5. REM explore cross-domain (novel associations) — new
+      Return DreamReport with all results.
+
+  step_3_coupled_engine:
+    description: "Update CoupledEngine.dream() to handle variable-size X"
+    changes: |
+      dream() now receives DreamReport with pruned_indices and merge_map.
+      Removes pruned entries from memory_store.
+      Replaces merged groups with new centroid entries.
+      Updates indices. Invalidates cache.
+      Returns enriched dream result dict.
+
+  step_4_tests:
+    description: "Update test_capacity_boundary.py"
+    new_tests:
+      - TestNREMRepulsion: verify δ_min increases, P@1 improves at boundary
+      - TestNREMPrune: verify near-duplicates removed, P@1 preserved
+      - TestNREMMerge: verify groups consolidated, fewer patterns, P@1 held
+      - TestSpuriousFPRate: correct REM-unlearn metric (count queries landing on
+        non-pattern states before/after unlearn)
+      - TestREMExplore: verify cross-domain associations discovered between
+        structurally similar patterns from different clusters
+    existing_tests: |
+      test_dream_validation.py tests dream_ops functions directly.
+      Some may need updating if nrem_replay_xb is deprecated.
+      test_benchmark.py calls CoupledEngine.dream() — needs to handle
+      the new return type and possible pattern count changes.
+
+  step_5_validate:
+    description: "Full regression suite"
+    command: ".venv/bin/python -m pytest test_coupled_engine.py test_dream_ops.py test_dream_validation.py test_benchmark.py test_proof_validation.py test_capacity_boundary.py -v"
+
+files:
+  modified:
+    - proofs/hermes-NLCDM/python/test_capacity_boundary.py
+  to_modify:
+    - proofs/hermes-NLCDM/python/dream_ops.py
+    - proofs/hermes-NLCDM/python/coupled_engine.py
+    - proofs/hermes-NLCDM/python/test_benchmark.py
+    - proofs/hermes-NLCDM/python/test_dream_validation.py
+
+next:
+  - "CRITICAL: Implement nrem_repulsion_xb in dream_ops.py — the SHY operation"
+  - "Implement nrem_prune_xb and nrem_merge_xb"
+  - "Implement rem_explore_cross_domain_xb — PGO wave association discovery"
+  - "Update dream_cycle_xb with new flow and DreamReport return type"
+  - "Update CoupledEngine.dream() to handle pruned/merged patterns"
+  - "Update test_capacity_boundary.py: TestNREMRepulsion should show P@1 improvement"
+  - "Update test_capacity_boundary.py: TestSpuriousFPRate for REM-unlearn"
+  - "Run full regression suite, fix any broken existing tests"
+  - "Consider formalizing 'repulsion increases capacity' as a Lean theorem"

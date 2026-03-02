@@ -1,0 +1,118 @@
+root_span_id: 901d083a-5ed7-4a35-8b77-32a12716f51d
+turn_span_id:
+session_id: 901d083a-5ed7-4a35-8b77-32a12716f51d
+---
+session: general
+date: 2026-02-28
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Audit + remediate consolidation.py spec drift — 13 findings fixed, 1141 baseline"
+now: "Audit optimizer.py (minor findings only), then final integration review across all 5 modules"
+
+test: cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-memory/python && ./run_tests.sh
+baseline: "1141 passed, 0 failed, 2 xfailed across 18 test files (177s)"
+
+done_this_session:
+  - task: "Created run_tests.sh — baseline test script that runs all 18 modules individually with counts+durations, saves to baseline.txt"
+    files: [proofs/hermes-memory/python/run_tests.sh, proofs/hermes-memory/python/baseline.txt]
+  - task: "Launched parallel critic audits for consolidation.py (19 findings) and optimizer.py (11 findings)"
+    files: []
+  - task: "Judge-verified consolidation audit: 13 CONFIRMED, 5 FALSE, 1 PARTIAL"
+    files: []
+  - task: "Judge-verified optimizer audit: 7 CONFIRMED (all minor), 3 FALSE (empty win_counts bugs disproved — simulate() always returns non-empty rankings), 1 PARTIAL"
+    files: []
+  - task: "Cascade analysis — second/third order effects of all findings"
+    files: [thoughts/shared/plans/memory-system/audit/cascade-effects-analysis.md]
+  - task: "Batch 1 (C2): Time units hours→days — min_temporal_distance 24.0→1.0, consolidation_window 168.0→7.0"
+    files: [proofs/hermes-memory/python/hermes_memory/consolidation.py, proofs/hermes-memory/python/tests/test_consolidation.py]
+  - task: "Batch 2 (H6+C1+C3+M4): Removed SEMANTIC_FACT from retention thresholds, renamed 12+ config fields to match spec, added cross-field validation, added semantic_weight_beta with temporal_weight as derived property"
+    files: [proofs/hermes-memory/python/hermes_memory/consolidation.py, proofs/hermes-memory/python/tests/test_consolidation.py]
+  - task: "Batch 3 (H1): ArchivedMemory restructured — added decayed_strength, original_strength, archived flag; renamed fields to match spec"
+    files: [proofs/hermes-memory/python/hermes_memory/consolidation.py, proofs/hermes-memory/python/tests/test_consolidation.py]
+  - task: "Batch 4 (M2+M3): Applied semantic_boost (1.2x) to importance in extract_semantic, added activation_inheritance (0.5) for access count inheritance"
+    files: [proofs/hermes-memory/python/hermes_memory/consolidation.py, proofs/hermes-memory/python/tests/test_consolidation.py]
+  - task: "Batch 5 (C4+C5+H2+H4+H8+M1): Added source_episodes/consolidation_count to ConsolidationCandidate, replaced temporal_range with first_observed+last_updated, added compression_ratio, fixed CATEGORY_COMPRESSION_RATIOS (reasoning=3, instruction=5, greeting=10, transactional=10), added skipped_indices to ConsolidationResult"
+    files: [proofs/hermes-memory/python/hermes_memory/consolidation.py, proofs/hermes-memory/python/tests/test_consolidation.py, proofs/hermes-memory/python/tests/test_consolidation_phase_c.py]
+
+blockers: []
+
+questions:
+  - "ConsolidationCandidate still uses memory_id:str instead of spec's index:int — documented as intentional divergence. Revisit if orchestrator needs int IDs."
+  - "ConsolidationLevel kept as IntEnum (spec says Enum with strings) — documented divergence, ordering is useful."
+
+decisions:
+  - fix_ordering_by_cascade: "Fixed in priority order based on cascade analysis: C2 (24x over-retention) → H6+C1 (spurious insights) → H1 (ghost memories) → M2+M3 (compound recall disadvantage) → remaining"
+  - spec_is_source_of_truth: "All field names, values, and types aligned to spec. Two intentional divergences documented (string IDs, IntEnum)."
+  - compression_ratios_fixed: "reasoning=3 (was 7), instruction=5 (was 3), greeting=10 (was 1), transactional=10 (was 1) — per spec Section 4.2"
+  - optimizer_no_blocking_issues: "All 3 'CRITICAL' empty win_counts findings were false positives (simulate always returns non-empty rankings). Remaining 7 confirmed findings are code quality, not bugs."
+
+findings:
+  - consolidation_tests: "318 tests (was 292, gained 26 from new validation + boost + field tests)"
+  - total_baseline: "1141 passed, 0 failed, 2 xfailed (was 1115)"
+  - cascade_insight: "M2+M3 compound — semantic memories doubly disadvantaged in recall without importance boost AND activation inheritance. Neither looks critical alone, together they prevent system maturation."
+  - consolidation_is_leaf: "Nothing imports from consolidation.py yet. All cascades are latent — will activate when orchestrator wires modules together."
+  - optimizer_clean: "No blocking issues. Optional hardening: extract STABILITY_SIM_STEPS constant, add scenario count assertion, improve _try_add docstring."
+
+worked:
+  - "Parallel critic audits (consolidation + optimizer) saved time"
+  - "Judge verification caught 5 false positives in consolidation audit (68% confirmation rate) and 3 in optimizer (disproved the 'critical' bugs)"
+  - "Cascade analysis established fix ordering that prevented wasted effort on isolated findings"
+  - "Kraken agent with 5-batch priority ordering and tests-after-each-batch worked cleanly"
+  - "run_tests.sh with -o 'addopts=' override to get summary line from pytest"
+
+failed:
+  - "First run_tests.sh version showed 0 passed everywhere — pytest -q from pyproject.toml addopts suppressed the summary line. Fixed with -o 'addopts=' override."
+  - "DB down for memory storage — PostgreSQL not running, couldn't store learning about run_tests.sh"
+
+next:
+  - "Optional: Apply optimizer hardening (extract constant, scenario count assertion, docstring) — LOW priority"
+  - "Integration review: verify all 5 modules can wire together (consolidation is currently a leaf)"
+  - "Consider building the orchestrator that connects encoding→recall→contradiction→consolidation→optimizer"
+  - "Store learning about run_tests.sh when DB is back up"
+
+files:
+  created:
+    - proofs/hermes-memory/python/run_tests.sh
+    - proofs/hermes-memory/python/baseline.txt
+    - thoughts/shared/plans/memory-system/audit/cascade-effects-analysis.md
+    - thoughts/shared/handoffs/kraken-consolidation-fix/current.md
+    - thoughts/shared/handoffs/general/2026-02-28_01-31_consolidation-spec-drift-remediation.yaml
+  modified:
+    - proofs/hermes-memory/python/hermes_memory/consolidation.py
+    - proofs/hermes-memory/python/tests/test_consolidation.py
+    - proofs/hermes-memory/python/tests/test_consolidation_phase_c.py
+
+# Key references:
+# Consolidation spec: thoughts/shared/plans/memory-system/consolidation/spec.md (2596 lines)
+# Optimizer spec: thoughts/shared/plans/memory-system/optimizer/spec.md (339 lines)
+# Cascade analysis: thoughts/shared/plans/memory-system/audit/cascade-effects-analysis.md
+# Kraken checkpoint: thoughts/shared/handoffs/kraken-consolidation-fix/current.md
+# Adversarial passes: thoughts/shared/plans/memory-system/consolidation/adversarial-pass{1,2,3}.md
+#
+# Config field renames (for grep):
+#   retention_threshold_l1 → l1_to_l2_retention
+#   retention_threshold_l2 → l2_to_l3_retention
+#   retention_threshold_l3 → l3_to_l4_cluster_sim
+#   temporal_decay_rate → temporal_decay_lambda
+#   importance_decay_factor → consolidation_decay
+#   cluster_similarity_threshold → cluster_threshold
+#   intra_session_similarity_threshold → intra_session_similarity
+#   intra_session_temporal_proximity → intra_session_temporal
+#   min_temporal_distance → recency_guard (consolidated)
+#   max_batch_size → max_candidates_per_batch (consolidated)
+#
+# New fields added:
+#   semantic_boost: float = 1.2
+#   activation_inheritance: float = 0.5
+#   retention_threshold: float = 0.3
+#   semantic_weight_beta: float = 0.7
+#   temporal_weight is now a @property = 1.0 - semantic_weight_beta
+#
+# Pieces status (all 5 done):
+#   1. encoding.py — Done
+#   2. recall.py — Done
+#   3. contradiction.py — Done
+#   4. consolidation.py — Done + audited + remediated (this session)
+#   5. optimizer.py — Done + audited (minor findings, no blocking issues)

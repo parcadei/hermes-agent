@@ -1,0 +1,86 @@
+root_span_id: bd1c0ec9-3e39-424e-9f4c-41e05bb24289
+turn_span_id: 
+session_id: bd1c0ec9-3e39-424e-9f4c-41e05bb24289
+---
+session: general
+date: 2026-03-02
+status: complete
+outcome: SUCCEEDED
+---
+
+goal: "Implemented DSA vectorization of rem_unlearn_xb (S-based pair analysis) and rem_explore_cross_domain_xb (batched perturbation queries) via TDD pipeline. 162/162 tests pass. Speedups 149-204x for unlearn, ~2x for explore."
+now: "Commit changes, add embeddings_170k.npy to .gitignore, optionally run test_parametric_scale.py to N=10k."
+test: "cd /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python && .venv/bin/python -m pytest test_dream_redesign.py test_vectorize_dsa.py test_coupled_engine.py test_parametric_scale.py -v --tb=short"
+
+done_this_session:
+  - task: "Resumed from handoff with full DSA analysis context (MC probing broken, S-based validated, 38 discriminative tests)"
+    files: [thoughts/shared/handoffs/general/2026-03-02_15-30_dsa-vectorize-unlearn-explore.yaml]
+  - task: "Phase 5.1: Added S = X3 @ X3.T precompute in dream_cycle_xb after NREM merge (line 1765)"
+    files: [proofs/hermes-NLCDM/python/dream_ops.py]
+  - task: "Phase 5.2: Added similarity_matrix parameter to rem_unlearn_xb with S-based fast path (lines 626-694). Threshold 0.70, intensity scaling (sim-0.70)/0.30, unit vector re-normalization."
+    files: [proofs/hermes-NLCDM/python/dream_ops.py]
+  - task: "Phase 5.3: Replaced K=10 sequential perturbation loop in rem_explore_cross_domain_xb with batched (K,d) matrix ops — 2 matmuls instead of 2*K (lines 1251-1265)"
+    files: [proofs/hermes-NLCDM/python/dream_ops.py]
+  - task: "Phase 5.5: Audit found 1 consistency issue (line 688 using similarity_matrix vs S for intensity) — fixed. Functionally identical for off-diagonal elements."
+    files: [proofs/hermes-NLCDM/python/dream_ops.py]
+  - task: "Phase 5.7: Benchmarks — unlearn 149-204x speedup (exceeds predicted 57-131x), explore matches predictions, S precompute 38ms/191MB at N=5k"
+    files: [proofs/hermes-NLCDM/python/bench_vectorize.py]
+  - task: "Phase 6: Integration validation — 162/162 tests pass (34 dream_redesign + 47 vectorize_dsa + 24 coupled_engine + 57 parametric_scale)"
+    files: []
+  - task: "9 new tests added by build agent (TestSBasedFastPath class) validating parameter acceptance, fast-path identity, close-pair separation, unit vector preservation, input non-mutation, backward compat, intensity proportionality"
+    files: [proofs/hermes-NLCDM/python/test_vectorize_dsa.py]
+
+decisions:
+  - threshold_070: "0.70 similarity threshold for S-based close pair detection. Conservative — measured max_offdiag_sim for diverse data is ~0.31. Provides large margin against false positives."
+  - intensity_scaling: "(S[i,j] - 0.70) / 0.30 maps similarity range [0.70, 1.00] to intensity [0.0, 1.0]. Pairs just above threshold get gentle push, near-duplicates get full separation_rate."
+  - backward_compat: "When similarity_matrix=None, MC probing code is untouched. dream_cycle_xb always passes S, but external callers can use old path."
+  - audit_fix_s_consistency: "Changed line 688 from similarity_matrix[i,j] to S[i,j] for consistency. Both give identical values for off-diagonal elements, but using S is clearer since S is the working variable."
+
+findings:
+  measured_speedups: |
+    rem_unlearn_xb (diverse data, S-based vs MC):
+      N=500:  MC=30.1ms  S=0.15ms  → 204x
+      N=1000: MC=66.7ms  S=0.33ms  → 199x
+      N=2000: MC=192.4ms S=1.29ms  → 149x
+    rem_explore (batched):
+      N=500: 57ms, N=1000: 153ms, N=2000: 489ms
+    dream_cycle_xb total:
+      N=500: 54ms, N=1000: 156ms, N=2000: 503ms
+    S precompute: N=5000 → 38ms, 191MB
+  speedups_exceed_predictions: "S-based unlearn 149-204x vs predicted 57-131x. Likely due to Apple Accelerate BLAS + cache-friendly access patterns in similarity matrix approach."
+  rng_equivalence_confirmed: "rng.standard_normal((K,d)) produces identical values to K calls of rng.standard_normal(d). Batched explore is deterministically equivalent."
+  test_count_grew: "test_vectorize_dsa.py went from 38 to 47 tests (9 new TestSBasedFastPath tests added by build agent)"
+
+worked:
+  - "TDD pipeline with pre-written discriminative tests — implementation was straightforward because contracts were clear"
+  - "Parallel agent launches for independent functions (5.2 and 5.3 ran simultaneously)"
+  - "Parallel audit + benchmark agents (5.5 and 5.7 ran simultaneously)"
+  - "spark for trivial changes (5.1), kraken for substantive changes (5.2, 5.3)"
+  - "Audit correctly identified consistency issue even though it was functionally benign"
+
+failed:
+  - "Critic agent couldn't write audit report to disk (no Bash tool) — had to extract findings from task output stream"
+
+next:
+  - "Commit vectorization changes to dream_ops.py and test_vectorize_dsa.py"
+  - "Add embeddings_170k.npy to .gitignore (665MB file, should not be committed)"
+  - "Run test_parametric_scale.py to N=10k (currently tested to N=5k, takes ~7 min at N=5k)"
+  - "End-to-end scale test using MemoryOrchestrator (strength_decay → importance → dream feedback loop)"
+  - "Consider extracting 0.70 threshold as named constant MIXTURE_SIMILARITY_THRESHOLD"
+  - "Consider adding memory scaling comment at S precompute line (N=5k: 191MB, N=10k: ~760MB)"
+
+files:
+  created:
+    - proofs/hermes-NLCDM/python/bench_vectorize.py
+  modified:
+    - proofs/hermes-NLCDM/python/dream_ops.py
+    - proofs/hermes-NLCDM/python/test_vectorize_dsa.py
+
+background_state:
+  - "test_vectorize_dsa.py: 47/47 pass in ~1.3s"
+  - "test_dream_redesign.py: 34/34 pass in ~0.8s"
+  - "test_coupled_engine.py: 24/24 pass in ~0.2s"
+  - "test_parametric_scale.py: 57/57 pass in ~396s"
+  - "embeddings_170k.npy still exists (170270 × 1024 float32, 665MB)"
+  - "Previous session's vectorized NREM ops (prune/repulsion/merge) still in place"
+  - "bench_vectorize.py created for performance regression testing"
