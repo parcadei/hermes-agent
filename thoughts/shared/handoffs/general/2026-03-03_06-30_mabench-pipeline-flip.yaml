@@ -1,0 +1,197 @@
+root_span_id: 39190e9d-4896-4f41-8cd2-54985d7e2a9b
+turn_span_id: 806179b4-7af6-476f-9f91-1eeb3fe10dfc
+session_id: 39190e9d-4896-4f41-8cd2-54985d7e2a9b
+session: general
+date: 2026-03-03
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "MABench pipeline flip: V2 retrieve → V1 re-rank. Then test whether V1's multi-signal scoring improves 262K results."
+now: "262K fact-level run in progress (~42% memorizing, ~30 min remaining). Once complete, flip pipeline and retest."
+test: |
+  proofs/hermes-NLCDM/python/.venv/bin/python3 \
+    proofs/hermes-NLCDM/python/mabench/run_hermes.py \
+    --dataset_config MemoryAgentBench/configs/data_conf/Conflict_Resolution/Factconsolidation_sh_262k.yaml \
+    --model openai/gpt-4.1-mini \
+    --dream_interval 1 --recency_alpha 0.1 --force
+
+done_this_session:
+  - task: "Full architectural review of V1 (hermes-memory) vs V2 (hermes-NLCDM)"
+    details: |
+      V1 (hermes-memory): 6 Lean proof files. Hopfield-inspired but actually a
+      classical scoring/dynamics system. Core: multi-signal scoring
+      score = w₁·relevance + w₂·recency + w₃·importance + w₄·σ(activity)
+      with proven contraction mapping (ComposedSystem.lean, ContractionWiring.lean).
+      Strength decay, novelty bonus, soft selection — all proven antitone/Lipschitz.
+
+      V2 (hermes-NLCDM): 21 Lean proof files. Nonlinear coupled dynamical memory.
+      Core: Hopfield energy wells, smooth coupling weight function, dream cycle
+      (NREM-replay, REM-unlearn, REM-explore). Exponential capacity theorem
+      N_max ~ exp(βδ)/(4βM²). Spurious state characterization, energy gap proofs.
+
+      Key finding: spreading activation was disabled and replaced with direct
+      cosine because at N>100 patterns, converged state gives uniform ~0.83 scores.
+      This is NOT a bug in the theory — the capacity theorem requires δ-separation
+      between patterns, and MABench facts about the same entity are near-duplicates
+      in embedding space (>0.9 cosine similarity).
+
+  - task: "Identified pipeline design flaw"
+    files: [proofs/hermes-NLCDM/python/mabench/hermes_agent.py]
+    details: |
+      Current wiring in _query() (hermes_agent.py:308-346):
+        1. V2 cosine retrieval = PRIMARY (coupled_engine.query() top-k)
+        2. V1 text-based recall = SUPPLEMENT (appended if not in V2 results)
+
+      Problem: V1's multi-signal scoring (relevance, recency, importance, activity)
+      is the formally-verified ranking system with proven convergence. But it's
+      being used as a backup, not the primary ranker. Meanwhile V2 uses a crude
+      manual recency hack: score *= (1 + α·normalized_recency).
+
+      V2 reinvented a worse version of what V1 already provides with formal guarantees.
+
+  - task: "Identified correct hybrid architecture"
+    details: |
+      The two systems should handle different concerns:
+        V2 (NLCDM): Storage + maintenance + embedding retrieval + dream consolidation
+        V1 (hermes-memory): Scoring + ranking + multi-signal re-ranking
+
+      Correct pipeline: V2 retrieves candidates → V1 re-ranks using full scoring.
+      This is the standard dense-retrieval → learned-reranker pattern, except
+      the reranker has formal convergence guarantees.
+
+      The dream cycle's value isn't retrieval improvement — it's long-term memory
+      health (consolidation, pruning, cross-domain association). MABench doesn't
+      test this because it's a single-session ingest-then-query benchmark.
+
+decisions:
+  pipeline_flip: |
+    Switch from "parallel retrievers merged" to "V2 retrieve → V1 re-rank".
+    V2 cosine retrieval finds candidate facts. V1 scoring ranks them using
+    all four signals. This leverages each system's strengths.
+  spreading_activation_analysis: |
+    Spreading activation failed at N>100 because MABench facts violate the
+    δ-separation precondition of the capacity theorem. Facts about the same
+    entity are near-duplicates in embedding space. This is the correct
+    theoretical explanation — the proofs are sound, the data violates preconditions.
+  dream_cycle_role: |
+    Dream cycle is NOT for retrieval improvement. It's for memory maintenance:
+    consolidation, spurious state cleanup, cross-domain association discovery.
+    MABench doesn't test any of these. Need a different benchmark to validate
+    the Hopfield/dream architecture (multi-session, cross-domain, partial cues).
+
+findings:
+  v1_vs_v2_capabilities: |
+    V1 (hermes-memory):
+      - 6 Lean proofs: StrengthDecay, MemoryDynamics, SoftSelection, NoveltyBonus,
+        ComposedSystem, ContractionWiring
+      - Runtime: orchestrator with encoding, contradiction, consolidation, recall
+      - Strength: multi-signal ranking with formal convergence
+
+    V2 (hermes-NLCDM):
+      - 21 Lean proofs: Energy, Capacity, SpuriousStates, EnergyGap, Lyapunov,
+        BridgeFormation, TransferDynamics, EmotionalTagging, etc.
+      - Runtime: CoupledEngine with dream cycle (NREM/REM/explore)
+      - Strength: energy-based storage, dream consolidation, exponential capacity
+
+    Neither system is "better" — they solve different problems.
+    V1 = ranking. V2 = dynamics. Current benchmark only tests ranking.
+
+  what_v2_actually_contributes_at_runtime: |
+    At query time, V2 contributes:
+      1. Cosine retrieval (standard RAG — not uniquely Hopfield)
+      2. Recency weighting (simple multiplier)
+      3. Contradiction detection at store time (cosine threshold)
+    The dream cycle, energy wells, capacity theorems — none are in the retrieval path.
+
+  spreading_activation_failure_cause: |
+    The capacity theorem (Capacity.lean) requires:
+      4NβM² ≤ exp(βδ) where δ = separation between patterns
+    MABench facts: "14907. Alice speed 42" vs "14908. Alice speed 45"
+    have cosine similarity >0.9 → δ ≈ 0.1 → exponential term is tiny.
+    Spreading activation correctly converges to a mixture (convex combination
+    of near-identical patterns), giving uniform scores. This is mathematically
+    correct behavior — the data doesn't meet the theorem's preconditions.
+
+worked:
+  - "Full architectural analysis across both proof systems"
+  - "Identified V1's multi-signal scoring as underutilized"
+  - "Correct theoretical explanation for spreading activation failure at scale"
+  - "Identified pipeline flip as the concrete next step"
+
+failed:
+  - "Nothing failed this session — this was analysis, not implementation"
+
+next:
+  - step: "Wait for 262K run to complete"
+    details: |
+      Run is at ~42% memorizing. Will produce:
+        output/hermes/hermes_factconsolidation_sh_262k_openai_gpt-4.1-mini.json
+      Also saves embedding cache for fast reruns.
+
+  - step: "Record 262K baseline result (current wiring)"
+    details: |
+      This is the V2-primary result. Paper baselines at 262K:
+      GPT-4o=60%, HippoRAG-v2=54%, BM25=48%, GPT-4o-mini=45%, GPT-4.1-mini=36%
+
+  - step: "Implement pipeline flip in hermes_agent.py"
+    details: |
+      Modify _query() (hermes_agent.py:308-346):
+      - V2 coupled_engine.query() retrieves top-k candidates (cosine similarity)
+      - V1 orchestrator re-ranks those candidates using multi-signal scoring
+        (relevance, recency, importance, activity)
+      - Remove the crude recency hack (score *= 1 + α·normalized_recency)
+      - Let V1's proven scoring function handle the ranking
+
+      Key change: V1 needs access to the candidate texts from V2 to re-rank them.
+      V1.orchestrator.query() currently does its own retrieval. Need to either:
+        (a) Add a re-rank API to orchestrator that scores given candidates, or
+        (b) Use V1's score function directly on the V2 candidates
+
+  - step: "Re-run 262K with pipeline flip"
+    details: |
+      Same dataset, same model, cached embeddings → fast run.
+      Compare V2-primary vs V1-reranked results.
+
+  - step: "Design a benchmark that tests what V2 is actually good at"
+    details: |
+      MABench tests fact lookup. V2's strengths are:
+      - Cross-domain association (dream REM-explore)
+      - Graceful forgetting (strength decay over sessions)
+      - Pattern completion from partial cues
+      - Consolidation (merging redundant memories)
+      Need: multi-session benchmark with partial cues, cross-domain queries,
+      and temporal dynamics. EventQA in MABench might partially test this.
+
+files:
+  analyzed_not_modified:
+    - proofs/hermes-NLCDM/python/nlcdm_core.py
+    - proofs/hermes-NLCDM/python/coupled_engine.py
+    - proofs/hermes-NLCDM/python/dream_ops.py
+    - proofs/hermes-NLCDM/python/mabench/hermes_agent.py
+    - proofs/hermes-memory/python/hermes_memory/core.py
+    - proofs/hermes-memory/python/hermes_memory/orchestrator.py
+    - proofs/hermes-memory/python/hermes_memory/engine.py
+    - proofs/hermes-NLCDM/HermesNLCDM/SpuriousStates.lean
+    - proofs/hermes-NLCDM/HermesNLCDM/Capacity.lean
+    - proofs/hermes-NLCDM/HermesNLCDM/EnergyGap.lean
+    - proofs/hermes-NLCDM/HermesNLCDM.lean (root — 12 phases, 21 Lean files)
+    - proofs/hermes-memory/HermesMemory (root — 6 Lean files)
+
+background_state:
+  - "262K fact-level run in progress (~42% memorizing as of handoff)"
+  - "Embedding cache building during run, will save to output/embed_cache/embeddings.npz"
+  - "All state from previous handoff still applies"
+  - "OPENROUTER_API_KEY in proofs/hermes-NLCDM/python/.env"
+  - "dream_interval=1, recency_alpha=0.1"
+
+key_references:
+  - "hermes_agent.py:308-346 — _query() method (pipeline flip target)"
+  - "hermes_agent.py:363-394 — _generate_answer() with system prompt"
+  - "hermes_agent.py:256-289 — _store() with fact-level parsing"
+  - "coupled_engine.py:295-340 — query() with direct cosine + recency hack"
+  - "hermes_memory/core.py:83-85 — V1 scoring function"
+  - "hermes_memory/orchestrator.py:57-77 — RelevanceScorer protocol"
+  - "Capacity.lean:41-50 — capacity_criterion theorem"
+  - "SpuriousStates.lean:44-50 — fixedPoint_expansion theorem"
+  - "EnergyGap.lean:44-50 — entropy_lower_bound theorem"

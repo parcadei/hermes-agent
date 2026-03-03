@@ -36,7 +36,7 @@ from mabench.hermes_agent import HermesMemoryAgent
 from utils.eval_other_utils import metrics_summarization
 from utils.templates import get_template
 
-dotenv.load_dotenv()
+dotenv.load_dotenv(_NLCDM_PYTHON / ".env")
 
 
 def parse_args():
@@ -77,6 +77,20 @@ def parse_args():
         default=0,
         help="Limit max test queries (0=no limit)",
     )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=0,
+        help="Override dataset chunk_size (0=use config default)",
+    )
+    parser.add_argument(
+        "--recency_alpha",
+        type=float,
+        default=0.1,
+        help="Recency weighting alpha for retrieval (0=disabled)",
+    )
+    parser.add_argument("--fullpass", action="store_true",
+                        help="Baseline: skip memory system, send full context to LLM directly")
     parser.add_argument("--force", action="store_true", help="Force re-run")
     return parser.parse_args()
 
@@ -87,6 +101,10 @@ def main():
     # Load dataset config
     with open(args.dataset_config) as f:
         dataset_config = yaml.safe_load(f)
+
+    # Override chunk_size if specified
+    if args.chunk_size > 0:
+        dataset_config["chunk_size"] = args.chunk_size
 
     # Build a minimal agent_config that ConversationCreator expects
     agent_config = {
@@ -103,15 +121,17 @@ def main():
     # Create output directory
     output_dir = Path(agent_config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / (
-        f"hermes_{dataset_config['sub_dataset']}_{args.model}.json"
-    )
+    safe_model = args.model.replace("/", "_")
+    prefix = "fullpass" if args.fullpass else "hermes"
+    output_file = output_dir / f"{prefix}_{dataset_config['sub_dataset']}_{safe_model}.json"
 
     print(f"Dataset: {dataset_config['dataset']} / {dataset_config['sub_dataset']}")
     print(f"Model: {args.model}")
+    print(f"Mode: {'FULLPASS (no memory system)' if args.fullpass else 'Hermes memory agent'}")
     print(f"Output: {output_file}")
-    print(f"Contradiction threshold: {args.contradiction_threshold}")
-    print(f"Dream interval: {args.dream_interval}")
+    if not args.fullpass:
+        print(f"Contradiction threshold: {args.contradiction_threshold}")
+        print(f"Dream interval: {args.dream_interval}")
     print()
 
     # Load data
@@ -124,14 +144,24 @@ def main():
     print(f"Total queries: {total_queries}")
     print()
 
-    # Initialize Hermes agent
-    agent = HermesMemoryAgent(
-        model=args.model,
-        contradiction_threshold=args.contradiction_threshold,
-        retrieve_num=args.retrieve_num,
-        dream_interval=args.dream_interval,
-        temperature=0.0,
-    )
+    # Initialize agent or LLM client
+    if args.fullpass:
+        from openai import OpenAI
+        llm_client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ["OPENROUTER_API_KEY"],
+        )
+        agent = None
+    else:
+        llm_client = None
+        agent = HermesMemoryAgent(
+            model=args.model,
+            contradiction_threshold=args.contradiction_threshold,
+            retrieve_num=args.retrieve_num,
+            dream_interval=args.dream_interval,
+            temperature=0.0,
+            recency_alpha=args.recency_alpha,
+        )
 
     # Run evaluation
     metrics: dict[str, list] = defaultdict(list)
@@ -146,13 +176,19 @@ def main():
             desc="Contexts",
         )
     ):
-        # Reset agent for each new context
-        agent.reset()
-
-        # Memorize all chunks for this context
-        print(f"\n--- Context {context_idx}: memorizing {len(chunks)} chunks ---")
-        for chunk_idx, chunk in enumerate(tqdm(chunks, desc="Memorizing", leave=False)):
-            agent.send_message(chunk, memorizing=True)
+        if args.fullpass:
+            # Full pass: concatenate all chunks as the knowledge pool
+            full_context = "\n\n".join(chunks)
+            print(f"\n--- Context {context_idx}: {len(chunks)} chunks, fullpass mode ---")
+        else:
+            # Reset agent for each new context
+            agent.reset()
+            # Memorize all chunks for this context
+            print(f"\n--- Context {context_idx}: memorizing {len(chunks)} chunks ---")
+            for chunk_idx, chunk in enumerate(tqdm(chunks, desc="Memorizing", leave=False)):
+                agent.send_message(chunk, memorizing=True)
+            # Persist embedding cache after memorization
+            agent._scorer.save_disk_cache()
 
         # Query
         print(f"    Querying {len(qa_pairs)} questions...")
@@ -166,8 +202,37 @@ def main():
             if args.max_test_queries > 0 and query_index >= args.max_test_queries:
                 break
 
-            # Get agent response
-            agent_output = agent.send_message(query, memorizing=False)
+            if args.fullpass:
+                # Direct LLM call with full context + question
+                q_start = time.time()
+                system_msg = (
+                    "You are a helpful assistant that can read the context and "
+                    "memorize it for future retrieval."
+                )
+                user_msg = (
+                    f"{full_context}\n\n{query}"
+                )
+                response = llm_client.chat.completions.create(
+                    model=args.model,
+                    messages=[
+                        {"role": "system", "content": system_msg},
+                        {"role": "user", "content": user_msg},
+                    ],
+                    temperature=0.0,
+                    max_tokens=max(dataset_config["generation_max_length"], 16),
+                )
+                output = response.choices[0].message.content or ""
+                usage = response.usage
+                agent_output = {
+                    "output": output,
+                    "input_len": usage.prompt_tokens,
+                    "output_len": usage.completion_tokens,
+                    "memory_construction_time": 0.0,
+                    "query_time_len": time.time() - q_start,
+                }
+            else:
+                # Get agent response
+                agent_output = agent.send_message(query, memorizing=False)
 
             # Compute metrics using MABench utilities
             metrics, results = metrics_summarization(
@@ -194,6 +259,8 @@ def main():
                 "contradiction_threshold": args.contradiction_threshold,
                 "dream_interval": args.dream_interval,
                 "retrieve_num": args.retrieve_num,
+                "recency_alpha": args.recency_alpha if not args.fullpass else None,
+                "fact_level_parsing": not args.fullpass,
             },
             "data": results,
             "metrics": {k: v for k, v in metrics.items()},

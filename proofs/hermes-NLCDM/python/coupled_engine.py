@@ -72,6 +72,7 @@ class MemoryEntry:
     last_access_time: float = 0.0
     access_count: int = 0
     tagged: bool = False
+    recency: float = 0.0  # Serial number or store order; higher = newer
 
 
 class CoupledEngine:
@@ -98,6 +99,7 @@ class CoupledEngine:
         reconsolidation_eta: float = 0.01,
         contradiction_aware: bool = False,
         contradiction_threshold: float = 0.85,
+        recency_alpha: float = 0.0,
     ):
         self.dim = dim
         self.beta = beta
@@ -111,6 +113,7 @@ class CoupledEngine:
         self.reconsolidation_eta = reconsolidation_eta
         self.contradiction_aware = contradiction_aware
         self.contradiction_threshold = contradiction_threshold
+        self.recency_alpha = recency_alpha
         self.memory_store: list[MemoryEntry] = []
         self._embeddings_cache: np.ndarray | None = None
         self._W_cache: np.ndarray | None = None
@@ -204,7 +207,11 @@ class CoupledEngine:
         return self.emotional_S_min + (1.0 - self.emotional_S_min) * prediction_error
 
     def store(
-        self, text: str, embedding: np.ndarray, importance: float | None = None
+        self,
+        text: str,
+        embedding: np.ndarray,
+        importance: float | None = None,
+        recency: float = 0.0,
     ) -> int:
         """Add a new memory, optionally replacing contradictions.
 
@@ -256,6 +263,7 @@ class CoupledEngine:
                     old.text = text
                     old.embedding = emb
                     old.importance = max(old.importance, importance)
+                    old.recency = max(old.recency, recency)
                     old.creation_time = now
                     old.last_access_time = now
                     old.access_count += 1
@@ -273,6 +281,7 @@ class CoupledEngine:
             last_access_time=now,
             access_count=0,
             tagged=importance >= 0.7,
+            recency=recency,
         )
         self.memory_store.append(entry)
         self._invalidate_cache()
@@ -289,11 +298,12 @@ class CoupledEngine:
         beta: float | None = None,
         top_k: int = 10,
     ) -> list[dict]:
-        """Retrieve memories via spreading activation.
+        """Retrieve memories by direct cosine similarity + recency weighting.
 
-        Uses spreading_activation from dream_ops (modern Hopfield dynamics
-        in pattern space), then ranks stored patterns by cosine overlap
-        with the converged state.
+        At high pattern counts (>100), spreading activation loses
+        discriminative power — the converged state becomes an average
+        over all patterns, giving uniform ~0.83 scores.  Direct cosine
+        similarity preserves sharp discrimination.
         """
         if beta is None:
             beta = self.beta
@@ -310,11 +320,23 @@ class CoupledEngine:
 
         embeddings = self._embeddings_matrix()
 
-        # Spreading activation: converge in pattern space
-        x_conv = spreading_activation(beta, embeddings, emb)
+        # Direct cosine similarity between query and each stored pattern
+        emb_norm = np.linalg.norm(emb)
+        if emb_norm < 1e-12:
+            return []
+        norms = np.linalg.norm(embeddings, axis=1) * emb_norm + 1e-12
+        scores = embeddings @ emb / norms
 
-        # Score each pattern by cosine similarity with converged state
-        scores = np.array([cosine_sim(x_conv, embeddings[i]) for i in range(N)])
+        # Recency weighting: score *= (1 + alpha * normalized_recency)
+        # Higher recency (later serial number) gets a boost when alpha > 0
+        if self.recency_alpha > 0.0:
+            recencies = np.array(
+                [m.recency for m in self.memory_store], dtype=np.float64
+            )
+            max_rec = recencies.max()
+            if max_rec > 0.0:
+                norm_rec = recencies / max_rec  # [0, 1]
+                scores = scores * (1.0 + self.recency_alpha * norm_rec)
 
         k = min(top_k, N)
         top_indices = np.argsort(scores)[::-1][:k]

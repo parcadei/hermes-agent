@@ -1,0 +1,171 @@
+root_span_id: 308174a2-2121-4614-ab8e-611abfef500b
+turn_span_id: 85db78cc-b38c-46e6-a37c-22afb2e3a090
+session_id: 308174a2-2121-4614-ab8e-611abfef500b
+---
+session: general
+date: 2026-03-03
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "Run MABench FactConsolidation + EventQA evals with Hermes V1+V2 memory agent via OpenRouter"
+now: "Run benchmark-compliant FactConsolidation_sh_6k with openai/gpt-4o-mini via OpenRouter. Compare against published baselines."
+test: |
+  /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python/.venv/bin/python3 \
+    /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python/mabench/run_hermes.py \
+    --dataset_config /Users/cosimo/.hermes/hermes-agent/MemoryAgentBench/configs/data_conf/Conflict_Resolution/Factconsolidation_sh_6k.yaml \
+    --model openai/gpt-4o-mini
+
+done_this_session:
+  - task: "Switched LLM backend from OpenAI direct to OpenRouter"
+    files: [proofs/hermes-NLCDM/python/mabench/hermes_agent.py]
+    details: |
+      _ensure_llm_client() now uses OpenRouter base_url + OPENROUTER_API_KEY env var.
+      Added import os. Keeps OpenAI SDK (OpenRouter is compatible).
+      hermes_agent.py:163-168
+
+  - task: "Created .env with OpenRouter API key"
+    files: [proofs/hermes-NLCDM/python/.env]
+    details: "OPENROUTER_API_KEY=sk-or-v1-3d87d1ec..."
+
+  - task: "Fixed output path slash in model name"
+    files: [proofs/hermes-NLCDM/python/mabench/run_hermes.py]
+    details: |
+      Model names like minimax/minimax-m2.5 contain slashes.
+      Added safe_model = args.model.replace("/", "_") for output filename.
+      run_hermes.py:106-107
+
+  - task: "Made dotenv load explicit path"
+    files: [proofs/hermes-NLCDM/python/mabench/run_hermes.py]
+    details: "dotenv.load_dotenv(_NLCDM_PYTHON / '.env') instead of bare load_dotenv()"
+
+  - task: "Installed all MABench dependencies in NLCDM venv"
+    details: |
+      python-dotenv pyyaml tqdm nltk rouge-score editdistance tiktoken
+      openai datasets huggingface_hub — all installed successfully.
+
+  - task: "Added configurable max_gen_tokens parameter"
+    files: [proofs/hermes-NLCDM/python/mabench/hermes_agent.py]
+    details: |
+      Constructor param max_gen_tokens=10 (default per MABench paper Table 13).
+      Used in _generate_answer(). Reasoning models need higher values.
+      hermes_agent.py:114, hermes_agent.py:282
+
+  - task: "Ran MiniMax M2.5 eval — discovered reasoning model incompatibility"
+    details: |
+      MiniMax M2.5 is a reasoning model: uses hidden chain-of-thought tokens
+      that count toward completion_tokens but produce no visible content.
+      With max_tokens=100: all 100 queries returned empty string outputs (0% EM).
+      With max_tokens=512: run completed but violates MABench protocol (10 token limit).
+      Reasoning tokens visible in response.usage.completion_tokens_details.reasoning_tokens.
+
+  - task: "Read and analyzed full MABench paper (arXiv:2507.05257v2)"
+    details: |
+      Key constraints from paper:
+      - FactConsolidation max_output_tokens = 10 (Table 13)
+      - FactConsolidation chunk_size = 512 (Table 14) — we currently use 4096 from config
+      - All RAG agents use GPT-4o-mini as backbone
+      - SubEM (Substring Exact Match) as eval metric
+
+decisions:
+  openrouter_not_direct: |
+    Using OpenRouter instead of direct OpenAI/Anthropic APIs. Single API key,
+    model-agnostic routing. OpenAI SDK compatible (just change base_url).
+  gpt4o_mini_for_benchmark: |
+    Switched from minimax/minimax-m2.5 to openai/gpt-4o-mini for benchmark
+    compliance. Reasoning models can't work within 10-token output limit.
+    GPT-4o-mini is the exact backbone used in the paper's baseline results.
+  configurable_max_tokens: |
+    Made max_gen_tokens a constructor param (default 10) so different models
+    can use different budgets without code changes.
+
+findings:
+  reasoning_model_incompatibility: |
+    MiniMax M2.5 (and likely other reasoning models like o4-mini, DeepSeek-R1)
+    are incompatible with MABench's tight output token limits. They consume
+    reasoning tokens that count toward completion_tokens but produce no content.
+    Would need OpenRouter's reasoning token budget separation to work.
+  published_baselines_for_factcon_sh: |
+    From paper Table 2 (FactConsolidation-SH, 262K context):
+    GPT-4o: 60%, HippoRAG-v2: 54%, BM25: 48%, GPT-4o-mini: 45%,
+    GPT-4.1-mini: 36%, Gemini-2.0-Flash: 30%, Mem0: 18%, Cognee: 28%
+    O4-mini on 6K: 100% (Table 4)
+    Our run is on 6K context (max_test_samples=1), so compare against O4-mini 6K baseline.
+  chunk_size_mismatch: |
+    Paper uses chunk_size=512 for FactConsolidation but dataset config yaml
+    says chunk_size=4096. The 6k config has context_max_length=6000.
+    May need to override chunk_size in run_hermes.py for strict compliance.
+
+worked:
+  - "OpenRouter + OpenAI SDK works seamlessly — just base_url + api_key change"
+  - "MABench deps install cleanly in NLCDM venv"
+  - "Full 100-query eval loop runs end-to-end (~10 min per context)"
+  - "Qwen3-0.6B embedding model loads from cache on second run (fast)"
+  - "MiniMax M2.5 produces correct answers when given enough tokens (Paris test)"
+
+failed:
+  - "MiniMax M2.5 with max_tokens=100: all empty outputs (reasoning ate all tokens)"
+  - "Model name with slash in output path: minimax/minimax-m2.5 → FileNotFoundError"
+  - "bare dotenv.load_dotenv() doesn't find .env when cwd != NLCDM/python"
+
+next:
+  - step: "Run FactConsolidation_sh_6k with openai/gpt-4o-mini"
+    details: |
+      /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python/.venv/bin/python3 \
+        proofs/hermes-NLCDM/python/mabench/run_hermes.py \
+        --dataset_config MemoryAgentBench/configs/data_conf/Conflict_Resolution/Factconsolidation_sh_6k.yaml \
+        --model openai/gpt-4o-mini
+      Compare result against O4-mini 6K baseline (100% EM) and GPT-4o-mini long-context (45%).
+
+  - step: "Run EventQA with openai/gpt-4o-mini"
+    details: |
+      --dataset_config MemoryAgentBench/configs/data_conf/Accurate_Retrieval/EventQA/Eventqa_64k.yaml
+      Note: EventQA max_output_tokens=40, needs max_gen_tokens=40 in agent.
+      run_hermes.py may need to pass max_gen_tokens based on dataset config.
+
+  - step: "Add max_gen_tokens to run_hermes.py CLI / dataset-aware defaults"
+    details: |
+      Per MABench Table 13, different tasks have different max output tokens:
+      FactConsolidation=10, EventQA=40, LME=100, MCC=20, Summ=1200, DetQA=500
+      run_hermes.py should read generation_max_length from dataset config and pass it.
+
+  - step: "Consider chunk_size=512 for FactConsolidation strict compliance"
+    details: "Paper Table 14 says 512 for FactCon. Affects V1/V2 contradiction granularity."
+
+  - step: "Run larger FactConsolidation configs (32k, 64k, 262k)"
+    details: |
+      After 6k baseline passes, scale up to test degradation.
+      Published baselines degrade significantly at longer contexts.
+
+  - step: "Tune V1 text contradiction for FactConsolidation patterns"
+    details: |
+      V1 detect_contradictions may miss serial-number override patterns.
+      V2 cosine threshold should handle it geometrically.
+
+  - step: "Compare results and write up findings"
+
+files:
+  modified:
+    - proofs/hermes-NLCDM/python/mabench/hermes_agent.py
+    - proofs/hermes-NLCDM/python/mabench/run_hermes.py
+  created:
+    - proofs/hermes-NLCDM/python/.env
+    - output/hermes/hermes_factconsolidation_sh_6k_minimax_minimax-m2.5.json
+
+background_state:
+  - "MABench deps installed in NLCDM venv"
+  - "OPENROUTER_API_KEY in proofs/hermes-NLCDM/python/.env"
+  - "Default model now openai/gpt-4o-mini, max_gen_tokens=10"
+  - "MiniMax M2.5 results at output/hermes/ (3% EM, all empty — invalid)"
+  - "142/142 Python tests should still pass (no core changes)"
+  - "embeddings_170k.npy + Qwen3-0.6B model cached"
+
+key_references:
+  - "proofs/hermes-NLCDM/python/mabench/hermes_agent.py:107-114 — constructor with new params"
+  - "proofs/hermes-NLCDM/python/mabench/hermes_agent.py:163-168 — OpenRouter client"
+  - "proofs/hermes-NLCDM/python/mabench/hermes_agent.py:280-282 — max_gen_tokens usage"
+  - "proofs/hermes-NLCDM/python/mabench/run_hermes.py:39 — dotenv explicit path"
+  - "proofs/hermes-NLCDM/python/mabench/run_hermes.py:106-107 — safe model name"
+  - "MABench paper Table 2 — published baselines for all agents"
+  - "MABench paper Table 13 — max output tokens per task"
+  - "MABench paper Table 14 — chunk size per task"

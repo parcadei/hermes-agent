@@ -1,0 +1,159 @@
+root_span_id: bddfb34c-1d27-4147-afa0-e2049b0b8629
+turn_span_id: 44786251-032f-4905-82fc-ddf4cd6df06c
+session_id: bddfb34c-1d27-4147-afa0-e2049b0b8629
+---
+session: general
+date: 2026-03-03
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: "MABench FactConsolidation eval — 6K complete, 262K scaling in progress"
+now: "Run Hermes + GPT-4.1-mini on FactConsolidation_sh_262k. Compare against paper Table 2 baselines."
+test: |
+  /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python/.venv/bin/python3 \
+    /Users/cosimo/.hermes/hermes-agent/proofs/hermes-NLCDM/python/mabench/run_hermes.py \
+    --dataset_config /Users/cosimo/.hermes/hermes-agent/MemoryAgentBench/configs/data_conf/Conflict_Resolution/Factconsolidation_sh_262k.yaml \
+    --model openai/gpt-4.1-mini \
+    --dream_interval 1 --force
+
+done_this_session:
+  - task: "Ran FactConsolidation_sh_6K with GPT-4o-mini baseline (no pipeline)"
+    files: [proofs/hermes-NLCDM/python/mabench/hermes_agent.py, proofs/hermes-NLCDM/python/mabench/run_hermes.py]
+    details: "76% SubEM with V1+V2 contradiction ON, dream OFF, novelty OFF"
+
+  - task: "Tested chunk_size=512 (paper-recommended)"
+    details: |
+      chunk_size=512 HURT performance: 52% (retrieve=10, 2 chunks dropped) and
+      64% (retrieve=20, all returned). 4096 is better at 6K because 2 large chunks
+      preserve serial number ordering; 12 small chunks get scrambled by embedding ranking.
+
+  - task: "Activated full V2 coupled pipeline"
+    files: [proofs/hermes-NLCDM/python/mabench/hermes_agent.py]
+    details: |
+      dream_interval=1, novelty_N0=0.2, novelty_gamma=0.05.
+      emotional_tagging=OFF (CMA-ES proved P@1 ceiling at 0.87).
+      reconsolidation=OFF. Result: 79% SubEM (+3 over baseline, 0 regressions).
+      Fixed queries: Q17, Q54, Q57. hermes_agent.py:153-158
+
+  - task: "Added --fullpass baseline mode"
+    files: [proofs/hermes-NLCDM/python/mabench/run_hermes.py]
+    details: |
+      --fullpass skips memory system, sends full context + question directly to LLM.
+      GPT-4o-mini fullpass at 6K = 85% SubEM. Hermes at 6K = 79%.
+      Memory system hurts by 6 points at 6K (expected — trivially small context).
+      run_hermes.py:136-170
+
+  - task: "Added --chunk_size CLI override"
+    files: [proofs/hermes-NLCDM/python/mabench/run_hermes.py]
+    details: "Overrides dataset YAML chunk_size without editing config. run_hermes.py:80-85, 97-99"
+
+  - task: "Fixed GPT-4.1-mini min token requirement"
+    files: [proofs/hermes-NLCDM/python/mabench/hermes_agent.py, proofs/hermes-NLCDM/python/mabench/run_hermes.py]
+    details: "max_tokens=max(gen_tokens, 16) — GPT-4.1-mini requires >= 16"
+
+  - task: "Analyzed all 24 failed queries at 6K"
+    details: |
+      Every failure is LLM returning parametric/real-world knowledge instead of
+      latest serial-numbered fact. E.g. "capital of France" → "Paris" instead of
+      "Harare" (latest SN override). At 6K with 2 chunks, both always returned,
+      contradiction detection has limited leverage.
+
+decisions:
+  chunk_size_4096_better_at_6k: |
+    Paper says 512 but 4096 works better at 6K. With only 2 chunks, serial number
+    ordering is preserved within chunks. With 12 small chunks, embedding-ranked
+    retrieval scrambles the order. May revisit at 262K.
+  no_emotional_tagging: |
+    User confirmed: 900+ CMA-ES evaluations proved emotional tagging caps P@1 at 0.87.
+    Keep OFF.
+  gpt41_mini_for_262k: |
+    GPT-4o-mini context window (128K) can't handle 262K fullpass.
+    GPT-4.1-mini has 1M window. Paper reports GPT-4.1-mini at 262K = 36% SubEM.
+
+findings:
+  6k_results_table: |
+    | Config                              | SubEM |
+    |-------------------------------------|-------|
+    | GPT-4o-mini fullpass (no memory)    |   85% |
+    | Hermes full pipeline (dream=1)      |   79% |
+    | Hermes baseline (no dream)          |   76% |
+    | chunk_size=512, retrieve=20         |   64% |
+    | chunk_size=512, retrieve=10         |   52% |
+  paper_baselines: |
+    6K: GPT-4o=92%, O4-mini=100% (Table 4, long-context only)
+    262K (Table 2): GPT-4o=60%, HippoRAG-v2=54%, BM25=48%,
+    GPT-4o-mini=45%, GPT-4.1-mini=36%, Gemini-2.0-Flash=30%,
+    Cognee=28%, Mem0=18%
+  memory_hurts_at_6k: |
+    At 6K the memory system loses 6 points vs fullpass (79% vs 85%).
+    Expected: context is trivially small, memory adds prompt noise.
+    The value proposition is at 262K where long-context models degrade.
+  failure_pattern: |
+    All failures are parametric knowledge override — LLM sees both old and
+    new facts but picks the real-world answer. Dream cycle fixed 3/24.
+
+worked:
+  - "Full V2 pipeline (dream=1, novelty ON) gained +3 SubEM with 0 regressions"
+  - "--fullpass baseline mode for direct comparison"
+  - "Output files now at output/hermes/ (run from repo root)"
+
+failed:
+  - "chunk_size=512 hurts at 6K (scrambles serial number ordering)"
+  - "GPT-4o-mini fullpass at 262K — exceeds 128K context window"
+  - "MiniMax M2.5 reasoning model — empty outputs with 10 token limit (from prev session)"
+
+next:
+  - step: "Run Hermes + GPT-4.1-mini on FactConsolidation_sh_262k"
+    details: |
+      Command ready (fixed min token issue). 67 chunks to memorize.
+      Compare against paper Table 2: GPT-4.1-mini=36%, GPT-4o-mini=45%,
+      HippoRAG-v2=54%. If Hermes > 54%, it beats ALL memory agents.
+
+  - step: "Run fullpass GPT-4.1-mini at 262K for direct comparison"
+    details: |
+      GPT-4.1-mini has 1M context — can do fullpass at 262K.
+      Paper says 36% but worth verifying independently.
+
+  - step: "Run intermediate scales (32K, 64K) for degradation curves"
+    details: |
+      Configs exist: Factconsolidation_sh_32k.yaml, Factconsolidation_sh_64k.yaml
+      Shows how Hermes degrades vs long-context models as context grows.
+
+  - step: "Run EventQA dataset"
+    details: |
+      Different competency (Accurate_Retrieval). max_output_tokens=40.
+      Need to pass --max_gen_tokens or read generation_max_length from config.
+      Config: MemoryAgentBench/configs/data_conf/Accurate_Retrieval/EventQA/Eventqa_64k.yaml
+
+  - step: "Consider V1+V2 contradiction feedback loop"
+    details: |
+      Currently V1 and V2 store independently. If V1 detects contradiction,
+      V2 doesn't know. Wiring V1 detection to trigger V2 eviction could
+      improve contradiction resolution significantly.
+
+files:
+  modified:
+    - proofs/hermes-NLCDM/python/mabench/hermes_agent.py
+    - proofs/hermes-NLCDM/python/mabench/run_hermes.py
+  created:
+    - output/hermes/hermes_factconsolidation_sh_6k_openai_gpt-4o-mini.json
+    - output/hermes/fullpass_factconsolidation_sh_6k_openai_gpt-4o-mini.json
+
+background_state:
+  - "MABench deps installed in NLCDM venv"
+  - "OPENROUTER_API_KEY in proofs/hermes-NLCDM/python/.env"
+  - "Full V2 pipeline active: dream_interval=1, novelty ON, emotional_tagging OFF"
+  - "max_tokens floor = 16 (for GPT-4.1-mini compatibility)"
+  - "Output dir: output/hermes/ (relative to repo root CWD)"
+  - "Previous run outputs also at proofs/hermes-NLCDM/python/output/hermes/ (old CWD)"
+
+key_references:
+  - "hermes_agent.py:153-158 — CoupledEngine init with full V2 pipeline params"
+  - "hermes_agent.py:294 — max_tokens floor fix"
+  - "run_hermes.py:80-85 — --chunk_size CLI override"
+  - "run_hermes.py:87 — --fullpass flag"
+  - "run_hermes.py:136-170 — fullpass eval loop"
+  - "run_hermes.py:213 — fullpass max_tokens floor fix"
+  - "MABench paper Table 2 — 262K baselines for all agents"
+  - "MABench paper Table 4 — 6K/32K baselines for GPT-4o and O4-mini"

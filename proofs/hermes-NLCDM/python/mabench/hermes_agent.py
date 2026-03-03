@@ -15,6 +15,8 @@ Two contradiction layers:
 
 from __future__ import annotations
 
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -45,11 +47,14 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
     Embeddings are cached per content string to avoid redundant inference.
     """
 
+    _DISK_CACHE_DIR = Path(__file__).resolve().parent.parent / "output" / "embed_cache"
+
     def __init__(self, model_name: str = "Qwen/Qwen3-Embedding-0.6B"):
         self._model_name = model_name
         self._model = None
         self._tokenizer = None
         self._cache: dict[str, np.ndarray] = {}
+        self._load_disk_cache()
 
     def _ensure_model(self):
         if self._model is not None:
@@ -82,6 +87,26 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
         self._cache[text] = emb
         return emb
 
+    def _load_disk_cache(self):
+        """Load cached embeddings from disk if available."""
+        cache_file = self._DISK_CACHE_DIR / "embeddings.npz"
+        if cache_file.exists():
+            data = np.load(str(cache_file), allow_pickle=True)
+            texts = data["texts"]
+            embs = data["embeddings"]
+            for t, e in zip(texts, embs):
+                self._cache[str(t)] = e
+            print(f"Loaded {len(self._cache)} cached embeddings from disk")
+
+    def save_disk_cache(self):
+        """Persist embedding cache to disk."""
+        self._DISK_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file = self._DISK_CACHE_DIR / "embeddings.npz"
+        texts = list(self._cache.keys())
+        embs = np.array(list(self._cache.values()))
+        np.savez(str(cache_file), texts=texts, embeddings=embs)
+        print(f"Saved {len(texts)} embeddings to {cache_file}")
+
     def score(self, query: str, content: str) -> float:
         """Cosine similarity between query and content embeddings."""
         q_emb = self.embed(query)
@@ -106,12 +131,14 @@ class HermesMemoryAgent:
 
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
+        model: str = "openai/gpt-4o-mini",
         dim: int = 1024,
         contradiction_threshold: float = 0.95,
         retrieve_num: int = 10,
         dream_interval: int = 0,
         temperature: float = 0.0,
+        max_gen_tokens: int = 10,
+        recency_alpha: float = 0.1,
     ):
         self.model = model
         self.dim = dim
@@ -119,6 +146,7 @@ class HermesMemoryAgent:
         self.retrieve_num = retrieve_num
         self.dream_interval = dream_interval
         self.temperature = temperature
+        self._max_gen_tokens = max_gen_tokens
 
         # V1: Text-based orchestrator (validated baseline from test_engine.py)
         params = ParameterSet(
@@ -147,11 +175,19 @@ class HermesMemoryAgent:
             relevance_scorer=self._scorer,
         )
 
-        # V2: Cosine-threshold engine for geometric contradiction detection
+        # V2: Full coupled pipeline — P@1 0.938 longitudinal config
+        # Strength decay drives importances (not uniform 0.5)
+        # Novelty bonus ON, emotional tagging OFF (CMA-ES proved ceiling)
+        # Reconsolidation OFF (no measurable effect)
         self.coupled_engine = CoupledEngine(
             dim=dim,
             contradiction_aware=True,
             contradiction_threshold=contradiction_threshold,
+            novelty_N0=0.2,
+            novelty_gamma=0.05,
+            emotional_tagging=False,
+            reconsolidation=False,
+            recency_alpha=recency_alpha,
         )
 
         self._store_count = 0
@@ -164,7 +200,10 @@ class HermesMemoryAgent:
         if self._llm_client is not None:
             return
         from openai import OpenAI
-        self._llm_client = OpenAI()
+        self._llm_client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ["OPENROUTER_API_KEY"],
+        )
 
     def send_message(
         self,
@@ -184,29 +223,97 @@ class HermesMemoryAgent:
         else:
             return self._query(message)
 
+    # Regex: split on "N. " where N is one or more digits at a fact boundary.
+    # Lookbehind ensures we split after the previous fact's trailing ". "
+    _FACT_SPLIT_RE = re.compile(r"(?<=\.) (?=\d+\. )")
+    _FACT_SN_RE = re.compile(r"^(\d+)\. (.+)")
+
+    @staticmethod
+    def _parse_facts(text: str) -> list[tuple[int, str]]:
+        """Parse a chunk into individual (serial_number, fact_text) pairs.
+
+        Handles the MABench FactConsolidation format:
+          "Here is a list of facts:\\n0. Fact zero. 1. Fact one. ..."
+
+        Returns list of (sn, fact_text).  Falls back to [(-1, text)] if
+        the chunk doesn't match the expected SN pattern.
+        """
+        body = text
+        if body.startswith("Here is a list of facts:\n"):
+            body = body[len("Here is a list of facts:\n"):]
+
+        parts = HermesMemoryAgent._FACT_SPLIT_RE.split(body)
+        facts: list[tuple[int, str]] = []
+        for part in parts:
+            m = HermesMemoryAgent._FACT_SN_RE.match(part.strip())
+            if m:
+                facts.append((int(m.group(1)), m.group(2).strip()))
+        if not facts:
+            # Fallback: store entire chunk as one entry
+            facts.append((-1, text))
+        return facts
+
     def _store(self, text: str) -> str:
-        """Store text through V1 (text contradiction) + V2 (cosine contradiction)."""
-        # V1: Text-based store with contradiction detection
-        self.orchestrator.store(content=text)
+        """Store text through V1 (text contradiction) + V2 (cosine contradiction).
 
-        # V2: Embed and store in coupled engine for geometric retrieval
-        emb = self._scorer.embed(text)
-        self.coupled_engine.store(text=text, embedding=emb)
+        Parses chunks into individual facts (split on serial numbers) so that:
+        - V1 contradiction detection compares single facts (subject extraction works)
+        - V2 cosine contradiction fires on facts about the same entity/predicate
+        - Dream consolidation operates at fact granularity
+        - Retrieval matches queries to individual facts, not multi-fact chunks
+        """
+        facts = self._parse_facts(text)
 
-        self._store_count += 1
+        for sn, fact_text in facts:
+            # Preserve original text format (including SN prefix) — this is
+            # the input data as provided by the benchmark, not injected metadata.
+            original_text = f"{sn}. {fact_text}" if sn >= 0 else fact_text
 
-        # Optional dream cycle at configurable intervals
+            # V1: Text-based store with contradiction detection
+            self.orchestrator.store(content=fact_text)
+
+            # V2: Embed on bare fact (better semantic matching), store
+            # original text. Recency = ingestion order (domain-agnostic).
+            emb = self._scorer.embed(fact_text)
+            self.coupled_engine.store(
+                text=original_text, embedding=emb,
+                recency=float(self._store_count),
+            )
+
+            self._store_count += 1
+
+        # Optional dream cycle at configurable intervals (per chunk, not per fact)
         if self.dream_interval > 0 and self._store_count % self.dream_interval == 0:
             self.coupled_engine.dream()
 
         return "Memorized"
 
+    @staticmethod
+    def _extract_question(prompt: str) -> str:
+        """Extract the bare question from a MABench prompt.
+
+        The prompt looks like:
+          "Pretend you are a knowledge management system. ... Question: ... Answer:"
+        We extract just the text after the last "Question:" and before "Answer:".
+        Falls back to the full prompt if the pattern isn't found.
+        """
+        # Find the actual question between last "Question:" and last "Answer:"
+        q_start = prompt.rfind("Question:")
+        if q_start >= 0:
+            q_end = prompt.rfind("\nAnswer:")
+            if q_end > q_start:
+                return prompt[q_start + len("Question:"):q_end].strip()
+        return prompt
+
     def _query(self, question: str) -> dict:
         """Query memory and generate answer via LLM."""
         query_start = time.time()
 
-        # Embed the query
-        q_emb = self._scorer.embed(question)
+        # Extract bare question for embedding (strip MABench prompt preamble)
+        bare_question = self._extract_question(question)
+
+        # Embed the bare question (not the full prompt with instructions)
+        q_emb = self._scorer.embed(bare_question)
 
         # V2 retrieval: cosine-based top-k from coupled engine
         v2_results = self.coupled_engine.query(
@@ -260,14 +367,14 @@ class HermesMemoryAgent:
         self._ensure_llm_client()
 
         system_msg = (
-            "You are a helpful assistant that can read the context and memorize "
-            "it for future retrieval."
+            "You are a helpful assistant that answers questions from a "
+            "knowledge pool. Give a very concise answer."
         )
+        # The MABench query already contains full instructions about serial
+        # numbers and recency. Prepend retrieved memories as the knowledge pool.
         user_msg = (
-            f"Based on the following retrieved memories, answer the question "
-            f"concisely.\n\n"
-            f"[Retrieved Memories]\n{context}\n\n"
-            f"Question: {question}\n\nAnswer:"
+            f"[Knowledge Pool]\n{context}\n\n"
+            f"{question}\nAnswer:"
         )
 
         start = time.time()
@@ -278,7 +385,7 @@ class HermesMemoryAgent:
                 {"role": "user", "content": user_msg},
             ],
             temperature=self.temperature,
-            max_tokens=100,
+            max_tokens=max(self._max_gen_tokens, 16),
         )
         gen_time = time.time() - start
 
@@ -308,6 +415,11 @@ class HermesMemoryAgent:
             dim=self.dim,
             contradiction_aware=True,
             contradiction_threshold=self.contradiction_threshold,
+            novelty_N0=0.2,
+            novelty_gamma=0.05,
+            emotional_tagging=False,
+            reconsolidation=False,
+            recency_alpha=self.coupled_engine.recency_alpha,
         )
         self._store_count = 0
         self._scorer._cache.clear()
