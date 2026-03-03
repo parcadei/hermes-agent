@@ -24,6 +24,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
+import numpy as np
+
+try:
+    import faiss
+except ImportError:
+    faiss = None
+
 from hermes_memory.consolidation import (
     ConsolidationCandidate,
     ConsolidationConfig,
@@ -373,6 +380,10 @@ class MemoryOrchestrator:
         self._relevance_scorer: RelevanceScorer = relevance_scorer or JaccardRelevance()
         self._memories: list[StoredMemory] = []
         self._id_to_idx: dict[str, int] = {}
+        # FAISS ANN pre-filter state (lazy-initialized on first embedding store)
+        self._faiss_index = None          # faiss.IndexFlatIP, lazy init
+        self._faiss_id_map: list[str] = []  # parallel to FAISS rows: memory_id at row i
+        self._faiss_dim: int | None = None   # inferred from first embedding
         # Clock starts at 1.0 (not 0.0) because retention(age=0, ...) produces
         # exp(0)=1.0 which is the maximum, and several scoring functions use
         # age as a divisor in derived calculations.  Starting at 1.0 ensures
@@ -420,7 +431,13 @@ class MemoryOrchestrator:
     # -- Internal helpers ----------------------------------------------------
 
     def _rebuild_index(self) -> None:
-        """Rebuild the _id_to_idx mapping from _memories list."""
+        """Update _id_to_idx for the most recently appended memory (O(1))."""
+        if self._memories:
+            last = self._memories[-1]
+            self._id_to_idx[last.memory_id] = len(self._memories) - 1
+
+    def _full_rebuild_index(self) -> None:
+        """Full O(N) rebuild -- only called after consolidation."""
         self._id_to_idx = {m.memory_id: i for i, m in enumerate(self._memories)}
 
     def _simple_text_relevance(self, query: str, content: str) -> float:
@@ -531,11 +548,73 @@ class MemoryOrchestrator:
 
     # -- Store ---------------------------------------------------------------
 
+    # -- ANN Pre-Filter Constants -------------------------------------------
+
+    ANN_COSINE_THRESHOLD: float = 0.5
+    ANN_K: int = 50
+
+    @staticmethod
+    def _remap_contradiction_result(
+        result: ContradictionResult,
+        subset_to_active: list[int],
+    ) -> ContradictionResult:
+        """Remap indices from subset-space to active-list-space.
+
+        detect_contradictions() returns indices relative to the filtered
+        existing_texts list (subset). This method remaps them back to
+        the full active-list indices so that deactivation and flagging
+        target the correct memories.
+
+        Args:
+            result:           ContradictionResult with subset-space indices.
+            subset_to_active: Mapping from subset index to active-list index.
+
+        Returns:
+            New ContradictionResult with remapped indices.
+        """
+        from hermes_memory.contradiction import ContradictionDetection
+
+        remapped_detections = tuple(
+            ContradictionDetection(
+                existing_index=subset_to_active[det.existing_index],
+                contradiction_type=det.contradiction_type,
+                confidence=det.confidence,
+                subject_overlap=det.subject_overlap,
+                candidate_subject=det.candidate_subject,
+                existing_subject=det.existing_subject,
+                explanation=det.explanation,
+            )
+            for det in result.detections
+        )
+
+        remapped_actions = tuple(
+            (subset_to_active[idx], action)
+            for idx, action in result.actions
+        )
+
+        remapped_superseded = frozenset(
+            subset_to_active[i] for i in result.superseded_indices
+        )
+
+        remapped_flagged = frozenset(
+            subset_to_active[i] for i in result.flagged_indices
+        )
+
+        return ContradictionResult(
+            detections=remapped_detections,
+            actions=remapped_actions,
+            superseded_indices=remapped_superseded,
+            flagged_indices=remapped_flagged,
+            has_contradiction=result.has_contradiction,
+            highest_confidence=result.highest_confidence,
+        )
+
     def store(
         self,
         content: str,
         metadata: dict[str, Any] | None = None,
         timestamp: float | None = None,
+        embedding: np.ndarray | None = None,
     ) -> StoreResult:
         """Store a memory through the encoding and contradiction pipeline.
 
@@ -547,15 +626,20 @@ class MemoryOrchestrator:
           1. Encoding gate: evaluate content and metadata.
           2. If rejected: return StoreResult(stored=False).
           3. Contradiction detection against active memories.
+             - When embedding is provided and FAISS is available: ANN pre-filter
+               narrows candidates to top-K nearest neighbors (O(K) instead of O(N)).
+             - When embedding is None: full-scan (backwards compatible).
           4. Contradiction resolution (supersession records).
           5. Deactivate superseded memories.
           6. Flag contested memories.
           7. Create new StoredMemory and append.
+          8. Add embedding to FAISS index (if provided).
 
         Args:
             content:   Text content to store.
             metadata:  Optional metadata dict for encoding gate.
             timestamp: Optional explicit timestamp for contradiction resolution.
+            embedding: Optional pre-computed embedding for ANN pre-filter.
 
         Returns:
             StoreResult describing what happened.
@@ -576,31 +660,100 @@ class MemoryOrchestrator:
 
         # Step 2: Build existing memory lists for contradiction detection
         active = self.memories
-        existing_texts = [m.content for m in active]
-        existing_categories = [m.category for m in active]
+        use_ann = (
+            embedding is not None
+            and faiss is not None
+        )
+
+        # Validate and prepare embedding for FAISS
+        if use_ann:
+            emb = np.asarray(embedding, dtype=np.float64).ravel()
+            # Dimension validation
+            if self._faiss_dim is not None and emb.shape[0] != self._faiss_dim:
+                raise ValueError(
+                    f"Embedding dimension {emb.shape[0]} != expected {self._faiss_dim}"
+                )
+            # L2-normalize
+            norm = np.linalg.norm(emb)
+            if norm > 1e-12:
+                emb = emb / norm
+            # Lazy-init FAISS index
+            if self._faiss_index is None:
+                self._faiss_dim = emb.shape[0]
+                self._faiss_index = faiss.IndexFlatIP(self._faiss_dim)
 
         # Step 3: Contradiction detection
         contradiction_result: ContradictionResult | None = None
         supersession_records: tuple[SupersessionRecord, ...] = ()
         deactivation_indices: frozenset[int] = frozenset()
 
-        if existing_texts:
-            contradiction_result = detect_contradictions(
-                candidate_text=content,
-                candidate_category=decision.category,
-                existing_texts=existing_texts,
-                existing_categories=existing_categories,
-                config=self._contradiction_config,
-            )
+        if use_ann and self._faiss_index.ntotal > 0 and active:
+            # ANN pre-filter path: search FAISS for top-K nearest neighbors
+            K = min(self.ANN_K, self._faiss_index.ntotal)
+            emb_f32 = emb.astype(np.float32).reshape(1, -1)
+            distances, indices = self._faiss_index.search(emb_f32, K)
 
-            if contradiction_result.has_contradiction:
-                records, deactivation_indices = resolve_contradictions(
-                    result=contradiction_result,
+            # Filter by cosine threshold and map to active-list indices
+            # Build mapping: FAISS memory_ids -> active-list positions
+            active_id_to_pos = {m.memory_id: i for i, m in enumerate(active)}
+            subset_to_active: list[int] = []
+
+            for j in range(K):
+                faiss_row = int(indices[0, j])
+                cos_sim = float(distances[0, j])
+                if faiss_row < 0 or cos_sim < self.ANN_COSINE_THRESHOLD:
+                    continue
+                mid = self._faiss_id_map[faiss_row]
+                active_pos = active_id_to_pos.get(mid)
+                if active_pos is not None:
+                    subset_to_active.append(active_pos)
+
+            if subset_to_active:
+                existing_texts = [active[i].content for i in subset_to_active]
+                existing_categories = [active[i].category for i in subset_to_active]
+
+                contradiction_result = detect_contradictions(
                     candidate_text=content,
+                    candidate_category=decision.category,
                     existing_texts=existing_texts,
-                    timestamp=ts,
+                    existing_categories=existing_categories,
+                    config=self._contradiction_config,
                 )
-                supersession_records = tuple(records)
+
+                # Remap subset-space indices back to active-list-space
+                if contradiction_result.has_contradiction:
+                    contradiction_result = self._remap_contradiction_result(
+                        contradiction_result, subset_to_active
+                    )
+                    records, deactivation_indices = resolve_contradictions(
+                        result=contradiction_result,
+                        candidate_text=content,
+                        existing_texts=[m.content for m in active],
+                        timestamp=ts,
+                    )
+                    supersession_records = tuple(records)
+        else:
+            # Full-scan path (no embedding or empty FAISS index)
+            existing_texts = [m.content for m in active]
+            existing_categories = [m.category for m in active]
+
+            if existing_texts:
+                contradiction_result = detect_contradictions(
+                    candidate_text=content,
+                    candidate_category=decision.category,
+                    existing_texts=existing_texts,
+                    existing_categories=existing_categories,
+                    config=self._contradiction_config,
+                )
+
+                if contradiction_result.has_contradiction:
+                    records, deactivation_indices = resolve_contradictions(
+                        result=contradiction_result,
+                        candidate_text=content,
+                        existing_texts=existing_texts,
+                        timestamp=ts,
+                    )
+                    supersession_records = tuple(records)
 
         # Step 4: Compute mutations in local variables (atomic path)
         # Map active list indices back to memory IDs
@@ -649,6 +802,12 @@ class MemoryOrchestrator:
         self._memories.append(new_memory)
         self._rebuild_index()
         self._next_time += 1.0
+
+        # Step 6: Add embedding to FAISS index (after memory is stored)
+        if use_ann:
+            emb_f32 = emb.astype(np.float32).reshape(1, -1)
+            self._faiss_index.add(emb_f32)
+            self._faiss_id_map.append(new_id)
 
         return StoreResult(
             memory_id=new_id,
@@ -853,7 +1012,7 @@ class MemoryOrchestrator:
             if c.memory_id not in selected_ids and c.memory_id not in skipped_ids_set:
                 skipped_ids_set.add(c.memory_id)
 
-        self._rebuild_index()
+        self._full_rebuild_index()
 
         return ConsolidationSummary(
             candidates_evaluated=len(pool),

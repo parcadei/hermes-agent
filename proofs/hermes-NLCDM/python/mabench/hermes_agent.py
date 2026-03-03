@@ -306,8 +306,8 @@ class HermesMemoryAgent:
         for (sn, fact_text), emb in zip(facts, embeddings):
             original_text = f"{sn}. {fact_text}" if sn >= 0 else fact_text
 
-            # V1: Text-based store with contradiction detection
-            self.orchestrator.store(content=fact_text)
+            # V1: Text-based store with contradiction detection + ANN pre-filter
+            self.orchestrator.store(content=fact_text, embedding=emb)
 
             # V2: Store with pre-computed embedding
             self.coupled_engine.store(

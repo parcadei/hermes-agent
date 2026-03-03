@@ -25,6 +25,11 @@ from pathlib import Path
 
 import numpy as np
 
+try:
+    import faiss
+except ImportError:
+    faiss = None
+
 from dream_metrics import (
     capacity_utilization,
     count_spurious_attractors,
@@ -117,6 +122,8 @@ class CoupledEngine:
         self.memory_store: list[MemoryEntry] = []
         self._embeddings_cache: np.ndarray | None = None
         self._W_cache: np.ndarray | None = None
+        # FAISS ANN index for O(1) nearest-neighbor search
+        self._faiss_index = None  # faiss.IndexFlatIP, lazy init
 
     @property
     def n_memories(self) -> int:
@@ -181,14 +188,26 @@ class CoupledEngine:
           1 = maximally different from all existing patterns (fully novel)
 
         Proven well-formed in EmotionalTagging.lean: prediction_error_well_formed.
+
+        Uses FAISS index for O(1) lookup when available, falling back to
+        matrix multiply for backward compatibility.
         """
         if self.n_memories == 0:
             return 1.0  # First memory is maximally novel
-        X = self._embeddings_matrix()
-        # Cosine similarities: emb · X^T (both unit-normed or close)
+
         emb_norm = np.linalg.norm(emb)
         if emb_norm < 1e-12:
             return 1.0
+
+        # FAISS path: O(1) nearest-neighbor search
+        if self._faiss_index is not None and self._faiss_index.ntotal > 0:
+            emb_normed = (emb / emb_norm).astype(np.float32).reshape(1, -1)
+            D, _I = self._faiss_index.search(emb_normed, 1)
+            max_sim = float(D[0, 0])
+            return max(0.0, min(1.0 - max_sim, 1.0))
+
+        # Fallback: matrix multiply
+        X = self._embeddings_matrix()
         sims = X @ emb / (np.linalg.norm(X, axis=1) * emb_norm + 1e-12)
         max_sim = float(np.max(sims))
         # Cosine distance: 1 - max_similarity, clamped to [0, 1]
@@ -244,32 +263,60 @@ class CoupledEngine:
             else:
                 importance = 0.5
 
+        # L2-normalize for FAISS inner-product = cosine similarity
+        emb_norm = np.linalg.norm(emb)
+        emb_normed = emb / (emb_norm + 1e-12) if emb_norm > 1e-12 else emb
+
+        # Lazy-init FAISS index
+        if faiss is not None and self._faiss_index is None:
+            self._faiss_index = faiss.IndexFlatIP(self.dim)
+
         # Contradiction detection: find the most similar existing pattern
         if self.contradiction_aware and self.n_memories > 0:
-            X = self._embeddings_matrix()
-            emb_norm = np.linalg.norm(emb)
-            if emb_norm > 1e-12:
+            best_idx = -1
+            best_sim = -1.0
+
+            if self._faiss_index is not None and self._faiss_index.ntotal > 0:
+                # FAISS path: O(1) nearest-neighbor search
+                emb_f32 = emb_normed.astype(np.float32).reshape(1, -1)
+                D, I = self._faiss_index.search(emb_f32, 1)
+                best_sim = float(D[0, 0])
+                best_idx = int(I[0, 0])
+            elif emb_norm > 1e-12:
+                # Fallback: matrix multiply
+                X = self._embeddings_matrix()
                 sims = X @ emb / (
                     np.linalg.norm(X, axis=1) * emb_norm + 1e-12
                 )
                 best_idx = int(np.argmax(sims))
                 best_sim = float(sims[best_idx])
 
-                if best_sim > self.contradiction_threshold:
-                    # Replace: update text, embedding, timestamps;
-                    # keep the higher importance of old vs new.
-                    old = self.memory_store[best_idx]
-                    now = time.time()
-                    old.text = text
-                    old.embedding = emb
-                    old.importance = max(old.importance, importance)
-                    old.recency = max(old.recency, recency)
-                    old.creation_time = now
-                    old.last_access_time = now
-                    old.access_count += 1
-                    old.tagged = old.importance >= 0.7
-                    self._invalidate_cache()
-                    return best_idx
+            if best_idx >= 0 and best_sim > self.contradiction_threshold:
+                # Replace: update text, embedding, timestamps;
+                # keep the higher importance of old vs new.
+                old = self.memory_store[best_idx]
+                now = time.time()
+                old.text = text
+                old.embedding = emb
+                old.importance = max(old.importance, importance)
+                old.recency = max(old.recency, recency)
+                old.creation_time = now
+                old.last_access_time = now
+                old.access_count += 1
+                old.tagged = old.importance >= 0.7
+                self._invalidate_cache()
+                # Update FAISS index: overwrite the old row with the new embedding
+                if self._faiss_index is not None:
+                    # Rebuild the FAISS index to reflect the replacement.
+                    # For IndexFlatIP, the simplest correct approach is rebuild.
+                    self._faiss_index.reset()
+                    all_embs = np.array(
+                        [m.embedding / (np.linalg.norm(m.embedding) + 1e-12)
+                         for m in self.memory_store],
+                        dtype=np.float32,
+                    )
+                    self._faiss_index.add(all_embs)
+                return best_idx
 
         now = time.time()
         idx = self.n_memories
@@ -285,6 +332,11 @@ class CoupledEngine:
         )
         self.memory_store.append(entry)
         self._invalidate_cache()
+
+        # Add the new embedding to the FAISS index
+        if self._faiss_index is not None:
+            emb_f32 = emb_normed.astype(np.float32).reshape(1, -1)
+            self._faiss_index.add(emb_f32)
 
         return idx
 
@@ -468,6 +520,17 @@ class CoupledEngine:
 
         self.memory_store = new_store
         self._invalidate_cache()
+
+        # Rebuild FAISS index to match the new memory_store
+        if self._faiss_index is not None:
+            self._faiss_index.reset()
+            if self.memory_store:
+                all_embs = np.array(
+                    [m.embedding / (np.linalg.norm(m.embedding) + 1e-12)
+                     for m in self.memory_store],
+                    dtype=np.float32,
+                )
+                self._faiss_index.add(all_embs)
 
         return {
             "modified": True,
