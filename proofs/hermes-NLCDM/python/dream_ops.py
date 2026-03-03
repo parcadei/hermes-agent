@@ -19,10 +19,13 @@ import numpy as np
 
 from nlcdm_core import cosine_sim, sigmoid, softmax
 
+import gpu_ops
+
 
 # ---------------------------------------------------------------------------
 # Parameters
 # ---------------------------------------------------------------------------
+
 
 @dataclass(frozen=True)
 class DreamParams:
@@ -31,15 +34,15 @@ class DreamParams:
     Defaults match research v3 specification.
     """
 
-    beta_high: float = 10.0     # NREM temperature (near deterministic)
-    beta_mod: float = 2.0       # REM-unlearn temperature (explore but settle)
-    beta_low: float = 0.5       # REM-explore temperature (maximal wandering)
-    eta: float = 0.01           # Hebbian/anti-Hebbian learning rate
-    eta_weak: float = 0.001     # Exploration reinforcement rate
-    n_unlearn: int = 100        # REM-unlearn trials per cycle
-    n_explore: int = 50         # REM-explore steps per cycle
+    beta_high: float = 10.0  # NREM temperature (near deterministic)
+    beta_mod: float = 2.0  # REM-unlearn temperature (explore but settle)
+    beta_low: float = 0.5  # REM-explore temperature (maximal wandering)
+    eta: float = 0.01  # Hebbian/anti-Hebbian learning rate
+    eta_weak: float = 0.001  # Exploration reinforcement rate
+    n_unlearn: int = 100  # REM-unlearn trials per cycle
+    n_explore: int = 50  # REM-explore steps per cycle
     consolidation_threshold: float = 0.95  # Merge threshold
-    seed: int | None = None     # For reproducibility
+    seed: int | None = None  # For reproducibility
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,7 @@ class DreamReport:
 # ---------------------------------------------------------------------------
 # Hopfield Update (pattern-space dynamics, used by NREM)
 # ---------------------------------------------------------------------------
+
 
 def hopfield_update(beta: float, patterns: np.ndarray, xi: np.ndarray) -> np.ndarray:
     """Single Hopfield update step in modern Hopfield network.
@@ -129,6 +133,7 @@ def spreading_activation(
 # Boltzmann Dynamics (W-space dynamics, used by REM operations)
 # ---------------------------------------------------------------------------
 
+
 def boltzmann_dynamics(
     W: np.ndarray,
     x0: np.ndarray,
@@ -164,6 +169,7 @@ def boltzmann_dynamics(
 # ---------------------------------------------------------------------------
 # NREM Replay (Hebbian reinforcement at high beta)
 # ---------------------------------------------------------------------------
+
 
 def nrem_replay(
     W: np.ndarray,
@@ -202,6 +208,7 @@ def nrem_replay(
 # ---------------------------------------------------------------------------
 # REM Unlearn (anti-Hebbian at moderate beta)
 # ---------------------------------------------------------------------------
+
 
 def rem_unlearn(
     W: np.ndarray,
@@ -257,6 +264,7 @@ def rem_unlearn(
 # ---------------------------------------------------------------------------
 # REM Explore (weak Hebbian during wandering at low beta)
 # ---------------------------------------------------------------------------
+
 
 def rem_explore(
     W: np.ndarray,
@@ -318,6 +326,7 @@ def rem_explore(
 # ---------------------------------------------------------------------------
 # Lotka-Volterra Competition
 # ---------------------------------------------------------------------------
+
 
 def lv_competition(
     W: np.ndarray,
@@ -400,6 +409,7 @@ def lv_competition(
 # ---------------------------------------------------------------------------
 # Consolidation
 # ---------------------------------------------------------------------------
+
 
 def consolidate_similar(
     W: np.ndarray,
@@ -493,6 +503,7 @@ def consolidate_similar(
 # Full Dream Cycle
 # ---------------------------------------------------------------------------
 
+
 def dream_cycle(
     W: np.ndarray,
     tagged: list[int],
@@ -530,18 +541,29 @@ def dream_cycle(
     emb_cur = embeddings.copy()
 
     # 1. NREM replay: stamp tagged memories
-    W_cur = nrem_replay(W_cur, tagged, emb_cur,
-                        beta_high=params.beta_high, eta=params.eta)
+    W_cur = nrem_replay(
+        W_cur, tagged, emb_cur, beta_high=params.beta_high, eta=params.eta
+    )
 
     # 2. REM unlearn: clean spurious states
-    W_cur = rem_unlearn(W_cur, d,
-                        beta_mod=params.beta_mod, eta=params.eta,
-                        n_trials=params.n_unlearn, rng=rng)
+    W_cur = rem_unlearn(
+        W_cur,
+        d,
+        beta_mod=params.beta_mod,
+        eta=params.eta,
+        n_trials=params.n_unlearn,
+        rng=rng,
+    )
 
     # 3. REM explore: protect old knowledge
-    W_cur = rem_explore(W_cur, emb_cur,
-                        beta_low=params.beta_low, eta_weak=params.eta_weak,
-                        n_steps=params.n_explore, rng=rng)
+    W_cur = rem_explore(
+        W_cur,
+        emb_cur,
+        beta_low=params.beta_low,
+        eta_weak=params.eta_weak,
+        n_steps=params.n_explore,
+        rng=rng,
+    )
 
     # 4. LV competition: strong attractors survive
     # Compute fitness from attractor depth (how much energy each pattern
@@ -786,7 +808,7 @@ def rem_explore_xb(
 
     # Derive β_min from capacity formula if not provided
     if beta_min is None:
-        M_sq = float(np.max(np.sum(patterns ** 2, axis=1)))
+        M_sq = float(np.max(np.sum(patterns**2, axis=1)))
         # Estimate δ = minimum pairwise cosine distance
         # Sample pairs for efficiency
         n_sample = min(N * (N - 1) // 2, 500)
@@ -881,7 +903,7 @@ def nrem_repulsion_xb(
     # Pre-compute full similarity matrix via BLAS — one matmul instead of
     # N*(N-1)/2 individual dot products. At N=10k this turns 50M Python-loop
     # dot products (~117s) into a single BLAS call (~1s).
-    S = patterns @ patterns.T  # (N, N)
+    S = gpu_ops.similarity_matrix(patterns)  # (N, N)
 
     # Fast path: if no pair exceeds threshold, no repulsion needed
     # Mask diagonal (self-similarity = 1.0) before checking
@@ -918,15 +940,14 @@ def nrem_repulsion_xb(
 
     # Postcondition: verify R1 (delta_min non-decreasing)
     # With pre-computed matrices this is now feasible at any N
-    S_in = S.copy()  # already computed above (before diagonal mask)
-    S_in_triu = patterns @ patterns.T
+    S_in_triu = gpu_ops.similarity_matrix(patterns)
     np.fill_diagonal(S_in_triu, -2.0)
-    S_out = X @ X.T
+    S_out = gpu_ops.similarity_matrix(X)
     np.fill_diagonal(S_out, -2.0)
 
     delta_min_in = 1.0 - float(np.max(S_in_triu))
     delta_min_out = 1.0 - float(np.max(S_out))
-    if delta_min_out < delta_min_in - 1e-9:
+    if delta_min_out < delta_min_in - 1e-6:
         return patterns.copy()
 
     return X
@@ -973,7 +994,7 @@ def nrem_prune_xb(
     # Pre-compute full similarity matrix via BLAS — one matmul instead of
     # N*(N-1)/2 individual dot products. At N=10k: 50M dot products (~117s)
     # become a single BLAS call (~1s).
-    S = patterns @ patterns.T  # (N, N)
+    S = gpu_ops.similarity_matrix(patterns)  # (N, N)
 
     # Fast path: if no pair exceeds threshold, no pruning needed.
     # Mask diagonal before checking (self-similarity = 1.0).
@@ -1097,7 +1118,7 @@ def nrem_merge_xb(
 
     # Build adjacency via union-find.
     # Pre-compute similarity matrix via BLAS instead of N*(N-1)/2 dot products.
-    S = patterns @ patterns.T  # (N, N)
+    S = gpu_ops.similarity_matrix(patterns)  # (N, N)
     np.fill_diagonal(S, -2.0)  # exclude self-similarity
 
     # Fast path: if no pair exceeds threshold, no merging possible
@@ -1261,8 +1282,8 @@ def rem_explore_cross_domain_xb(
         qj_batch = np.where(qj_norms > 1e-12, qj_batch / qj_norms, qj_batch)
 
         # 2 matmuls instead of 2*K
-        ri_stack = (patterns @ qi_batch.T).T  # (K, N)
-        rj_stack = (patterns @ qj_batch.T).T  # (K, N)
+        ri_stack = gpu_ops.batch_matmul(patterns, qi_batch.T).T  # (K, N)
+        rj_stack = gpu_ops.batch_matmul(patterns, qj_batch.T).T  # (K, N)
 
         # Flatten and compute Pearson correlation across all K*N values
         ri_flat = ri_stack.ravel()
@@ -1271,9 +1292,7 @@ def rem_explore_cross_domain_xb(
         # Pearson correlation
         ri_centered = ri_flat - ri_flat.mean()
         rj_centered = rj_flat - rj_flat.mean()
-        denom = np.sqrt(
-            np.sum(ri_centered**2) * np.sum(rj_centered**2)
-        )
+        denom = np.sqrt(np.sum(ri_centered**2) * np.sum(rj_centered**2))
         if denom < 1e-12:
             continue
         corr = float(np.sum(ri_centered * rj_centered) / denom)
@@ -1287,9 +1306,7 @@ def rem_explore_cross_domain_xb(
                 pair_best[key] = similarity
 
     # Build result list
-    associations = [
-        (k[0], k[1], v) for k, v in pair_best.items()
-    ]
+    associations = [(k[0], k[1], v) for k, v in pair_best.items()]
 
     # Sort by similarity descending
     associations.sort(key=lambda x: x[2], reverse=True)
@@ -1307,37 +1324,7 @@ def _assign_clusters(patterns: np.ndarray, threshold: float = 0.5) -> np.ndarray
     Uses a simple threshold-based approach: patterns with cosine similarity
     above threshold are in the same cluster. Returns integer labels.
     """
-    N = patterns.shape[0]
-    parent = list(range(N))
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    for i in range(N):
-        for j in range(i + 1, N):
-            if float(patterns[i] @ patterns[j]) > threshold:
-                union(i, j)
-
-    # Map roots to contiguous labels
-    root_to_label: dict[int, int] = {}
-    labels = np.zeros(N, dtype=int)
-    next_label = 0
-    for i in range(N):
-        root = find(i)
-        if root not in root_to_label:
-            root_to_label[root] = next_label
-            next_label += 1
-        labels[i] = root_to_label[root]
-
-    return labels
+    return gpu_ops.assign_clusters_matmul(patterns, threshold)
 
 
 # ---------------------------------------------------------------------------
@@ -1505,9 +1492,7 @@ def dream_cycle_v2(
     # Derive importances
     if importances is None:
         tagged_set = set(tagged_indices)
-        importances = np.array([
-            0.8 if i in tagged_set else 0.3 for i in range(N)
-        ])
+        importances = np.array([0.8 if i in tagged_set else 0.3 for i in range(N)])
     else:
         importances = np.asarray(importances, dtype=float)
         if len(importances) != N:
@@ -1523,7 +1508,8 @@ def dream_cycle_v2(
     # Step 1: Measure geometry → adaptive thresholds
     # ---------------------------------------------------------------
     merge_threshold, prune_threshold = compute_adaptive_thresholds(
-        patterns, labels,
+        patterns,
+        labels,
         merge_percentile=merge_percentile,
         prune_percentile=prune_percentile,
     )
@@ -1532,7 +1518,10 @@ def dream_cycle_v2(
     # Step 2: NREM merge (consolidation — while patterns are still tight)
     # ---------------------------------------------------------------
     X1, merge_map_local = nrem_merge_xb(
-        patterns, importances, threshold=merge_threshold, min_group=3,
+        patterns,
+        importances,
+        threshold=merge_threshold,
+        min_group=3,
     )
 
     # Track which original indices were merged
@@ -1561,7 +1550,9 @@ def dream_cycle_v2(
     # Step 3: NREM prune near-duplicates (catch what merge missed)
     # ---------------------------------------------------------------
     X2, kept_indices_after_prune = nrem_prune_xb(
-        X1, importances_after_merge, threshold=prune_threshold,
+        X1,
+        importances_after_merge,
+        threshold=prune_threshold,
     )
 
     # Map pruned indices back to original input space
@@ -1609,9 +1600,14 @@ def dream_cycle_v2(
     # ---------------------------------------------------------------
     # Step 5: REM unlearn
     # ---------------------------------------------------------------
+    S = gpu_ops.similarity_matrix(X3)
     X4 = rem_unlearn_xb(
-        X3, beta,
-        n_probes=200, separation_rate=0.02, rng=rng,
+        X3,
+        beta,
+        n_probes=200,
+        separation_rate=0.02,
+        rng=rng,
+        similarity_matrix=S,
     )
 
     # ---------------------------------------------------------------
@@ -1626,6 +1622,7 @@ def dream_cycle_v2(
         labels_post_merge_list.append(int(labels[i]))
 
     from collections import Counter
+
     for out_idx in sorted(merge_map_local.keys()):
         group = merge_map_local[out_idx]
         group_labels = [int(labels[i]) for i in group]
@@ -1642,7 +1639,10 @@ def dream_cycle_v2(
     labels_out = labels_post_merge[kept_indices_after_prune]
 
     associations = rem_explore_cross_domain_xb(
-        X4, labels_out, n_probes=max(N_out, 50), rng=rng,
+        X4,
+        labels_out,
+        n_probes=max(N_out, 50),
+        rng=rng,
     )
 
     # ---------------------------------------------------------------
@@ -1652,8 +1652,7 @@ def dream_cycle_v2(
     # these indices shift. We need to remap to post-prune output indices.
     # kept_indices_after_prune tells us which post-merge indices survived.
     post_merge_to_post_prune = {
-        pm_idx: pp_idx
-        for pp_idx, pm_idx in enumerate(kept_indices_after_prune)
+        pm_idx: pp_idx for pp_idx, pm_idx in enumerate(kept_indices_after_prune)
     }
 
     merge_map_final: dict[int, list[int]] = {}
@@ -1725,9 +1724,7 @@ def dream_cycle_xb(
     # Derive importances from tagged_indices if not provided
     if importances is None:
         tagged_set = set(tagged_indices)
-        importances = np.array([
-            0.8 if i in tagged_set else 0.3 for i in range(N)
-        ])
+        importances = np.array([0.8 if i in tagged_set else 0.3 for i in range(N)])
     else:
         importances = np.asarray(importances, dtype=float)
         if len(importances) != N:
@@ -1744,7 +1741,9 @@ def dream_cycle_xb(
     # Step 2: NREM prune near-duplicates
     # ---------------------------------------------------------------
     X2, kept_indices_after_prune = nrem_prune_xb(
-        X1, importances, threshold=0.95,
+        X1,
+        importances,
+        threshold=0.95,
     )
     # Map pruned indices back to original input space
     all_indices = set(range(N))
@@ -1758,11 +1757,14 @@ def dream_cycle_xb(
     # Step 3: NREM merge similar groups
     # ---------------------------------------------------------------
     X3, merge_map_local = nrem_merge_xb(
-        X2, importances_after_prune, threshold=0.90, min_group=3,
+        X2,
+        importances_after_prune,
+        threshold=0.90,
+        min_group=3,
     )
 
     # Precompute similarity matrix — shared across REM ops
-    S = X3 @ X3.T
+    S = gpu_ops.similarity_matrix(X3)
 
     # Translate merge_map from post-prune indices to original input indices
     # merge_map_local keys are output indices, values are post-prune indices
@@ -1776,8 +1778,11 @@ def dream_cycle_xb(
     # Step 4: REM unlearn (Crick & Mitchison) — S-based fast path
     # ---------------------------------------------------------------
     X4 = rem_unlearn_xb(
-        X3, beta,
-        n_probes=200, separation_rate=0.02, rng=rng,
+        X3,
+        beta,
+        n_probes=200,
+        separation_rate=0.02,
+        rng=rng,
         similarity_matrix=S,
     )
 
@@ -1797,12 +1802,14 @@ def dream_cycle_xb(
             merged_input_indices.update(group)
 
         non_merged_pp = [
-            i for i in range(len(kept_indices_after_prune))
+            i
+            for i in range(len(kept_indices_after_prune))
             if i not in merged_input_indices
         ]
         labels_out_list = [int(labels_post_prune[i]) for i in non_merged_pp]
         # For merged centroids, iterate by output index to match centroid order
         from collections import Counter
+
         for out_idx in sorted(merge_map_local.keys()):
             group = merge_map_local[out_idx]
             group_labels = [int(labels_post_prune[pp]) for pp in group]
@@ -1820,7 +1827,10 @@ def dream_cycle_xb(
         labels_out = _assign_clusters(X4, threshold=0.5)
 
     associations = rem_explore_cross_domain_xb(
-        X4, labels_out, n_probes=max(N_out, 50), rng=rng,
+        X4,
+        labels_out,
+        n_probes=max(N_out, 50),
+        rng=rng,
     )
 
     return DreamReport(
