@@ -5,8 +5,11 @@ Wires MemoryOrchestrator (V1 text-based contradiction) with CoupledEngine
 
 Pipeline:
   store: text → V1 detect_contradictions → orchestrator.store() → embed → V2 cosine check
-  query: embed query → CoupledEngine.query() top-k → orchestrator.query() for text recall
-         → merge & deduplicate → format context → LLM generates answer
+  query: V2 cosine retrieval (3x candidates) → V1 multi-signal re-ranking
+         → top-k by proven score → format context → LLM generates answer
+
+  V1 re-ranking uses score = w₁·relevance + w₂·recency + w₃·importance + w₄·σ(activity)
+  with formal convergence guarantees (ContractionWiring.lean, ComposedSystem.lean).
 
 Two contradiction layers:
   V1 (text):    subject extraction, polarity, value_update — high recall, no embeddings
@@ -31,7 +34,7 @@ sys.path.insert(0, str(_HERMES_ROOT / "proofs" / "hermes-memory" / "python"))
 sys.path.insert(0, str(_NLCDM_PYTHON))
 
 from hermes_memory.orchestrator import MemoryOrchestrator, RelevanceScorer
-from hermes_memory.engine import ParameterSet
+from hermes_memory.engine import MemoryState, ParameterSet, score_memory
 from hermes_memory.recall import RecallConfig
 from hermes_memory.contradiction import ContradictionConfig
 from hermes_memory.consolidation import ConsolidationConfig, ConsolidationMode
@@ -62,30 +65,62 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
         import torch
         from transformers import AutoTokenizer, AutoModel
         self._tokenizer = AutoTokenizer.from_pretrained(self._model_name)
+        self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._model = AutoModel.from_pretrained(
             self._model_name, torch_dtype=torch.float32
-        )
+        ).to(self._device)
         self._model.eval()
 
     def embed(self, text: str) -> np.ndarray:
         """Embed a single text string, with caching."""
         if text in self._cache:
             return self._cache[text]
-        self._ensure_model()
-        import torch
-        inputs = self._tokenizer(
-            text, return_tensors="pt", padding=True, truncation=True, max_length=512
-        )
-        with torch.no_grad():
-            outputs = self._model(**inputs)
-        # Mean pooling
-        last_hidden = outputs.last_hidden_state
-        mask = inputs["attention_mask"].unsqueeze(-1).float()
-        pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
-        emb = pooled[0].numpy().astype(np.float64)
-        emb = emb / (np.linalg.norm(emb) + 1e-12)
-        self._cache[text] = emb
-        return emb
+        # Delegate to batch path for single text
+        results = self.embed_batch([text])
+        return results[0]
+
+    def embed_batch(self, texts: list[str], batch_size: int = 64) -> list[np.ndarray]:
+        """Embed multiple texts, returning cached results where available.
+
+        Uncached texts are embedded in GPU batches for throughput.
+        """
+        results: list[np.ndarray | None] = [None] * len(texts)
+        uncached_indices: list[int] = []
+        uncached_texts: list[str] = []
+
+        for i, t in enumerate(texts):
+            if t in self._cache:
+                results[i] = self._cache[t]
+            else:
+                uncached_indices.append(i)
+                uncached_texts.append(t)
+
+        if uncached_texts:
+            self._ensure_model()
+            import torch
+            # Process in batches to avoid OOM on very large chunks
+            for start in range(0, len(uncached_texts), batch_size):
+                batch_texts = uncached_texts[start:start + batch_size]
+                inputs = self._tokenizer(
+                    batch_texts, return_tensors="pt", padding=True,
+                    truncation=True, max_length=512,
+                )
+                inputs = {k: v.to(self._device) for k, v in inputs.items()}
+                with torch.no_grad():
+                    outputs = self._model(**inputs)
+                last_hidden = outputs.last_hidden_state
+                mask = inputs["attention_mask"].unsqueeze(-1).float()
+                pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
+                embs = pooled.cpu().numpy().astype(np.float64)
+                norms = np.linalg.norm(embs, axis=1, keepdims=True)
+                embs = embs / (norms + 1e-12)
+
+                for j, emb in enumerate(embs):
+                    idx = uncached_indices[start + j]
+                    results[idx] = emb
+                    self._cache[uncached_texts[start + j]] = emb
+
+        return results
 
     def _load_disk_cache(self):
         """Load cached embeddings from disk if available."""
@@ -264,17 +299,17 @@ class HermesMemoryAgent:
         """
         facts = self._parse_facts(text)
 
-        for sn, fact_text in facts:
-            # Preserve original text format (including SN prefix) — this is
-            # the input data as provided by the benchmark, not injected metadata.
+        # Batch-embed all facts at once (single GPU pass instead of N individual calls)
+        fact_texts = [ft for _, ft in facts]
+        embeddings = self._scorer.embed_batch(fact_texts)
+
+        for (sn, fact_text), emb in zip(facts, embeddings):
             original_text = f"{sn}. {fact_text}" if sn >= 0 else fact_text
 
             # V1: Text-based store with contradiction detection
             self.orchestrator.store(content=fact_text)
 
-            # V2: Embed on bare fact (better semantic matching), store
-            # original text. Recency = ingestion order (domain-agnostic).
-            emb = self._scorer.embed(fact_text)
+            # V2: Store with pre-computed embedding
             self.coupled_engine.store(
                 text=original_text, embedding=emb,
                 recency=float(self._store_count),
@@ -306,7 +341,16 @@ class HermesMemoryAgent:
         return prompt
 
     def _query(self, question: str) -> dict:
-        """Query memory and generate answer via LLM."""
+        """Query memory: V2 retrieves candidates, V1 re-ranks with multi-signal scoring.
+
+        Pipeline:
+          1. V2 cosine retrieval → 3x candidates (wide net)
+          2. Compute embedding relevance for each candidate
+          3. Build V1 MemoryState from V2 metadata + relevance
+          4. V1 score_memory() ranks using proven 4-signal formula:
+             score = w₁·relevance + w₂·recency + w₃·importance + w₄·σ(activity)
+          5. Top-k by V1 score → LLM context
+        """
         query_start = time.time()
 
         # Extract bare question for embedding (strip MABench prompt preamble)
@@ -315,35 +359,71 @@ class HermesMemoryAgent:
         # Embed the bare question (not the full prompt with instructions)
         q_emb = self._scorer.embed(bare_question)
 
-        # V2 retrieval: cosine-based top-k from coupled engine
+        # V2 retrieval: wide net — retrieve 3x candidates for re-ranking headroom
+        candidate_k = min(self.retrieve_num * 3, self.coupled_engine.n_memories)
         v2_results = self.coupled_engine.query(
-            embedding=q_emb, top_k=self.retrieve_num
+            embedding=q_emb, top_k=max(candidate_k, 1)
         )
-        v2_texts = [r["text"] for r in v2_results]
 
-        # V1 retrieval: text-based recall from orchestrator
-        v1_result = self.orchestrator.query(message=question)
-        v1_context = v1_result.context if v1_result.context else ""
+        if not v2_results:
+            memory_context = ""
+        else:
+            # V1 re-ranking: score each V2 candidate with the proven 4-signal formula
+            # V1's retention = exp(-age/strength) with strength=1.0, so ages
+            # must be normalized to [0, ~1] for meaningful signal. V2 stores
+            # recency as store order (0..N). Normalize so oldest=1.0, newest=0.0.
+            max_recency = max(
+                (e.recency for e in self.coupled_engine.memory_store), default=1.0
+            )
+            max_recency = max(max_recency, 1.0)  # Avoid division by zero
 
-        # Merge: V2 results as primary (embedding-ranked), V1 as supplement
-        seen = set()
-        merged_chunks = []
-        for text in v2_texts:
-            key = text.strip()[:200]  # dedupe on prefix
-            if key not in seen:
-                seen.add(key)
-                merged_chunks.append(text)
-        # Add V1 context lines that aren't already covered
-        if v1_context:
-            for line in v1_context.split("\n---\n"):
-                line = line.strip()
-                key = line[:200]
-                if line and key not in seen:
+            params = self.orchestrator.params
+            scored_candidates: list[tuple[float, str]] = []
+
+            for r in v2_results:
+                idx = r["index"]
+                entry = self.coupled_engine.memory_store[idx]
+
+                # Relevance: cosine similarity between query and candidate embedding
+                relevance = float(np.dot(q_emb, entry.embedding) / (
+                    np.linalg.norm(q_emb) * np.linalg.norm(entry.embedding) + 1e-12
+                ))
+                relevance = max(0.0, min(1.0, relevance))
+
+                # Normalized age: newest memory → 0.0, oldest → 1.0
+                # This puts ages in the range where retention = exp(-age/s0)
+                # with s0=1.0 gives meaningful discrimination.
+                normalized_age = 1.0 - (entry.recency / max_recency)
+                access_age = normalized_age  # No separate access tracking in V2
+
+                # Build V1 MemoryState from V2 metadata
+                mem_state = MemoryState(
+                    relevance=relevance,
+                    last_access_time=access_age,
+                    importance=max(0.0, min(1.0, entry.importance)),
+                    access_count=max(0, entry.access_count),
+                    strength=params.s0,  # Use initial strength (no V1 dynamics ran)
+                    creation_time=normalized_age,
+                )
+
+                # V1 proven scoring: w₁·rel + w₂·rec + w₃·imp + w₄·σ(act) + novelty
+                v1_score = score_memory(params, mem_state, current_time=0.0)
+                scored_candidates.append((v1_score, entry.text))
+
+            # Sort by V1 score descending, take top-k
+            scored_candidates.sort(key=lambda x: -x[0])
+            top_texts = [text for _, text in scored_candidates[:self.retrieve_num]]
+
+            # Deduplicate (in case of contradiction-replaced entries)
+            seen = set()
+            deduped = []
+            for text in top_texts:
+                key = text.strip()[:200]
+                if key not in seen:
                     seen.add(key)
-                    merged_chunks.append(line)
+                    deduped.append(text)
+            memory_context = "\n\n".join(deduped)
 
-        # Build context for LLM
-        memory_context = "\n\n".join(merged_chunks[:self.retrieve_num])
         memory_time = time.time() - query_start
 
         # Generate answer via LLM
