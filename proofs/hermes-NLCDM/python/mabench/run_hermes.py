@@ -32,6 +32,7 @@ sys.path.insert(0, str(_HERMES_ROOT / "proofs" / "hermes-memory" / "python"))
 sys.path.insert(0, str(_NLCDM_PYTHON))
 
 from conversation_creator import ConversationCreator
+from dream_ops import DreamParams
 from mabench.hermes_agent import HermesMemoryAgent
 from utils.eval_other_utils import metrics_summarization
 from utils.templates import get_template
@@ -92,6 +93,62 @@ def parse_args():
     parser.add_argument("--fullpass", action="store_true",
                         help="Baseline: skip memory system, send full context to LLM directly")
     parser.add_argument("--force", action="store_true", help="Force re-run")
+    parser.add_argument(
+        "--dream_eta", type=float, default=0.01,
+        help="Dream cycle learning rate (Lean bound: 0 < eta < min_sep/2)",
+    )
+    parser.add_argument(
+        "--dream_min_sep", type=float, default=0.3,
+        help="NREM repulsion minimum separation (Lean bound: 0 < min_sep <= 1)",
+    )
+    parser.add_argument(
+        "--dream_prune_threshold", type=float, default=0.95,
+        help="NREM prune near-duplicate threshold (Lean bound: merge < prune <= 1)",
+    )
+    parser.add_argument(
+        "--dream_merge_threshold", type=float, default=0.90,
+        help="NREM merge group threshold (Lean bound: 0 < merge < prune)",
+    )
+    parser.add_argument("--cooc_boost", action="store_true",
+                        help="Use co-occurrence boost retrieval (full-store neighbor signal)")
+    parser.add_argument(
+        "--cooc_weight", type=float, default=1.0,
+        help="Co-occurrence boost weight (0=pure cosine, 1.0=optimal from grid sweep)",
+    )
+    parser.add_argument(
+        "--cooc_gate", type=float, default=0.0,
+        help="Confidence gate threshold: skip cooc boost when top cosine score >= this value (0=disabled)",
+    )
+    parser.add_argument("--ppr", action="store_true",
+                        help="Use Personalized PageRank retrieval on co-occurrence graph")
+    parser.add_argument(
+        "--ppr_weight", type=float, default=0.3,
+        help="PPR weight for score blending (0=pure cosine)",
+    )
+    parser.add_argument(
+        "--ppr_damping", type=float, default=0.85,
+        help="PPR damping factor",
+    )
+    parser.add_argument("--coretrieval", action="store_true",
+                        help="Use co-retrieval graph for two-hop expansion")
+    parser.add_argument(
+        "--coretrieval_bonus", type=float, default=0.3,
+        help="Score bonus for facts discovered via co-retrieval expansion",
+    )
+    parser.add_argument(
+        "--coretrieval_min_count", type=float, default=2.0,
+        help="Minimum co-retrieval count to qualify as an edge",
+    )
+    parser.add_argument("--cross_domain_probes", action="store_true",
+                        help="Inject cross-domain probe queries via query_readonly() to build co-retrieval edges")
+    parser.add_argument(
+        "--probe_frequency", type=int, default=10,
+        help="Fire cross-domain probes every N sessions (default: 10)",
+    )
+    parser.add_argument(
+        "--probes_per_session", type=int, default=3,
+        help="Number of cross-domain probes per firing session (default: 3)",
+    )
     return parser.parse_args()
 
 
@@ -122,7 +179,18 @@ def main():
     output_dir = Path(agent_config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_model = args.model.replace("/", "_")
-    prefix = "fullpass" if args.fullpass else "hermes"
+    if args.fullpass:
+        prefix = "fullpass"
+    elif args.coretrieval:
+        prefix = f"hermes_coretrieval_mc{args.coretrieval_min_count}"
+    elif args.cooc_boost and args.cooc_gate > 0:
+        prefix = f"hermes_cooc_g{args.cooc_gate}"
+    elif args.cooc_boost:
+        prefix = "hermes_cooc"
+    elif args.ppr:
+        prefix = "hermes_ppr"
+    else:
+        prefix = "hermes"
     output_file = output_dir / f"{prefix}_{dataset_config['sub_dataset']}_{safe_model}.json"
 
     print(f"Dataset: {dataset_config['dataset']} / {dataset_config['sub_dataset']}")
@@ -132,6 +200,15 @@ def main():
     if not args.fullpass:
         print(f"Contradiction threshold: {args.contradiction_threshold}")
         print(f"Dream interval: {args.dream_interval}")
+        if args.coretrieval:
+            print(f"Retrieval: co-retrieval (bonus={args.coretrieval_bonus}, min_count={args.coretrieval_min_count})")
+        elif args.cooc_boost:
+            gate_str = f", gate={args.cooc_gate}" if args.cooc_gate > 0 else ""
+            print(f"Retrieval: cooc_boost (weight={args.cooc_weight}{gate_str})")
+        elif args.ppr:
+            print(f"Retrieval: PPR (weight={args.ppr_weight}, damping={args.ppr_damping})")
+        else:
+            print(f"Retrieval: cosine (baseline)")
     print()
 
     # Load data
@@ -154,6 +231,12 @@ def main():
         agent = None
     else:
         llm_client = None
+        dream_params = DreamParams(
+            eta=args.dream_eta,
+            min_sep=args.dream_min_sep,
+            prune_threshold=args.dream_prune_threshold,
+            merge_threshold=args.dream_merge_threshold,
+        )
         agent = HermesMemoryAgent(
             model=args.model,
             contradiction_threshold=args.contradiction_threshold,
@@ -161,6 +244,16 @@ def main():
             dream_interval=args.dream_interval,
             temperature=0.0,
             recency_alpha=args.recency_alpha,
+            dream_params=dream_params,
+            cooc_boost_retrieval=args.cooc_boost,
+            cooc_weight=args.cooc_weight,
+            cooc_gate_threshold=args.cooc_gate,
+            ppr_retrieval=args.ppr,
+            ppr_weight=args.ppr_weight,
+            ppr_damping=args.ppr_damping,
+            coretrieval_retrieval=getattr(args, 'coretrieval', False),
+            coretrieval_bonus=getattr(args, 'coretrieval_bonus', 0.3),
+            coretrieval_min_count=getattr(args, 'coretrieval_min_count', 2.0),
         )
 
     # Run evaluation
@@ -261,6 +354,11 @@ def main():
                 "retrieve_num": args.retrieve_num,
                 "recency_alpha": args.recency_alpha if not args.fullpass else None,
                 "fact_level_parsing": not args.fullpass,
+                "cooc_boost": args.cooc_boost if not args.fullpass else False,
+                "cooc_weight": args.cooc_weight if args.cooc_boost else None,
+                "cooc_gate": args.cooc_gate if args.cooc_boost else None,
+                "ppr": args.ppr if not args.fullpass else False,
+                "ppr_weight": args.ppr_weight if args.ppr else None,
             },
             "data": results,
             "metrics": {k: v for k, v in metrics.items()},

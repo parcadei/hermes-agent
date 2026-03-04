@@ -150,6 +150,37 @@ def softmax(beta: float, z: np.ndarray) -> np.ndarray:
     return e / np.sum(e)
 
 
+def sparsemax(beta: float, z: np.ndarray) -> np.ndarray:
+    """Sparsemax attention: Euclidean projection of β·z onto the simplex.
+
+    Unlike softmax which gives every pattern nonzero weight, sparsemax
+    assigns exactly zero weight to irrelevant patterns. This yields
+    exact retrieval in Hopfield networks by eliminating blurring from
+    low-similarity patterns.
+
+    Reference: Martins & Astudillo (2016), "From Softmax to Sparsemax"
+    Sparse Hopfield: Hu et al. (2023), NeurIPS — sparse modern Hopfield
+
+    Args:
+        beta: inverse temperature (scales logits before projection)
+        z: (N,) array of logits (similarities)
+
+    Returns:
+        (N,) probability vector on the simplex with exact zeros
+    """
+    z_scaled = beta * z
+    N = len(z_scaled)
+    # Sort in descending order
+    z_sorted = np.sort(z_scaled)[::-1]
+    cumsum = np.cumsum(z_sorted)
+    k_range = np.arange(1, N + 1, dtype=z_scaled.dtype)
+    # Find support: k* = max{k : 1 + k·z_{(k)} > cumsum_{(k)}}
+    support = z_sorted > (cumsum - 1.0) / k_range
+    k_star = int(np.max(k_range[support]))
+    tau = (cumsum[k_star - 1] - 1.0) / k_star
+    return np.maximum(z_scaled - tau, 0.0)
+
+
 # ---------------------------------------------------------------------------
 # Lean/Python Interface (Section 11C of synthesis)
 # ---------------------------------------------------------------------------

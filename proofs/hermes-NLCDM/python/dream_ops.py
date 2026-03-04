@@ -17,7 +17,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from nlcdm_core import cosine_sim, sigmoid, softmax
+from typing import Callable
+
+from nlcdm_core import cosine_sim, sigmoid, softmax, sparsemax
 
 import gpu_ops
 
@@ -43,6 +45,31 @@ class DreamParams:
     n_explore: int = 50  # REM-explore steps per cycle
     consolidation_threshold: float = 0.95  # Merge threshold
     seed: int | None = None  # For reproducibility
+    min_sep: float = 0.3  # NREM repulsion minimum separation
+    prune_threshold: float = 0.95  # NREM prune near-duplicate threshold
+    merge_threshold: float = 0.90  # NREM merge group threshold
+    merge_min_group: int = 3  # Minimum group size for merging
+    n_probes: int = 200  # REM unlearn probe count
+    separation_rate: float = 0.02  # REM unlearn separation rate
+
+    def __post_init__(self):
+        self.validate()
+
+    def validate(self) -> None:
+        """Check Lean-proven safe bounds (DreamConvergence.lean: default_params_safe)."""
+        if not (0 < self.eta < self.min_sep / 2):
+            raise ValueError(
+                f"Lean bound violated: need 0 < eta ({self.eta}) < min_sep/2 ({self.min_sep / 2})"
+            )
+        if not (0 < self.min_sep <= 1):
+            raise ValueError(
+                f"Lean bound violated: need 0 < min_sep ({self.min_sep}) <= 1"
+            )
+        if not (0 < self.merge_threshold < self.prune_threshold <= 1):
+            raise ValueError(
+                f"Lean bound violated: need 0 < merge ({self.merge_threshold}) "
+                f"< prune ({self.prune_threshold}) <= 1"
+            )
 
 
 @dataclass(frozen=True)
@@ -77,24 +104,35 @@ class DreamReport:
 # ---------------------------------------------------------------------------
 
 
-def hopfield_update(beta: float, patterns: np.ndarray, xi: np.ndarray) -> np.ndarray:
+def hopfield_update(
+    beta: float,
+    patterns: np.ndarray,
+    xi: np.ndarray,
+    attention_fn: Callable[[float, np.ndarray], np.ndarray] | None = None,
+) -> np.ndarray:
     """Single Hopfield update step in modern Hopfield network.
 
-    xi_new = sum_mu softmax(beta, X^T xi)_mu * x_mu
+    xi_new = sum_mu attn(beta, X^T xi)_mu * x_mu
 
     This computes a convex combination of stored patterns weighted by
-    their softmax similarity to the current state.
+    their attention similarity to the current state. When attention_fn
+    is sparsemax, irrelevant patterns get exactly zero weight, yielding
+    exact retrieval without blurring.
 
     Args:
         beta: inverse temperature (higher = more selective)
         patterns: (N, d) array of stored patterns
         xi: (d,) current state vector
+        attention_fn: attention function (default: softmax). Use sparsemax
+            for sparse Hopfield retrieval.
 
     Returns:
         (d,) updated state vector
     """
+    if attention_fn is None:
+        attention_fn = softmax
     similarities = patterns @ xi  # (N,)
-    weights = softmax(beta, similarities)  # (N,)
+    weights = attention_fn(beta, similarities)  # (N,)
     return weights @ patterns  # (d,)
 
 
@@ -104,11 +142,16 @@ def spreading_activation(
     xi: np.ndarray,
     max_steps: int = 50,
     tol: float = 1e-6,
+    attention_fn: Callable[[float, np.ndarray], np.ndarray] | None = None,
 ) -> np.ndarray:
     """Iterate hopfield_update until convergence.
 
     Runs the modern Hopfield dynamics until the state converges to a
     fixed point (||x_{t+1} - x_t|| < tol) or max_steps is reached.
+
+    When attention_fn=sparsemax, this implements sparse Hopfield
+    retrieval where each update assigns zero weight to irrelevant
+    patterns, eliminating the blurring problem of dense softmax.
 
     Args:
         beta: inverse temperature
@@ -116,17 +159,96 @@ def spreading_activation(
         xi: (d,) initial state
         max_steps: maximum iterations
         tol: convergence tolerance
+        attention_fn: attention function (default: softmax). Use sparsemax
+            for sparse retrieval dynamics.
 
     Returns:
         (d,) converged state vector
     """
     x = xi.copy()
     for _ in range(max_steps):
-        x_new = hopfield_update(beta, patterns, x)
+        x_new = hopfield_update(beta, patterns, x, attention_fn=attention_fn)
         if np.linalg.norm(x_new - x) < tol:
             return x_new
         x = x_new
     return x
+
+
+def hopfield_update_biased(
+    beta: float,
+    patterns: np.ndarray,
+    xi: np.ndarray,
+    W_temporal: np.ndarray,
+    attention_fn: Callable[[float, np.ndarray], np.ndarray] | None = None,
+) -> np.ndarray:
+    """Single Hopfield update with temporal bias injection.
+
+    Combines standard content-based similarity with a temporal co-occurrence
+    signal encoded in W_temporal. The temporal term is L2-normalized so it
+    acts as a direction bias rather than a magnitude override.
+
+    similarities = X xi + normalize(X (W_temporal xi))
+    weights = attn(beta, similarities)
+    xi_new = weights @ X
+
+    Args:
+        beta: inverse temperature (higher = more selective)
+        patterns: (N, d) array of stored patterns
+        xi: (d,) current state vector
+        W_temporal: (d, d) temporal co-occurrence matrix (from Hebbian flush)
+        attention_fn: attention function (default: softmax)
+
+    Returns:
+        (d,) updated state vector
+    """
+    if attention_fn is None:
+        attention_fn = softmax
+    base_similarities = patterns @ xi                       # (N,)
+    temporal_probe = W_temporal @ xi                        # (d,)
+    temporal_similarities = patterns @ temporal_probe       # (N,)
+    t_norm = np.linalg.norm(temporal_similarities)
+    if t_norm > 1e-12:
+        temporal_similarities = temporal_similarities / t_norm
+    combined = base_similarities + temporal_similarities    # (N,)
+    weights = attention_fn(beta, combined)                  # (N,)
+    return weights @ patterns                               # (d,)
+
+
+def spreading_activation_biased(
+    beta: float,
+    patterns: np.ndarray,
+    xi: np.ndarray,
+    W_temporal: np.ndarray,
+    max_steps: int = 50,
+    tol: float = 1e-6,
+    attention_fn: Callable[[float, np.ndarray], np.ndarray] | None = None,
+) -> np.ndarray:
+    """Iterate hopfield_update_biased until convergence.
+
+    Runs the temporally-biased Hopfield dynamics until the state converges
+    to a fixed point (||x_{t+1} - x_t|| < tol) or max_steps is reached.
+
+    Args:
+        beta: inverse temperature
+        patterns: (N, d) stored patterns
+        xi: (d,) initial state
+        W_temporal: (d, d) temporal co-occurrence matrix
+        max_steps: maximum iterations
+        tol: convergence tolerance
+        attention_fn: attention function (default: softmax)
+
+    Returns:
+        (d,) converged state vector
+    """
+    state = np.array(xi, dtype=np.float64)
+    for _ in range(max_steps):
+        new_state = hopfield_update_biased(
+            beta, patterns, state, W_temporal, attention_fn=attention_fn,
+        )
+        if np.linalg.norm(new_state - state) < tol:
+            return new_state
+        state = new_state
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +299,7 @@ def nrem_replay(
     embeddings: np.ndarray,
     beta_high: float = 10.0,
     eta: float = 0.01,
+    attention_fn: Callable[[float, np.ndarray], np.ndarray] | None = None,
 ) -> np.ndarray:
     """NREM replay: stamp new memories deeper via Hebbian updates at high beta.
 
@@ -200,7 +323,9 @@ def nrem_replay(
     W_new = W.copy()
     for i in tagged_idx:
         x0 = embeddings[i]
-        x_inf = spreading_activation(beta_high, embeddings, x0)
+        x_inf = spreading_activation(
+            beta_high, embeddings, x0, attention_fn=attention_fn,
+        )
         W_new += eta * np.outer(x_inf, x_inf)
     return W_new
 
@@ -1681,6 +1806,7 @@ def dream_cycle_xb(
     importances: np.ndarray | None = None,
     labels: np.ndarray | None = None,
     seed: int | None = None,
+    params: DreamParams | None = None,
 ) -> DreamReport:
     """Full dream cycle on {X, beta} — redesigned pipeline.
 
@@ -1701,12 +1827,19 @@ def dream_cycle_xb(
             derived from tagged_indices (0.8 for tagged, 0.3 for untagged).
         labels: (N,) integer cluster assignments. If None, derived via
             threshold-based clustering.
-        seed: random seed for reproducibility
+        seed: random seed for reproducibility (overrides params.seed if given)
+        params: DreamParams controlling thresholds and rates. If None, uses
+            DreamParams() defaults (matching previous hardcoded values).
 
     Returns:
         DreamReport with post-dream patterns, associations, prune/merge info.
     """
-    rng = np.random.default_rng(seed)
+    if params is None:
+        params = DreamParams()
+
+    # Explicit seed arg overrides params.seed; if both None, non-deterministic
+    effective_seed = seed if seed is not None else params.seed
+    rng = np.random.default_rng(effective_seed)
     N = patterns.shape[0]
 
     if N == 0:
@@ -1735,7 +1868,7 @@ def dream_cycle_xb(
     # ---------------------------------------------------------------
     # Step 1: NREM repulsion (SHY)
     # ---------------------------------------------------------------
-    X1 = nrem_repulsion_xb(patterns, importances, eta=0.01, min_sep=0.3)
+    X1 = nrem_repulsion_xb(patterns, importances, eta=params.eta, min_sep=params.min_sep)
 
     # ---------------------------------------------------------------
     # Step 2: NREM prune near-duplicates
@@ -1743,7 +1876,7 @@ def dream_cycle_xb(
     X2, kept_indices_after_prune = nrem_prune_xb(
         X1,
         importances,
-        threshold=0.95,
+        threshold=params.prune_threshold,
     )
     # Map pruned indices back to original input space
     all_indices = set(range(N))
@@ -1759,8 +1892,8 @@ def dream_cycle_xb(
     X3, merge_map_local = nrem_merge_xb(
         X2,
         importances_after_prune,
-        threshold=0.90,
-        min_group=3,
+        threshold=params.merge_threshold,
+        min_group=params.merge_min_group,
     )
 
     # Precompute similarity matrix — shared across REM ops
@@ -1780,8 +1913,8 @@ def dream_cycle_xb(
     X4 = rem_unlearn_xb(
         X3,
         beta,
-        n_probes=200,
-        separation_rate=0.02,
+        n_probes=params.n_probes,
+        separation_rate=params.separation_rate,
         rng=rng,
         similarity_matrix=S,
     )

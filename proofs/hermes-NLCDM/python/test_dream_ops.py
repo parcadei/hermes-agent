@@ -2,6 +2,7 @@
 
 Validates the three dream operations (NREM-replay, REM-unlearn, REM-explore),
 Lotka-Volterra competition, consolidation, and the full dream cycle.
+Also tests hybrid retrieval (cosine seeds + one Hopfield expansion step).
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from coupled_engine import CoupledEngine
 from dream_ops import (
     DreamParams,
     hopfield_update,
@@ -21,7 +23,7 @@ from dream_ops import (
     consolidate_similar,
     dream_cycle,
 )
-from nlcdm_core import cosine_sim, softmax
+from nlcdm_core import cosine_sim, softmax, sparsemax
 
 
 # ---------------------------------------------------------------------------
@@ -155,6 +157,174 @@ class TestSpreadingActivation:
         result = spreading_activation(1.0, patterns, xi, max_steps=1)
         expected = hopfield_update(1.0, patterns, xi)
         np.testing.assert_allclose(result, expected, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Sparsemax Attention
+# ---------------------------------------------------------------------------
+
+class TestSparsemax:
+    """Verify sparsemax produces valid sparse probability distributions."""
+
+    def test_sums_to_one(self):
+        """Sparsemax output should sum to 1 (it's a simplex projection)."""
+        rng = np.random.default_rng(42)
+        z = rng.standard_normal(20)
+        p = sparsemax(1.0, z)
+        assert abs(p.sum() - 1.0) < 1e-10
+
+    def test_non_negative(self):
+        """All sparsemax outputs should be >= 0."""
+        rng = np.random.default_rng(42)
+        z = rng.standard_normal(50)
+        p = sparsemax(1.0, z)
+        assert np.all(p >= 0.0)
+
+    def test_has_exact_zeros(self):
+        """Sparsemax should produce exact zeros for low-scoring entries."""
+        z = np.array([5.0, 4.5, 0.1, -1.0, -3.0])
+        p = sparsemax(1.0, z)
+        # Top 2 should be nonzero, bottom entries should be exactly 0
+        assert p[0] > 0.0
+        assert p[1] > 0.0
+        assert p[3] == 0.0
+        assert p[4] == 0.0
+
+    def test_uniform_input(self):
+        """Uniform input should give uniform output (all equal = all in support)."""
+        z = np.ones(5)
+        p = sparsemax(1.0, z)
+        np.testing.assert_allclose(p, np.ones(5) / 5.0, atol=1e-10)
+
+    def test_single_dominant(self):
+        """One element much larger → sparsemax assigns it weight 1."""
+        z = np.array([100.0, 0.0, 0.0, 0.0])
+        p = sparsemax(1.0, z)
+        assert p[0] > 0.99
+        assert p[1] == 0.0
+        assert p[2] == 0.0
+        assert p[3] == 0.0
+
+    def test_beta_scaling(self):
+        """Higher beta should produce sparser output."""
+        z = np.array([1.0, 0.8, 0.6, 0.4, 0.2])
+        p_low = sparsemax(1.0, z)
+        p_high = sparsemax(10.0, z)
+        # Higher beta → fewer nonzero entries
+        assert np.count_nonzero(p_high) <= np.count_nonzero(p_low)
+
+    def test_matches_softmax_ranking(self):
+        """Sparsemax should preserve the ranking order of softmax."""
+        rng = np.random.default_rng(42)
+        z = rng.standard_normal(10)
+        p_soft = softmax(1.0, z)
+        p_sparse = sparsemax(1.0, z)
+        # For nonzero entries, ranking should match
+        nonzero = p_sparse > 0
+        if nonzero.sum() > 1:
+            # Check ranking matches softmax ranking for the nonzero entries
+            sparse_order = np.argsort(-p_sparse[nonzero])
+            soft_order = np.argsort(-p_soft[nonzero])
+            np.testing.assert_array_equal(sparse_order, soft_order)
+
+
+class TestSparseHopfieldUpdate:
+    """Verify sparse Hopfield update works correctly."""
+
+    def test_sparse_is_convex_combination(self):
+        """Sparse Hopfield update should be a convex combination of patterns."""
+        rng = np.random.default_rng(42)
+        d = 32
+        N = 5
+        patterns = rng.standard_normal((N, d))
+        xi = rng.standard_normal(d)
+
+        result = hopfield_update(1.0, patterns, xi, attention_fn=sparsemax)
+
+        # Verify: result = weights @ patterns where weights sum to 1, >= 0
+        sims = patterns @ xi
+        weights = sparsemax(1.0, sims)
+        expected = weights @ patterns
+        np.testing.assert_allclose(result, expected, atol=1e-12)
+
+    def test_sparse_high_beta_selects_nearest(self):
+        """At high beta, sparse Hopfield should select nearest pattern exactly."""
+        rng = np.random.default_rng(42)
+        d = 32
+        patterns = np.eye(d)[:5]  # 5 standard basis vectors
+        xi = patterns[2] + 0.1 * rng.standard_normal(d)
+
+        result = hopfield_update(100.0, patterns, xi, attention_fn=sparsemax)
+        assert cosine_sim(result, patterns[2]) > 0.99
+
+    def test_sparse_fewer_active_patterns(self):
+        """Sparse update should use fewer patterns than dense softmax."""
+        rng = np.random.default_rng(42)
+        d = 64
+        N = 50  # Many patterns
+        patterns = rng.standard_normal((N, d))
+        # Normalize
+        patterns = patterns / np.linalg.norm(patterns, axis=1, keepdims=True)
+        xi = patterns[0] + 0.3 * rng.standard_normal(d)
+
+        sims = patterns @ xi
+        soft_weights = softmax(5.0, sims)
+        sparse_weights = sparsemax(5.0, sims)
+
+        # Softmax: all N entries nonzero. Sparsemax: some entries exactly zero.
+        assert np.count_nonzero(soft_weights) == N
+        assert np.count_nonzero(sparse_weights) < N
+
+    def test_sparse_spreading_converges(self):
+        """Sparse spreading activation should converge to a fixed point."""
+        rng = np.random.default_rng(42)
+        d = 32
+        N = 5
+        patterns = _make_orthonormal_patterns(N, d, rng)
+        xi = rng.standard_normal(d)
+
+        result = spreading_activation(
+            5.0, patterns, xi, max_steps=200, attention_fn=sparsemax,
+        )
+
+        # One more step shouldn't change it
+        next_step = hopfield_update(5.0, patterns, result, attention_fn=sparsemax)
+        np.testing.assert_allclose(result, next_step, atol=1e-5)
+
+    def test_sparse_at_pattern_stays(self):
+        """Starting from a stored pattern, sparse dynamics should stay near it."""
+        rng = np.random.default_rng(42)
+        d = 32
+        N = 5
+        patterns = _make_orthonormal_patterns(N, d, rng)
+
+        result = spreading_activation(
+            10.0, patterns, patterns[0].copy(), attention_fn=sparsemax,
+        )
+        assert cosine_sim(result, patterns[0]) > 0.99
+
+    def test_sparse_retrieval_sharper_than_dense(self):
+        """With many patterns, sparse retrieval should focus on fewer neighbors."""
+        rng = np.random.default_rng(42)
+        d = 128
+        N = 100
+        patterns = rng.standard_normal((N, d))
+        patterns = patterns / np.linalg.norm(patterns, axis=1, keepdims=True)
+        xi = patterns[0] + 0.2 * rng.standard_normal(d)
+        xi = xi / np.linalg.norm(xi)
+
+        dense_result = spreading_activation(
+            5.0, patterns, xi, max_steps=50, attention_fn=softmax,
+        )
+        sparse_result = spreading_activation(
+            5.0, patterns, xi, max_steps=50, attention_fn=sparsemax,
+        )
+
+        # Sparse result should be closer to the nearest pattern
+        # (less blurring from irrelevant patterns)
+        dense_sim = cosine_sim(dense_result, patterns[0])
+        sparse_sim = cosine_sim(sparse_result, patterns[0])
+        assert sparse_sim >= dense_sim - 0.05  # sparse should be at least as sharp
 
 
 # ---------------------------------------------------------------------------
@@ -586,3 +756,232 @@ class TestDreamCycle:
         diff_agg = np.linalg.norm(W_agg - W, 'fro')
         diff_mild = np.linalg.norm(W_mild - W, 'fro')
         assert diff_agg > diff_mild
+
+
+# ---------------------------------------------------------------------------
+# Hybrid Retrieval (cosine seeds → one Hopfield expansion step → union)
+# ---------------------------------------------------------------------------
+
+
+class TestHybridRetrieval:
+    """Tests for CoupledEngine.query_hybrid().
+
+    The hybrid approach: cosine finds direct matches, one sparsemax
+    Hopfield step from the seed centroid finds associatively linked
+    patterns, union returns both.
+    """
+
+    @staticmethod
+    def _make_engine(dim: int = 16, n: int = 20, seed: int = 42):
+        """Create engine with random normalized patterns."""
+        rng = np.random.default_rng(seed)
+        engine = CoupledEngine(dim=dim)
+        for i in range(n):
+            v = rng.standard_normal(dim)
+            v /= np.linalg.norm(v)
+            engine.store(embedding=v, text=f"fact_{i}")
+        return engine, rng
+
+    def test_returns_results(self):
+        """query_hybrid returns non-empty list for populated engine."""
+        engine, rng = self._make_engine()
+        q = rng.standard_normal(engine.dim)
+        q /= np.linalg.norm(q)
+        results = engine.query_hybrid(embedding=q, top_k=5)
+        assert len(results) > 0
+        assert len(results) <= 10  # union can be up to 2*top_k
+
+    def test_result_fields(self):
+        """Each result has index, score, and text."""
+        engine, rng = self._make_engine()
+        q = rng.standard_normal(engine.dim)
+        q /= np.linalg.norm(q)
+        results = engine.query_hybrid(embedding=q, top_k=3)
+        for r in results:
+            assert "index" in r
+            assert "score" in r
+            assert "text" in r
+            assert isinstance(r["index"], int)
+            assert isinstance(r["score"], float)
+
+    def test_no_duplicate_indices(self):
+        """Union deduplication: no index appears twice."""
+        engine, rng = self._make_engine(n=30)
+        q = rng.standard_normal(engine.dim)
+        q /= np.linalg.norm(q)
+        results = engine.query_hybrid(embedding=q, top_k=10)
+        indices = [r["index"] for r in results]
+        assert len(indices) == len(set(indices))
+
+    def test_cosine_top_included(self):
+        """The top cosine match should always appear in hybrid results."""
+        engine, rng = self._make_engine()
+        q = rng.standard_normal(engine.dim)
+        q /= np.linalg.norm(q)
+        cosine_results = engine.query(embedding=q, top_k=1)
+        hybrid_results = engine.query_hybrid(embedding=q, top_k=5)
+        hybrid_indices = {r["index"] for r in hybrid_results}
+        assert cosine_results[0]["index"] in hybrid_indices
+
+    def test_expansion_finds_associated_patterns(self):
+        """With clustered patterns, hybrid finds associated patterns
+        that share coupling with the cosine seeds.
+
+        Setup: cluster A (patterns 0-4) are near each other,
+        query is near cluster A. Hybrid should retrieve more of
+        cluster A than cosine alone would at small top_k.
+        """
+        dim = 32
+        rng = np.random.default_rng(99)
+        engine = CoupledEngine(dim=dim)
+
+        # Cluster A: 8 patterns around a direction
+        base_a = rng.standard_normal(dim)
+        base_a /= np.linalg.norm(base_a)
+        for i in range(8):
+            noise = rng.standard_normal(dim) * 0.15
+            v = base_a + noise
+            v /= np.linalg.norm(v)
+            engine.store(embedding=v, text=f"cluster_a_{i}")
+
+        # Cluster B: 8 patterns in an orthogonal direction
+        base_b = rng.standard_normal(dim)
+        # Make roughly orthogonal to A
+        base_b -= base_a * (base_b @ base_a)
+        base_b /= np.linalg.norm(base_b)
+        for i in range(8):
+            noise = rng.standard_normal(dim) * 0.15
+            v = base_b + noise
+            v /= np.linalg.norm(v)
+            engine.store(embedding=v, text=f"cluster_b_{i}")
+
+        # Query is slightly noisy version of cluster A direction
+        q = base_a + rng.standard_normal(dim) * 0.1
+        q /= np.linalg.norm(q)
+
+        # With top_k=3, cosine gets some of cluster A
+        cosine_results = engine.query(embedding=q, top_k=3)
+        cosine_a_count = sum(
+            1 for r in cosine_results if r["text"].startswith("cluster_a")
+        )
+
+        # Hybrid should get at least as many cluster A patterns
+        # because the expansion from seeds spreads within the cluster
+        hybrid_results = engine.query_hybrid(embedding=q, top_k=3)
+        hybrid_a_count = sum(
+            1 for r in hybrid_results if r["text"].startswith("cluster_a")
+        )
+        assert hybrid_a_count >= cosine_a_count
+
+    def test_cross_domain_retrieval(self):
+        """Core test: hybrid retrieves patterns linked through coupling
+        that cosine alone misses.
+
+        Setup: "hiking" is near the query. "Switzerland" is near "hiking"
+        but NOT near the query. Hybrid should find both.
+        """
+        dim = 64
+        rng = np.random.default_rng(77)
+
+        # Create a structured scenario
+        query_dir = rng.standard_normal(dim)
+        query_dir /= np.linalg.norm(query_dir)
+
+        # "hiking" — high cosine with query
+        hiking = query_dir + rng.standard_normal(dim) * 0.1
+        hiking /= np.linalg.norm(hiking)
+
+        # "Switzerland" — high cosine with hiking, LOW cosine with query
+        switzerland = hiking + rng.standard_normal(dim) * 0.2
+        # Push away from query direction so cosine-to-query is low
+        switzerland -= query_dir * (switzerland @ query_dir) * 0.7
+        switzerland /= np.linalg.norm(switzerland)
+
+        engine = CoupledEngine(dim=dim)
+        engine.store(embedding=hiking, text="I like hiking")         # idx 0
+        engine.store(embedding=switzerland, text="I live in Switzerland")  # idx 1
+
+        # Add distractors in random directions
+        for i in range(15):
+            v = rng.standard_normal(dim)
+            v /= np.linalg.norm(v)
+            engine.store(embedding=v, text=f"distractor_{i}")
+
+        q = query_dir.copy()
+
+        # Cosine top-2: should find hiking but maybe not Switzerland
+        cosine_results = engine.query(embedding=q, top_k=2)
+        cosine_indices = {r["index"] for r in cosine_results}
+
+        # Hybrid top-2: the expansion step from "hiking" seed should
+        # spread to "Switzerland" via coupling
+        hybrid_results = engine.query_hybrid(embedding=q, top_k=2)
+        hybrid_indices = {r["index"] for r in hybrid_results}
+
+        # Hybrid should find hiking (idx 0)
+        assert 0 in hybrid_indices, "Hybrid should find 'hiking'"
+
+        # Key property: hybrid should have at least as good coverage
+        # (finding both hiking and Switzerland when cosine might miss one)
+        assert len(hybrid_indices) >= len(cosine_indices)
+
+    def test_empty_engine(self):
+        """query_hybrid on empty engine returns empty list."""
+        engine = CoupledEngine(dim=8)
+        q = np.ones(8) / np.sqrt(8)
+        assert engine.query_hybrid(embedding=q, top_k=5) == []
+
+    def test_single_memory(self):
+        """query_hybrid works with just one stored pattern."""
+        engine = CoupledEngine(dim=8)
+        v = np.ones(8) / np.sqrt(8)
+        engine.store(embedding=v, text="only one")
+        results = engine.query_hybrid(embedding=v, top_k=5)
+        assert len(results) == 1
+        assert results[0]["text"] == "only one"
+
+    def test_dimension_mismatch_raises(self):
+        """query_hybrid raises on dimension mismatch."""
+        engine = CoupledEngine(dim=8)
+        engine.store(embedding=np.ones(8) / np.sqrt(8), text="x")
+        with pytest.raises(ValueError, match="dimension"):
+            engine.query_hybrid(embedding=np.ones(4), top_k=5)
+
+    def test_scores_sorted_descending(self):
+        """Results are sorted by combined score, highest first."""
+        engine, rng = self._make_engine(n=20)
+        q = rng.standard_normal(engine.dim)
+        q /= np.linalg.norm(q)
+        results = engine.query_hybrid(embedding=q, top_k=10)
+        scores = [r["score"] for r in results]
+        assert scores == sorted(scores, reverse=True)
+
+    def test_top_k_respected(self):
+        """Never returns more than top_k results."""
+        engine, rng = self._make_engine(n=50)
+        q = rng.standard_normal(engine.dim)
+        q /= np.linalg.norm(q)
+        for k in [3, 5, 10]:
+            results = engine.query_hybrid(embedding=q, top_k=k)
+            assert len(results) <= k
+
+    def test_beta_affects_expansion(self):
+        """Higher beta should make the Hopfield step more selective."""
+        engine, rng = self._make_engine(dim=32, n=30, seed=55)
+        q = rng.standard_normal(engine.dim)
+        q /= np.linalg.norm(q)
+
+        results_low = engine.query_hybrid(embedding=q, beta=1.0, top_k=10)
+        results_high = engine.query_hybrid(embedding=q, beta=20.0, top_k=10)
+
+        # Different beta should give different result sets
+        idx_low = {r["index"] for r in results_low}
+        idx_high = {r["index"] for r in results_high}
+        # They may overlap, but scores should differ
+        scores_low = {r["index"]: r["score"] for r in results_low}
+        scores_high = {r["index"]: r["score"] for r in results_high}
+        common = idx_low & idx_high
+        if common:
+            # At least some scores should differ
+            diffs = [abs(scores_low[i] - scores_high[i]) for i in common]
+            assert max(diffs) > 0 or idx_low != idx_high

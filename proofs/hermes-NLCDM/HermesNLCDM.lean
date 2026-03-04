@@ -70,3 +70,18 @@ import HermesNLCDM.PerturbationResponse
 
 -- Phase 12: Emotional Tagging — Prediction-Error-Based Initial Strength
 import HermesNLCDM.EmotionalTagging
+
+-- Phase 13a: Hybrid Retrieval — Rank Preservation Under Multi-Signal Scoring
+import HermesNLCDM.HybridRetrieval
+
+-- Phase 13b: Hybrid Retrieval — Switching Criterion
+import HermesNLCDM.HybridSwitching
+
+-- Phase 13c: Stability Under Retrieval Switching
+import HermesNLCDM.SwitchedDynamics
+
+-- Phase 13d: Connection to NLCDM Retrieval Bounds
+import HermesNLCDM.HybridBridge
+
+-- Phase 14: Dream Convergence Bounds
+import HermesNLCDM.DreamConvergence

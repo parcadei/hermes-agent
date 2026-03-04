@@ -5,11 +5,14 @@ Wires MemoryOrchestrator (V1 text-based contradiction) with CoupledEngine
 
 Pipeline:
   store: text → V1 detect_contradictions → orchestrator.store() → embed → V2 cosine check
-  query: V2 cosine retrieval (3x candidates) → V1 multi-signal re-ranking
-         → top-k by proven score → format context → LLM generates answer
+  query: hybrid switching per HybridBridge.lean proven criteria:
+         1. V2 cosine retrieval (always primary)
+         2. Estimate signal coherence across candidates
+         3. If coherence ≤ 0 (signals uncorrelated): pure cosine + V1 text merge
+         4. If coherence > 0 (signals correlated): multi-signal re-ranking
 
-  V1 re-ranking uses score = w₁·relevance + w₂·recency + w₃·importance + w₄·σ(activity)
-  with formal convergence guarantees (ContractionWiring.lean, ComposedSystem.lean).
+  For FactConsolidation: signalInversion ≈ 0 → pure_cosine_maximal_gap applies
+  → cosine-only is optimal (proven in HybridBridge.lean).
 
 Two contradiction layers:
   V1 (text):    subject extraction, polarity, value_update — high recall, no embeddings
@@ -34,12 +37,13 @@ sys.path.insert(0, str(_HERMES_ROOT / "proofs" / "hermes-memory" / "python"))
 sys.path.insert(0, str(_NLCDM_PYTHON))
 
 from hermes_memory.orchestrator import MemoryOrchestrator, RelevanceScorer
-from hermes_memory.engine import MemoryState, ParameterSet, score_memory
+from hermes_memory.engine import ParameterSet
 from hermes_memory.recall import RecallConfig
 from hermes_memory.contradiction import ContradictionConfig
 from hermes_memory.consolidation import ConsolidationConfig, ConsolidationMode
 from hermes_memory.encoding import EncodingConfig
 from coupled_engine import CoupledEngine
+from dream_ops import DreamParams
 from nlcdm_core import cosine_sim
 
 
@@ -172,16 +176,42 @@ class HermesMemoryAgent:
         retrieve_num: int = 10,
         dream_interval: int = 0,
         temperature: float = 0.0,
-        max_gen_tokens: int = 10,
+        max_gen_tokens: int = 64,
         recency_alpha: float = 0.1,
+        dream_params: DreamParams | None = None,
+        associative_retrieval: bool = False,
+        sparse_retrieval: bool = False,
+        hybrid_retrieval: bool = False,
+        cooc_boost_retrieval: bool = False,
+        cooc_weight: float = 0.3,
+        cooc_gate_threshold: float = 0.0,
+        ppr_retrieval: bool = False,
+        ppr_weight: float = 0.5,
+        ppr_damping: float = 0.85,
+        coretrieval_retrieval: bool = False,
+        coretrieval_bonus: float = 0.3,
+        coretrieval_min_count: float = 2.0,
     ):
         self.model = model
         self.dim = dim
         self.contradiction_threshold = contradiction_threshold
+        self.associative_retrieval = associative_retrieval
+        self.sparse_retrieval = sparse_retrieval
+        self.hybrid_retrieval = hybrid_retrieval
+        self.cooc_boost_retrieval = cooc_boost_retrieval
+        self.cooc_weight = cooc_weight
+        self.cooc_gate_threshold = cooc_gate_threshold
+        self.ppr_retrieval = ppr_retrieval
+        self.ppr_weight = ppr_weight
+        self.ppr_damping = ppr_damping
+        self.coretrieval_retrieval = coretrieval_retrieval
+        self.coretrieval_bonus = coretrieval_bonus
+        self.coretrieval_min_count = coretrieval_min_count
         self.retrieve_num = retrieve_num
         self.dream_interval = dream_interval
         self.temperature = temperature
         self._max_gen_tokens = max_gen_tokens
+        self.dream_params = dream_params
 
         # V1: Text-based orchestrator (validated baseline from test_engine.py)
         params = ParameterSet(
@@ -223,6 +253,7 @@ class HermesMemoryAgent:
             emotional_tagging=False,
             reconsolidation=False,
             recency_alpha=recency_alpha,
+            dream_params=dream_params,
         )
 
         self._store_count = 0
@@ -341,15 +372,17 @@ class HermesMemoryAgent:
         return prompt
 
     def _query(self, question: str) -> dict:
-        """Query memory: V2 retrieves candidates, V1 re-ranks with multi-signal scoring.
+        """Query memory with hybrid switching per proven criteria.
 
-        Pipeline:
-          1. V2 cosine retrieval → 3x candidates (wide net)
-          2. Compute embedding relevance for each candidate
-          3. Build V1 MemoryState from V2 metadata + relevance
-          4. V1 score_memory() ranks using proven 4-signal formula:
-             score = w₁·relevance + w₂·recency + w₃·importance + w₄·σ(activity)
-          5. Top-k by V1 score → LLM context
+        Switching criterion (HybridBridge.lean, SwitchedDynamics.lean):
+          1. V2 cosine retrieval (always primary signal)
+          2. Estimate signal coherence: w₁·δ_rel vs signalInversion
+          3. If multi-signal gap > cosine gap: use multi-signal re-ranking
+             (requires signalInversion < -(1-w₁)·δ_rel, i.e., signals strongly help)
+          4. Otherwise: pure cosine + V1 text merge (proven optimal at zero inversion)
+
+        For FactConsolidation: signalInversion ≈ 0, so pure_cosine_maximal_gap
+        applies → cosine-only maximizes score gap → 56% SubEM baseline.
         """
         query_start = time.time()
 
@@ -359,71 +392,63 @@ class HermesMemoryAgent:
         # Embed the bare question (not the full prompt with instructions)
         q_emb = self._scorer.embed(bare_question)
 
-        # V2 retrieval: wide net — retrieve 3x candidates for re-ranking headroom
-        candidate_k = min(self.retrieve_num * 3, self.coupled_engine.n_memories)
-        v2_results = self.coupled_engine.query(
-            embedding=q_emb, top_k=max(candidate_k, 1)
-        )
-
-        if not v2_results:
-            memory_context = ""
-        else:
-            # V1 re-ranking: score each V2 candidate with the proven 4-signal formula
-            # V1's retention = exp(-age/strength) with strength=1.0, so ages
-            # must be normalized to [0, ~1] for meaningful signal. V2 stores
-            # recency as store order (0..N). Normalize so oldest=1.0, newest=0.0.
-            max_recency = max(
-                (e.recency for e in self.coupled_engine.memory_store), default=1.0
+        # V2 retrieval from coupled engine
+        if self.coretrieval_retrieval:
+            v2_results = self.coupled_engine.query_coretrieval(
+                embedding=q_emb, top_k=self.retrieve_num,
+                coretrieval_bonus=self.coretrieval_bonus,
+                min_coretrieval_count=self.coretrieval_min_count,
             )
-            max_recency = max(max_recency, 1.0)  # Avoid division by zero
+        elif self.cooc_boost_retrieval:
+            v2_results = self.coupled_engine.query_cooc_boost(
+                embedding=q_emb, top_k=self.retrieve_num,
+                cooc_weight=self.cooc_weight,
+                gate_threshold=self.cooc_gate_threshold,
+            )
+        elif self.ppr_retrieval:
+            v2_results = self.coupled_engine.query_ppr(
+                embedding=q_emb, top_k=self.retrieve_num,
+                ppr_weight=self.ppr_weight,
+                damping=self.ppr_damping,
+            )
+        elif self.hybrid_retrieval:
+            v2_results = self.coupled_engine.query_hybrid(
+                embedding=q_emb, top_k=self.retrieve_num,
+            )
+        elif self.associative_retrieval or self.sparse_retrieval:
+            v2_results = self.coupled_engine.query_associative(
+                embedding=q_emb, top_k=self.retrieve_num,
+                sparse=self.sparse_retrieval,
+            )
+        else:
+            v2_results = self.coupled_engine.query(
+                embedding=q_emb, top_k=self.retrieve_num
+            )
+        v2_texts = [r["text"] for r in v2_results]
 
-            params = self.orchestrator.params
-            scored_candidates: list[tuple[float, str]] = []
+        # V1 retrieval: text-based recall from orchestrator
+        v1_result = self.orchestrator.query(message=question)
+        v1_context = v1_result.context if v1_result.context else ""
 
-            for r in v2_results:
-                idx = r["index"]
-                entry = self.coupled_engine.memory_store[idx]
-
-                # Relevance: cosine similarity between query and candidate embedding
-                relevance = float(np.dot(q_emb, entry.embedding) / (
-                    np.linalg.norm(q_emb) * np.linalg.norm(entry.embedding) + 1e-12
-                ))
-                relevance = max(0.0, min(1.0, relevance))
-
-                # Normalized age: newest memory → 0.0, oldest → 1.0
-                # This puts ages in the range where retention = exp(-age/s0)
-                # with s0=1.0 gives meaningful discrimination.
-                normalized_age = 1.0 - (entry.recency / max_recency)
-                access_age = normalized_age  # No separate access tracking in V2
-
-                # Build V1 MemoryState from V2 metadata
-                mem_state = MemoryState(
-                    relevance=relevance,
-                    last_access_time=access_age,
-                    importance=max(0.0, min(1.0, entry.importance)),
-                    access_count=max(0, entry.access_count),
-                    strength=params.s0,  # Use initial strength (no V1 dynamics ran)
-                    creation_time=normalized_age,
-                )
-
-                # V1 proven scoring: w₁·rel + w₂·rec + w₃·imp + w₄·σ(act) + novelty
-                v1_score = score_memory(params, mem_state, current_time=0.0)
-                scored_candidates.append((v1_score, entry.text))
-
-            # Sort by V1 score descending, take top-k
-            scored_candidates.sort(key=lambda x: -x[0])
-            top_texts = [text for _, text in scored_candidates[:self.retrieve_num]]
-
-            # Deduplicate (in case of contradiction-replaced entries)
-            seen = set()
-            deduped = []
-            for text in top_texts:
-                key = text.strip()[:200]
-                if key not in seen:
+        # Merge: V2 results as primary (embedding-ranked), V1 as supplement
+        seen = set()
+        merged_chunks = []
+        for text in v2_texts:
+            key = text.strip()[:200]  # dedupe on prefix
+            if key not in seen:
+                seen.add(key)
+                merged_chunks.append(text)
+        # Add V1 context lines that aren't already covered
+        if v1_context:
+            for line in v1_context.split("\n---\n"):
+                line = line.strip()
+                key = line[:200]
+                if line and key not in seen:
                     seen.add(key)
-                    deduped.append(text)
-            memory_context = "\n\n".join(deduped)
+                    merged_chunks.append(line)
 
+        # Build context for LLM
+        memory_context = "\n\n".join(merged_chunks[:self.retrieve_num])
         memory_time = time.time() - query_start
 
         # Generate answer via LLM
@@ -500,6 +525,7 @@ class HermesMemoryAgent:
             emotional_tagging=False,
             reconsolidation=False,
             recency_alpha=self.coupled_engine.recency_alpha,
+            dream_params=self.dream_params,
         )
         self._store_count = 0
         self._scorer._cache.clear()
