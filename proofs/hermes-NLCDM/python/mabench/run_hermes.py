@@ -139,6 +139,12 @@ def parse_args():
         "--coretrieval_min_count", type=float, default=2.0,
         help="Minimum co-retrieval count to qualify as an edge",
     )
+    parser.add_argument("--transfer", action="store_true",
+                        help="Use Hopfield transfer retrieval (max(cosine, transfer) scoring)")
+    parser.add_argument(
+        "--transfer_k", type=int, default=0,
+        help="Prefilter to top-K patterns for Hopfield store (0=use all)",
+    )
     parser.add_argument("--cross_domain_probes", action="store_true",
                         help="Inject cross-domain probe queries via query_readonly() to build co-retrieval edges")
     parser.add_argument(
@@ -181,6 +187,9 @@ def main():
     safe_model = args.model.replace("/", "_")
     if args.fullpass:
         prefix = "fullpass"
+    elif args.transfer:
+        tk_str = f"_k{args.transfer_k}" if args.transfer_k > 0 else ""
+        prefix = f"hermes_transfer{tk_str}"
     elif args.coretrieval:
         prefix = f"hermes_coretrieval_mc{args.coretrieval_min_count}"
     elif args.cooc_boost and args.cooc_gate > 0:
@@ -200,7 +209,10 @@ def main():
     if not args.fullpass:
         print(f"Contradiction threshold: {args.contradiction_threshold}")
         print(f"Dream interval: {args.dream_interval}")
-        if args.coretrieval:
+        if args.transfer:
+            tk_str = f", transfer_k={args.transfer_k}" if args.transfer_k > 0 else ", transfer_k=all"
+            print(f"Retrieval: Hopfield transfer (max(cosine, transfer){tk_str})")
+        elif args.coretrieval:
             print(f"Retrieval: co-retrieval (bonus={args.coretrieval_bonus}, min_count={args.coretrieval_min_count})")
         elif args.cooc_boost:
             gate_str = f", gate={args.cooc_gate}" if args.cooc_gate > 0 else ""
@@ -254,6 +266,8 @@ def main():
             coretrieval_retrieval=getattr(args, 'coretrieval', False),
             coretrieval_bonus=getattr(args, 'coretrieval_bonus', 0.3),
             coretrieval_min_count=getattr(args, 'coretrieval_min_count', 2.0),
+            transfer_retrieval=args.transfer,
+            transfer_k=args.transfer_k if args.transfer_k > 0 else None,
         )
 
     # Run evaluation

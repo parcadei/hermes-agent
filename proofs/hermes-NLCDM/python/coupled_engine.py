@@ -1692,21 +1692,13 @@ class CoupledEngine:
     ) -> float:
         """Compute capacity utilization ratio N / N_max.
 
-        Based on the Lean proof (Capacity.lean): the network can store
-        N_max patterns where N_max grows with dimensionality and typical
-        pattern separation δ.  The Lean bound is:
+        Uses the Lean-proven formula (Capacity.lean, theorem
+        capacity_criterion):
 
-            N_max = exp(β·δ) / (4·β·M²)
+            4·N·β·M² ≤ exp(β·δ)  ⟹  N_max = exp(β·δ) / (4·β·M²)
 
-        where δ is the minimum pairwise separation and M bounds pattern
-        norms.  For practical use we compute δ as the median pairwise
-        cosine distance (robust to outlier close pairs) and use:
-
-            N_max = dim · (1 + β · δ_median) / 4
-
-        which preserves the Lean structure (capacity grows with separation
-        and inverse temperature) while giving useful numbers at operating
-        scale.
+        where δ is the minimum pairwise separation (cosine distance)
+        and M² is the maximum squared pattern norm.
 
         Returns capacity_ratio = N / N_max.  Values < 1.0 mean the store
         has room; values > 1.0 mean the store is at or above capacity.
@@ -1715,14 +1707,19 @@ class CoupledEngine:
         if N <= 1:
             return 0.0
 
-        dim = embeddings.shape[1]
-        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        # M² = max squared norm across all patterns
+        sq_norms = np.sum(embeddings ** 2, axis=1)
+        M_sq = float(np.max(sq_norms))
+        if M_sq < 1e-12:
+            return 0.0
+
+        # Normalize for cosine distance computation
+        norms = np.sqrt(sq_norms)[:, None]
         normed = embeddings / (norms + 1e-12)
 
-        # Sample pairwise cosines for efficiency when N is large
+        # Compute δ_min = minimum pairwise cosine distance
         if N <= max_sample:
             cos_matrix = normed @ normed.T
-            # Extract upper triangle (exclude diagonal)
             iu = np.triu_indices(N, k=1)
             pairwise_cos = cos_matrix[iu]
         else:
@@ -1736,15 +1733,36 @@ class CoupledEngine:
                 normed[idx_a] * normed[idx_b], axis=1
             )
 
-        # δ_median = median cosine distance
-        delta_median = float(np.median(1.0 - pairwise_cos))
+        delta_min = float(np.min(1.0 - pairwise_cos))
+        if delta_min <= 0:
+            delta_min = 0.01  # floor to avoid exp(0) degeneracy
 
-        # Practical capacity: grows with dimension and separation
-        n_max = dim * (1.0 + self.beta * delta_median) / 4.0
+        # Lean formula: N_max = exp(β·δ) / (4·β·M²)
+        beta = self.beta
+        n_max = np.exp(beta * delta_min) / (4.0 * beta * M_sq)
         if n_max < 1.0:
             n_max = 1.0
 
         return float(N) / n_max
+
+    def should_dream(self, low: float = 0.5, high: float = float("inf")) -> bool:
+        """Check if dreaming would be useful based on capacity utilization.
+
+        The Lean bound (N_max = exp(βδ)/(4βM²)) is a conservative worst-case
+        guarantee dominated by the closest pattern pair. Real stores routinely
+        exceed it. Dream consolidation helps whenever utilization is above a
+        minimum threshold — there is no practical upper cutoff because
+        exceeding the Lean bound doesn't mean patterns have collapsed, only
+        that the proof guarantee no longer holds.
+
+        Returns True when utilization >= low (default 0.5).
+        """
+        N = self.n_memories
+        if N <= 1:
+            return False
+        embeddings = self._embeddings_matrix()
+        utilization = self._compute_capacity_ratio(embeddings)
+        return bool(low <= utilization <= high)
 
     # ------------------------------------------------------------------
     # dream — proof-aligned {X, β} dream cycle

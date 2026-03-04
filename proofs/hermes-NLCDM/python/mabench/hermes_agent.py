@@ -191,6 +191,8 @@ class HermesMemoryAgent:
         coretrieval_retrieval: bool = False,
         coretrieval_bonus: float = 0.3,
         coretrieval_min_count: float = 2.0,
+        transfer_retrieval: bool = False,
+        transfer_k: int | None = None,
     ):
         self.model = model
         self.dim = dim
@@ -207,6 +209,8 @@ class HermesMemoryAgent:
         self.coretrieval_retrieval = coretrieval_retrieval
         self.coretrieval_bonus = coretrieval_bonus
         self.coretrieval_min_count = coretrieval_min_count
+        self.transfer_retrieval = transfer_retrieval
+        self.transfer_k = transfer_k
         self.retrieve_num = retrieve_num
         self.dream_interval = dream_interval
         self.temperature = temperature
@@ -393,7 +397,12 @@ class HermesMemoryAgent:
         q_emb = self._scorer.embed(bare_question)
 
         # V2 retrieval from coupled engine
-        if self.coretrieval_retrieval:
+        if self.transfer_retrieval:
+            v2_results = self.coupled_engine.query_transfer(
+                embedding=q_emb, top_k=self.retrieve_num,
+                transfer_k=self.transfer_k,
+            )
+        elif self.coretrieval_retrieval:
             v2_results = self.coupled_engine.query_coretrieval(
                 embedding=q_emb, top_k=self.retrieve_num,
                 coretrieval_bonus=self.coretrieval_bonus,

@@ -1561,6 +1561,7 @@ class LongitudinalEvaluator:
         cross_domain_probes: bool = False,
         probe_frequency: int = 10,
         probes_per_session: int = 3,
+        capacity_gating: bool = False,
     ):
         self.dataset = dataset
         self.dream_idle_threshold = dream_idle_threshold
@@ -1569,6 +1570,7 @@ class LongitudinalEvaluator:
         self.cross_domain_probes = cross_domain_probes
         self.probe_frequency = probe_frequency
         self.probes_per_session = probes_per_session
+        self.capacity_gating = capacity_gating
         self._llm_client = None
         if use_llm_judge:
             self._llm_client = _get_llm_client()
@@ -1668,9 +1670,14 @@ class LongitudinalEvaluator:
         for i, session in enumerate(sessions):
             # Check if there's an idle period before this session
             if prev_day >= 0 and session.day - prev_day > self.dream_idle_threshold:
-                # Idle period detected -- trigger dream
-                agent.coupled_engine.dream()
-                n_dreams += 1
+                # Idle period detected -- trigger dream (with optional capacity gating)
+                if self.capacity_gating and hasattr(agent, 'coupled_engine'):
+                    if agent.coupled_engine.should_dream():
+                        agent.coupled_engine.dream()
+                        n_dreams += 1
+                else:
+                    agent.coupled_engine.dream()
+                    n_dreams += 1
 
             # Store each fact in this session
             for fact in session.facts:
