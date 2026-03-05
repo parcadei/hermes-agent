@@ -46,7 +46,7 @@ PARAM_BOUNDS = {
     "min_sep": (0.01, 0.5),
     "merge_threshold": (0.7, 0.99),
     "prune_threshold": (0.8, 0.999),
-    "n_probes": (1, 10),
+    "n_probes": (50, 500),
     "separation_rate": (0.01, 0.5),
 }
 

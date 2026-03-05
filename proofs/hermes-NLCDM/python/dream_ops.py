@@ -13,6 +13,7 @@ All operations are pure: W_in -> W_out (no mutation).
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -22,6 +23,8 @@ from typing import Callable
 from nlcdm_core import cosine_sim, sigmoid, softmax, sparsemax
 
 import gpu_ops
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -1079,6 +1082,56 @@ def nrem_repulsion_xb(
 
 
 # ---------------------------------------------------------------------------
+# Bridge counting (ConditionalMonotonicity.lean, Phase 9)
+# ---------------------------------------------------------------------------
+
+
+def count_protected_bridges(
+    patterns: np.ndarray,
+    importances: np.ndarray,
+    labels: np.ndarray | None = None,
+    importance_threshold: float = 0.7,
+    bridge_sim_threshold: float = 0.3,
+) -> int:
+    """Count cross-cluster edges among protected (high-importance) patterns.
+
+    A "bridge" is a pair (i, j) where:
+      - Both have importance >= importance_threshold
+      - They belong to different clusters (labels[i] != labels[j])
+      - Their cosine similarity >= bridge_sim_threshold
+
+    ConditionalMonotonicity.lean proves:
+      protectedSet(importance >= 0.7) ⊆ survivors =>
+      bridgeCount(after) >= bridgeCount(before)
+
+    If labels is None, derives clusters via threshold-based clustering.
+    """
+    N = patterns.shape[0]
+    if N < 2:
+        return 0
+
+    protected = np.where(importances >= importance_threshold)[0]
+    if len(protected) < 2:
+        return 0
+
+    if labels is None:
+        labels = _assign_clusters(patterns, threshold=0.5)
+
+    protected_patterns = patterns[protected]
+    protected_labels = labels[protected]
+
+    S = gpu_ops.similarity_matrix(protected_patterns)
+    bridge_count = 0
+    for i in range(len(protected)):
+        for j in range(i + 1, len(protected)):
+            if (protected_labels[i] != protected_labels[j]
+                    and S[i, j] >= bridge_sim_threshold):
+                bridge_count += 1
+
+    return bridge_count
+
+
+# ---------------------------------------------------------------------------
 # Dream Redesign: Prune near-duplicates (nrem_prune_xb)
 # ---------------------------------------------------------------------------
 
@@ -1870,6 +1923,12 @@ def dream_cycle_xb(
     # ---------------------------------------------------------------
     X1 = nrem_repulsion_xb(patterns, importances, eta=params.eta, min_sep=params.min_sep)
 
+    # Phase 9: Count protected bridges before prune
+    labels_for_bridge = labels if labels is not None else _assign_clusters(X1, threshold=0.5)
+    bridges_before_prune = count_protected_bridges(
+        X1, importances, labels_for_bridge
+    )
+
     # ---------------------------------------------------------------
     # Step 2: NREM prune near-duplicates
     # ---------------------------------------------------------------
@@ -1882,6 +1941,17 @@ def dream_cycle_xb(
     all_indices = set(range(N))
     kept_set = set(kept_indices_after_prune)
     pruned_indices = sorted(all_indices - kept_set)
+
+    # Phase 9: Count protected bridges after prune
+    labels_after_prune = labels_for_bridge[kept_indices_after_prune] if labels is not None else None
+    bridges_after_prune = count_protected_bridges(
+        X2, importances[kept_indices_after_prune], labels_after_prune
+    )
+    if bridges_after_prune < bridges_before_prune:
+        logger.warning(
+            "ConditionalMonotonicity violation: bridge count decreased "
+            "%d -> %d after prune", bridges_before_prune, bridges_after_prune,
+        )
 
     # Importances for surviving patterns (post-prune)
     importances_after_prune = importances[kept_indices_after_prune]

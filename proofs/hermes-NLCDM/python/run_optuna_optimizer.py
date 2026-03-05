@@ -172,8 +172,8 @@ def run_optuna(
         reval_time = time.time() - t_reval
         result["revalidation"] = reval_result
         print(f"\nRevalidation ({reval_time/60:.1f} min):")
-        for i, r in enumerate(reval_result):
-            print(f"  #{i+1}: median={r['median_score']:.4f}  idle={r['dream_idle']:.2f}")
+        for i, r in enumerate(reval_result["revalidated"]):
+            print(f"  #{i+1}: median={r['median_score']:.4f}  idle={r['dream_idle_threshold']:.2f}")
         total_time += reval_time
 
     # Serialize for JSON
@@ -195,7 +195,27 @@ def run_optuna(
         "history": result["history"],
     }
     if "revalidation" in result:
-        result_json["revalidation"] = result["revalidation"]
+        # Serialize DreamParams in revalidation results
+        reval_serialized = []
+        for entry in result["revalidation"]["revalidated"]:
+            p = entry["params"]
+            reval_serialized.append({
+                "trial_number": entry["trial_number"],
+                "original_score": entry["original_score"],
+                "median_score": entry["median_score"],
+                "std_score": entry["std_score"],
+                "n_repeats": entry["n_repeats"],
+                "dream_idle_threshold": entry["dream_idle_threshold"],
+                "params": {
+                    "eta": p.eta,
+                    "min_sep": p.min_sep,
+                    "prune_threshold": p.prune_threshold,
+                    "merge_threshold": p.merge_threshold,
+                    "n_probes": p.n_probes,
+                    "separation_rate": p.separation_rate,
+                },
+            })
+        result_json["revalidation"] = reval_serialized
 
     if output_path:
         Path(output_path).parent.mkdir(parents=True, exist_ok=True)

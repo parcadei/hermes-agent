@@ -248,7 +248,11 @@ class TestQueryReadonlyLogsCoRetrieval:
         assert engine._co_retrieval_query_count == 2
 
     def test_co_retrieval_weights_accumulate(self):
-        """Repeated query_readonly calls should accumulate edge weights."""
+        """Repeated query_readonly calls should accumulate edge weights.
+
+        Edge weights use Hebbian strength (sqrt(score_i * score_j) * specificity)
+        rather than flat +1.0, so weights grow monotonically with each call.
+        """
         engine = _make_engine(dim=128, n=2, seed=42)
 
         # Query that retrieves both patterns
@@ -258,13 +262,16 @@ class TestQueryReadonlyLogsCoRetrieval:
         q /= np.linalg.norm(q)
 
         engine.query_readonly(q, top_k=2)
-        assert engine._co_retrieval[0][1] == 1.0
+        w1 = engine._co_retrieval[0][1]
+        assert w1 > 0, "First call should create positive edge weight"
 
         engine.query_readonly(q, top_k=2)
-        assert engine._co_retrieval[0][1] == 2.0
+        w2 = engine._co_retrieval[0][1]
+        assert w2 > w1, f"Second call should increase weight: {w2} <= {w1}"
 
         engine.query_readonly(q, top_k=2)
-        assert engine._co_retrieval[0][1] == 3.0
+        w3 = engine._co_retrieval[0][1]
+        assert w3 > w2, f"Third call should increase weight: {w3} <= {w2}"
 
 
 # ---------------------------------------------------------------------------

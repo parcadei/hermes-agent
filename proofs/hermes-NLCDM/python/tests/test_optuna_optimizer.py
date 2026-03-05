@@ -78,7 +78,7 @@ class TestOptunaOptimizer:
                 violations.append(f"merge={params.merge_threshold}")
             if not (0.8 <= params.prune_threshold <= 0.999):
                 violations.append(f"prune={params.prune_threshold}")
-            if not (1 <= params.n_probes <= 10):
+            if not (50 <= params.n_probes <= 500):
                 violations.append(f"n_probes={params.n_probes}")
             if not (0.01 <= params.separation_rate <= 0.5):
                 violations.append(f"sep_rate={params.separation_rate}")
@@ -141,7 +141,7 @@ class TestOptunaOptimizer:
                 "min_sep": 0.3,
                 "merge_threshold": 0.90,
                 "prune_threshold": 0.95,
-                "n_probes": 5,
+                "n_probes": 200,
                 "separation_rate": 0.02,
             },
         )
@@ -286,7 +286,7 @@ class TestTrialConversion:
             min_sep = trial.suggest_float("min_sep", 0.01, 0.5)
             merge = trial.suggest_float("merge_threshold", 0.7, 0.99)
             prune = trial.suggest_float("prune_threshold", 0.8, 0.999)
-            n_probes = trial.suggest_int("n_probes", 1, 10)
+            n_probes = trial.suggest_int("n_probes", 50, 500)
             sep_rate = trial.suggest_float("separation_rate", 0.01, 0.5)
             return 0.0
 
@@ -334,7 +334,7 @@ class TestTrialConversion:
             min_sep = trial.suggest_float("min_sep", 0.01, 0.5)
             merge = trial.suggest_float("merge_threshold", 0.7, 0.99)
             prune = trial.suggest_float("prune_threshold", 0.8, 0.999)
-            n_probes = trial.suggest_int("n_probes", 1, 10)
+            n_probes = trial.suggest_int("n_probes", 50, 500)
             sep_rate = trial.suggest_float("separation_rate", 0.01, 0.5)
             return 0.0
 

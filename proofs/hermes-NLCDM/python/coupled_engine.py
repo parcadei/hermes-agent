@@ -19,6 +19,7 @@ Privacy invariant: dream() NEVER accesses text content.
 from __future__ import annotations
 
 import json
+import math
 import time
 import dataclasses
 from dataclasses import dataclass
@@ -83,6 +84,50 @@ class MemoryEntry:
     access_count: int = 0
     tagged: bool = False
     recency: float = 0.0  # Serial number or store order; higher = newer
+    layer: str = "user_knowledge"  # "user_knowledge", "agent_meta", "procedural"
+    fact_type: str = "general"  # freeform, e.g. "finding", "reasoning_chain", "decision"
+
+
+# Layer-aware importance seed map.
+# Each cognitive layer has a default importance floor that determines
+# dream survival (tagged threshold >= 0.7). This is a dream-survival
+# mechanism, not a retrieval-ranking mechanism (Finding 1 from adversarial review).
+_LAYER_IMPORTANCE = {
+    "user_knowledge": 0.5,
+    "agent_meta": 0.7,
+    "procedural": 0.8,
+}
+
+# Fact-type refinements within a layer. These adjust the layer seed
+# for specific high-value fact types. The fact_type takes precedence
+# over the layer seed to allow fine-grained importance control.
+_FACT_TYPE_IMPORTANCE_OVERRIDE = {
+    "reasoning_chain": 0.75,
+}
+
+
+def _resolve_layer_importance(
+    layer: str,
+    fact_type: str,
+    emotional_S_min: float = 0.3,
+) -> float:
+    """Resolve the base importance for a (layer, fact_type) pair.
+
+    Lookup rule:
+    1. If fact_type has an override, use that (e.g. reasoning_chain -> 0.75).
+    2. Else use the layer seed (e.g. procedural -> 0.8).
+    3. Unknown layers fall back to 0.5.
+
+    For layer="user_knowledge", respects emotional_S_min if higher than the
+    layer default (backward compat for callers setting emotional_S_min > 0.5).
+    """
+    if fact_type in _FACT_TYPE_IMPORTANCE_OVERRIDE:
+        return _FACT_TYPE_IMPORTANCE_OVERRIDE[fact_type]
+    base = _LAYER_IMPORTANCE.get(layer, 0.5)
+    # For user_knowledge, respect engine's emotional_S_min if higher
+    if layer == "user_knowledge":
+        base = max(base, emotional_S_min)
+    return base
 
 
 class CoupledEngine:
@@ -112,6 +157,8 @@ class CoupledEngine:
         recency_alpha: float = 0.0,
         dream_params: DreamParams | None = None,
         hebbian_epsilon: float = 0.01,
+        ppr_blend_weight: float = 0.3,
+        ppr_damping: float = 0.5,
     ):
         self.dim = dim
         self.beta = beta
@@ -128,6 +175,8 @@ class CoupledEngine:
         self.recency_alpha = recency_alpha
         self.dream_params = dream_params
         self.memory_store: list[MemoryEntry] = []
+        self.ppr_blend_weight = ppr_blend_weight
+        self.ppr_damping = ppr_damping
         self._embeddings_cache: np.ndarray | None = None
         self._W_cache: np.ndarray | None = None
         # FAISS ANN index for O(1) nearest-neighbor search
@@ -246,6 +295,8 @@ class CoupledEngine:
         embedding: np.ndarray,
         importance: float | None = None,
         recency: float = 0.0,
+        layer: str = "user_knowledge",
+        fact_type: str = "general",
     ) -> int:
         """Add a new memory, optionally replacing contradictions.
 
@@ -269,14 +320,18 @@ class CoupledEngine:
                 f"Embedding dimension {emb.shape[0]} != engine dim {self.dim}"
             )
 
-        # Emotional tagging: compute S₀ from prediction error when no
-        # explicit importance was provided
+        # Importance resolution: layer-aware seeding with emotional tagging.
+        # When importance is not explicitly provided, resolve from layer/fact_type.
+        # Explicit importance always takes precedence over seeding.
         if importance is None:
+            layer_base = _resolve_layer_importance(
+                layer, fact_type, self.emotional_S_min
+            )
             if self.emotional_tagging:
                 pred_error = self._prediction_error(emb)
-                importance = self._emotional_S0(pred_error)
+                importance = layer_base + (1.0 - layer_base) * pred_error
             else:
-                importance = 0.5
+                importance = layer_base
 
         # L2-normalize for FAISS inner-product = cosine similarity
         emb_norm = np.linalg.norm(emb)
@@ -315,6 +370,14 @@ class CoupledEngine:
                 old.embedding = emb
                 old.importance = max(old.importance, importance)
                 old.recency = max(old.recency, recency)
+                # Preserve the more protective layer (Finding 5 mitigation):
+                # if the old memory's layer has a higher seed, keep it.
+                old_effective = _resolve_layer_importance(old.layer, old.fact_type, self.emotional_S_min)
+                new_effective = _resolve_layer_importance(layer, fact_type, self.emotional_S_min)
+                if new_effective >= old_effective:
+                    old.layer = layer
+                    old.fact_type = fact_type
+                # else: keep old.layer (it provides higher protection)
                 old.creation_time = now
                 old.last_access_time = now
                 old.access_count += 1
@@ -346,6 +409,8 @@ class CoupledEngine:
             access_count=0,
             tagged=importance >= 0.7,
             recency=recency,
+            layer=layer,
+            fact_type=fact_type,
         )
         self.memory_store.append(entry)
         self._invalidate_cache()
@@ -421,6 +486,60 @@ class CoupledEngine:
         return self.W + self._W_temporal
 
     # ------------------------------------------------------------------
+    # PPR scoring over co-retrieval graph
+    # ------------------------------------------------------------------
+
+    def _ppr_scores(
+        self,
+        seed_indices: np.ndarray,
+        seed_scores: np.ndarray,
+        alpha: float | None = None,
+        n_iter: int = 20,
+    ) -> np.ndarray:
+        """Personalized PageRank over co-retrieval graph.
+
+        alpha: damping factor (default: self.ppr_damping, 0.5 = HippoRAG default).
+        Returns: np.ndarray of PPR scores for all patterns.
+        """
+        if alpha is None:
+            alpha = self.ppr_damping
+
+        N = self.n_memories
+        if N == 0:
+            return np.zeros(0)
+
+        # Teleport vector: seed patterns weighted by their scores
+        teleport = np.zeros(N)
+        for idx, score in zip(seed_indices, seed_scores):
+            if 0 <= idx < N:
+                teleport[int(idx)] = score
+        total = teleport.sum()
+        if total > 0:
+            teleport /= total
+        else:
+            return np.zeros(N)
+
+        # PPR iteration
+        ppr = teleport.copy()
+        for _ in range(n_iter):
+            new_ppr = (1 - alpha) * teleport
+            for i in range(N):
+                if i not in self._co_retrieval:
+                    continue
+                neighbors = self._co_retrieval[i]
+                if not neighbors:
+                    continue
+                total_weight = sum(neighbors.values())
+                if total_weight <= 0:
+                    continue
+                for j, w in neighbors.items():
+                    if 0 <= j < N:
+                        new_ppr[j] += alpha * ppr[i] * (w / total_weight)
+            ppr = new_ppr
+
+        return ppr
+
+    # ------------------------------------------------------------------
     # query
     # ------------------------------------------------------------------
 
@@ -483,6 +602,35 @@ class CoupledEngine:
                     scores = multi_scores
                 # else: coherence ≤ 0 → stay with cosine_scores (fallback)
 
+        # PPR co-retrieval expansion (if graph has edges)
+        has_co_retrieval = any(
+            len(v) > 0 for v in self._co_retrieval.values()
+        ) if self._co_retrieval else False
+
+        if has_co_retrieval and N > 1:
+            seed_k = min(5, N)
+            seed_idx = np.argsort(cosine_scores)[::-1][:seed_k]
+            seed_vals = cosine_scores[seed_idx]
+            ppr = self._ppr_scores(seed_idx, seed_vals)
+
+            # Blend: (1-w)*direct + w*ppr, normalized
+            # Use 99th percentile to avoid single outlier dominating
+            ppr_99 = np.percentile(ppr, 99) if N > 1 else ppr.max()
+            if ppr_99 > 0:
+                ppr_normalized = np.clip(ppr / ppr_99, 0.0, 1.0)
+                blended = (
+                    (1 - self.ppr_blend_weight) * scores
+                    + self.ppr_blend_weight * ppr_normalized
+                )
+                # Hybrid switching guard (HybridSwitching.lean):
+                # If PPR-boosted scores invert cosine rank-1, fall back to
+                # pre-PPR scores to preserve the proven rank preservation.
+                cosine_rank1 = int(np.argmax(cosine_scores))
+                blended_rank1 = int(np.argmax(blended))
+                if cosine_rank1 == blended_rank1:
+                    scores = blended
+                # else: PPR would invert rank-1 → keep pre-PPR scores
+
         k = min(top_k, N)
         top_indices = np.argsort(scores)[::-1][:k]
 
@@ -500,6 +648,8 @@ class CoupledEngine:
                     "index": int(i),
                     "score": float(scores[i]),
                     "text": self.memory_store[i].text,
+                    "layer": self.memory_store[i].layer,
+                    "fact_type": self.memory_store[i].fact_type,
                 }
             )
 
@@ -518,17 +668,25 @@ class CoupledEngine:
             self._invalidate_cache()
 
         # Co-retrieval edge logging: facts retrieved together form a clique.
-        # Weight = 1.0 per co-retrieval event, accumulated across queries.
+        # Hebbian edge weight: strength = sqrt(score_i * score_j) * specificity
+        # where specificity = 1/sqrt(k) penalizes large result sets.
         # This builds the "right invariance" graph — edges encode genuine
         # associative structure discovered through usage, not chunk boundaries.
         self._co_retrieval_query_count += 1
-        for ii in range(len(top_indices)):
-            for jj in range(ii + 1, len(top_indices)):
+        k_eff = len(top_indices)
+        specificity = 1.0 / math.sqrt(k_eff) if k_eff > 0 else 1.0
+        for ii in range(k_eff):
+            for jj in range(ii + 1, k_eff):
                 a, b = int(top_indices[ii]), int(top_indices[jj])
+                strength = math.sqrt(
+                    max(float(scores[top_indices[ii]]), 0.0)
+                    * max(float(scores[top_indices[jj]]), 0.0)
+                )
+                edge_delta = strength * specificity
                 nbrs_a = self._co_retrieval.setdefault(a, {})
                 nbrs_b = self._co_retrieval.setdefault(b, {})
-                nbrs_a[b] = nbrs_a.get(b, 0.0) + 1.0
-                nbrs_b[a] = nbrs_b.get(a, 0.0) + 1.0
+                nbrs_a[b] = nbrs_a.get(b, 0.0) + edge_delta
+                nbrs_b[a] = nbrs_b.get(a, 0.0) + edge_delta
 
         return results
 
@@ -604,20 +762,29 @@ class CoupledEngine:
                     "index": int(i),
                     "score": float(scores[i]),
                     "text": self.memory_store[i].text,
+                    "layer": self.memory_store[i].layer,
+                    "fact_type": self.memory_store[i].fact_type,
                 }
             )
 
         # NO reconsolidation — no embedding drift in read-only mode
 
-        # Co-retrieval edge logging: same as query()
+        # Co-retrieval edge logging: Hebbian weights (same formula as query())
         self._co_retrieval_query_count += 1
-        for ii in range(len(top_indices)):
-            for jj in range(ii + 1, len(top_indices)):
+        k_eff = len(top_indices)
+        specificity = 1.0 / math.sqrt(k_eff) if k_eff > 0 else 1.0
+        for ii in range(k_eff):
+            for jj in range(ii + 1, k_eff):
                 a, b = int(top_indices[ii]), int(top_indices[jj])
+                strength = math.sqrt(
+                    max(float(scores[top_indices[ii]]), 0.0)
+                    * max(float(scores[top_indices[jj]]), 0.0)
+                )
+                edge_delta = strength * specificity
                 nbrs_a = self._co_retrieval.setdefault(a, {})
                 nbrs_b = self._co_retrieval.setdefault(b, {})
-                nbrs_a[b] = nbrs_a.get(b, 0.0) + 1.0
-                nbrs_b[a] = nbrs_b.get(a, 0.0) + 1.0
+                nbrs_a[b] = nbrs_a.get(b, 0.0) + edge_delta
+                nbrs_b[a] = nbrs_b.get(a, 0.0) + edge_delta
 
         return results
 
@@ -967,15 +1134,22 @@ class CoupledEngine:
                 "text": m.text,
             })
 
-        # Co-retrieval edge logging
+        # Co-retrieval edge logging: Hebbian weights
         self._co_retrieval_query_count += 1
-        for ii in range(len(top_indices)):
-            for jj in range(ii + 1, len(top_indices)):
+        k_eff = len(top_indices)
+        specificity = 1.0 / math.sqrt(k_eff) if k_eff > 0 else 1.0
+        for ii in range(k_eff):
+            for jj in range(ii + 1, k_eff):
                 a, b = int(top_indices[ii]), int(top_indices[jj])
+                strength = math.sqrt(
+                    max(float(combined_scores[top_indices[ii]]), 0.0)
+                    * max(float(combined_scores[top_indices[jj]]), 0.0)
+                )
+                edge_delta = strength * specificity
                 nbrs_a = self._co_retrieval.setdefault(a, {})
                 nbrs_b = self._co_retrieval.setdefault(b, {})
-                nbrs_a[b] = nbrs_a.get(b, 0.0) + 1.0
-                nbrs_b[a] = nbrs_b.get(a, 0.0) + 1.0
+                nbrs_a[b] = nbrs_a.get(b, 0.0) + edge_delta
+                nbrs_b[a] = nbrs_b.get(a, 0.0) + edge_delta
 
         return results
 
@@ -1031,6 +1205,33 @@ class CoupledEngine:
         for idx in first_hop_indices:
             if idx in self._co_occurrence:
                 expanded_indices.update(self._co_occurrence[idx].keys())
+
+        # Transfer bound filter (TransferDynamics.lean):
+        #   score_bound = 1 / (1 + (N-1) * exp(-beta * delta_min))
+        # Expanded candidates below this bound are spurious retrievals.
+        if len(expanded_indices) > len(first_hop_indices) and N > 1:
+            embeddings_mat = self._embeddings_matrix()
+            sq_norms = np.sum(embeddings_mat ** 2, axis=1)
+            norms_all = np.sqrt(sq_norms)[:, None]
+            normed = embeddings_mat / (norms_all + 1e-12)
+            # Fast δ_min estimate: min cosine distance among first-hop patterns
+            fh_list = sorted(first_hop_indices)
+            if len(fh_list) >= 2:
+                fh_normed = normed[fh_list]
+                fh_cos = fh_normed @ fh_normed.T
+                iu = np.triu_indices(len(fh_list), k=1)
+                delta_min = float(np.min(1.0 - fh_cos[iu]))
+                if delta_min <= 0:
+                    delta_min = 0.01
+                transfer_bound = 1.0 / (1.0 + (N - 1) * np.exp(-beta * delta_min))
+                # Filter expanded-only candidates by their raw cosine score
+                filtered_expanded = set(first_hop_indices)
+                for idx in expanded_indices:
+                    if idx in first_hop_indices:
+                        continue
+                    if float(scores[idx]) >= transfer_bound:
+                        filtered_expanded.add(idx)
+                expanded_indices = filtered_expanded
 
         # Stage 3: Score and rank the expanded set by cosine
         # Facts discovered via co-occurrence (not in first_hop_indices) get a
@@ -1172,16 +1373,24 @@ class CoupledEngine:
                 "text": m.text,
             })
 
-        # Log co-retrieval edges from this query too
+        # Log co-retrieval edges from this query too: Hebbian weights
         top_result_indices = [r["index"] for r in results]
+        top_result_scores = [r["score"] for r in results]
         self._co_retrieval_query_count += 1
-        for ii in range(len(top_result_indices)):
-            for jj in range(ii + 1, len(top_result_indices)):
+        k_eff = len(top_result_indices)
+        specificity = 1.0 / math.sqrt(k_eff) if k_eff > 0 else 1.0
+        for ii in range(k_eff):
+            for jj in range(ii + 1, k_eff):
                 a, b = top_result_indices[ii], top_result_indices[jj]
+                strength = math.sqrt(
+                    max(top_result_scores[ii], 0.0)
+                    * max(top_result_scores[jj], 0.0)
+                )
+                edge_delta = strength * specificity
                 nbrs_a = self._co_retrieval.setdefault(a, {})
                 nbrs_b = self._co_retrieval.setdefault(b, {})
-                nbrs_a[b] = nbrs_a.get(b, 0.0) + 1.0
-                nbrs_b[a] = nbrs_b.get(a, 0.0) + 1.0
+                nbrs_a[b] = nbrs_a.get(b, 0.0) + edge_delta
+                nbrs_b[a] = nbrs_b.get(a, 0.0) + edge_delta
 
         return results
 
@@ -1844,6 +2053,17 @@ class CoupledEngine:
             params=effective_params,
         )
 
+        # --- Decay co-retrieval edges (one dream cycle worth of decay) ---
+        decay_factor = _strength_decay(self.decay_rate, 1.0, 1.0)
+        for idx in list(self._co_retrieval.keys()):
+            for nbr in list(self._co_retrieval[idx].keys()):
+                self._co_retrieval[idx][nbr] *= decay_factor
+                if self._co_retrieval[idx][nbr] < 0.01:
+                    del self._co_retrieval[idx][nbr]
+            # Clean up empty neighbor dicts
+            if not self._co_retrieval[idx]:
+                del self._co_retrieval[idx]
+
         # --- Apply structural changes ---
 
         pruned_set = set(report.pruned_indices)
@@ -1876,10 +2096,14 @@ class CoupledEngine:
                 creation_time=min(
                     self.memory_store[g].creation_time for g in group
                 ),
+                last_access_time=max(self.memory_store[g].last_access_time for g in group),
                 access_count=sum(
                     self.memory_store[g].access_count for g in group
                 ),
+                recency=self.memory_store[best_orig].recency,
                 tagged=True,
+                layer=self.memory_store[best_orig].layer,
+                fact_type=self.memory_store[best_orig].fact_type,
             )
             new_store.append(merged_entry)
 
@@ -2024,6 +2248,8 @@ class CoupledEngine:
                     "last_access_time": m.last_access_time,
                     "access_count": m.access_count,
                     "tagged": m.tagged,
+                    "layer": m.layer,
+                    "fact_type": m.fact_type,
                 }
                 for m in self.memory_store
             ],
@@ -2065,6 +2291,8 @@ class CoupledEngine:
                 last_access_time=meta.get("last_access_time", meta["creation_time"]),
                 access_count=meta["access_count"],
                 tagged=meta["tagged"],
+                layer=meta.get("layer", "user_knowledge"),
+                fact_type=meta.get("fact_type", "general"),
             )
             engine.memory_store.append(entry)
 
