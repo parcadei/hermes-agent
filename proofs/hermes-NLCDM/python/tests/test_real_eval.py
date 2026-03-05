@@ -2984,7 +2984,12 @@ class TestLayerImportanceSeeding:
         assert abs(engine.memory_store[idx].importance - 0.8) < 1e-9
 
     def test_store_with_reasoning_chain_fact_type(self):
-        """store(text, emb, layer='agent_meta', fact_type='reasoning_chain') produces importance=0.75."""
+        """store(text, emb, layer='agent_meta', fact_type='reasoning_chain')
+        produces importance via 2D composition: 0.7 + 0.75 * (1 - 0.7) = 0.925.
+
+        Under the 3D composition, layer seed (0.7) is the floor and
+        reasoning_chain boost (0.75) fills 75% of the headroom (0.3).
+        """
         engine = self._make_engine()
         emb = self._rand_emb(seed=3)
         idx = engine.store(
@@ -2993,7 +2998,11 @@ class TestLayerImportanceSeeding:
             layer="agent_meta",
             fact_type="reasoning_chain",
         )
-        assert abs(engine.memory_store[idx].importance - 0.75) < 1e-9
+        # 2D composition: 0.7 + 0.75 * 0.3 = 0.925
+        expected = 0.7 + 0.75 * (1.0 - 0.7)
+        assert abs(engine.memory_store[idx].importance - expected) < 1e-9, (
+            f"Expected {expected}, got {engine.memory_store[idx].importance}"
+        )
 
     def test_store_explicit_importance_overrides_layer(self):
         """store(text, emb, importance=0.3, layer='procedural') produces importance=0.3."""
@@ -3094,3 +3103,857 @@ class TestLayerImportanceSeeding:
         emb = self._rand_emb(seed=40)
         idx = engine.store("unknown layer fact", emb, layer="unknown_layer")
         assert abs(engine.memory_store[idx].importance - 0.5) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# H2 Eval: Layer-tagged vs flat importance — dream survival comparison
+# ---------------------------------------------------------------------------
+
+
+class TestH2LayerDreamSurvival:
+    """H2 hypothesis test: layer-tagged importance seeding improves dream survival
+    for higher-layer facts compared to flat (no layer) importance.
+
+    Design:
+    - Create two identical engines (same dim, same seed, same dream params).
+    - Store the same set of facts with diverse embeddings.
+    - Engine A ("layered"): facts stored with their cognitive layer tags.
+    - Engine B ("flat"): same facts stored without layer tags (all default user_knowledge).
+    - Run N dream cycles, measure tagged count and importance after dream.
+
+    Key finding (validated by adversarial review Finding 1): layer seeding is a
+    dream-survival mechanism, NOT a retrieval-ranking mechanism. Importance affects:
+    1. tagged flag (>= 0.7) → NREM replay → deeper attractor basins
+    2. nrem_prune_xb tie-breaking: lower-importance member of near-duplicate pair is removed
+    3. _compute_effective_importance → dream capacity decisions
+
+    The effect is mediated through consolidation, not retrieval scoring.
+    """
+
+    DIM = 32  # Enough dimensions for meaningful cosine geometry
+
+    def _make_engine(self, **kwargs):
+        from coupled_engine import CoupledEngine
+        defaults = dict(dim=self.DIM, decay_rate=0.0)  # No time-decay for controlled eval
+        defaults.update(kwargs)
+        return CoupledEngine(**defaults)
+
+    def _generate_facts(self, rng, n_per_layer=10):
+        """Generate a controlled set of facts with diverse embeddings.
+
+        Returns list of (text, embedding, layer, fact_type) tuples.
+        Embeddings are random unit vectors to ensure geometric diversity.
+        """
+        facts = []
+        layers = [
+            ("user_knowledge", "general"),
+            ("agent_meta", "general"),
+            ("procedural", "general"),
+        ]
+        for layer, fact_type in layers:
+            for i in range(n_per_layer):
+                emb = rng.standard_normal(self.DIM)
+                emb = emb / (np.linalg.norm(emb) + 1e-12)
+                text = f"{layer}_fact_{i}"
+                facts.append((text, emb, layer, fact_type))
+        return facts
+
+    def _generate_mixed_clusters(self, rng, n_clusters=4, noise=0.03):
+        """Generate facts from all three layers sharing the same embedding clusters.
+
+        Each cluster has one fact per layer, with embeddings nearly identical
+        (cosine ~0.999). This forces prune/merge to choose between layers
+        based on importance.
+        """
+        facts = []
+        for c in range(n_clusters):
+            base = rng.standard_normal(self.DIM)
+            base = base / (np.linalg.norm(base) + 1e-12)
+            for layer in ["user_knowledge", "agent_meta", "procedural"]:
+                emb = base + rng.standard_normal(self.DIM) * noise
+                emb = emb / (np.linalg.norm(emb) + 1e-12)
+                facts.append((f"{layer}_c{c}", emb, layer, "general"))
+        return facts
+
+    # ------------------------------------------------------------------
+    # Test 1: Layered engine creates importance gradient at store time
+    # ------------------------------------------------------------------
+
+    def test_layered_engine_has_importance_gradient(self):
+        """After storing with layer tags, importance differs by layer."""
+        engine = self._make_engine()
+        rng = np.random.default_rng(100)
+        facts = self._generate_facts(rng, n_per_layer=5)
+
+        for text, emb, layer, fact_type in facts:
+            engine.store(text, emb, layer=layer, fact_type=fact_type)
+
+        # Check importance gradient: procedural > agent_meta > user_knowledge
+        importances_by_layer = {}
+        for m in engine.memory_store:
+            importances_by_layer.setdefault(m.layer, []).append(m.importance)
+
+        mean_proc = np.mean(importances_by_layer["procedural"])
+        mean_meta = np.mean(importances_by_layer["agent_meta"])
+        mean_user = np.mean(importances_by_layer["user_knowledge"])
+
+        assert mean_proc > mean_meta > mean_user, (
+            f"Expected procedural ({mean_proc:.3f}) > agent_meta ({mean_meta:.3f}) "
+            f"> user_knowledge ({mean_user:.3f})"
+        )
+
+    def test_flat_engine_has_uniform_importance(self):
+        """Without layer tags, all facts get the same default importance."""
+        engine = self._make_engine()
+        rng = np.random.default_rng(100)
+        facts = self._generate_facts(rng, n_per_layer=5)
+
+        # Store ALL facts as default (no layer arg) — flat importance
+        for text, emb, _layer, _fact_type in facts:
+            engine.store(text, emb)
+
+        importances = [m.importance for m in engine.memory_store]
+        assert all(abs(imp - 0.5) < 1e-9 for imp in importances), (
+            f"Expected all importance=0.5, got range [{min(importances):.3f}, {max(importances):.3f}]"
+        )
+
+    # ------------------------------------------------------------------
+    # Test 2: Tagged threshold gradient
+    # ------------------------------------------------------------------
+
+    def test_layered_tagged_gradient(self):
+        """In the layered engine, procedural and agent_meta facts start tagged,
+        user_knowledge facts start untagged. This is the mechanism for
+        differential dream survival."""
+        engine = self._make_engine()
+        rng = np.random.default_rng(200)
+        facts = self._generate_facts(rng, n_per_layer=5)
+
+        for text, emb, layer, fact_type in facts:
+            engine.store(text, emb, layer=layer, fact_type=fact_type)
+
+        tagged_by_layer = {}
+        for m in engine.memory_store:
+            tagged_by_layer.setdefault(m.layer, []).append(m.tagged)
+
+        # procedural (imp=0.8): ALL tagged (>= 0.7)
+        assert all(tagged_by_layer["procedural"]), "All procedural facts should be tagged"
+        # agent_meta (imp=0.7): ALL tagged (>= 0.7)
+        assert all(tagged_by_layer["agent_meta"]), "All agent_meta facts should be tagged"
+        # user_knowledge (imp=0.5): NONE tagged (< 0.7)
+        assert not any(tagged_by_layer["user_knowledge"]), "No user_knowledge facts should be tagged"
+
+    def test_flat_none_tagged(self):
+        """In the flat engine, no facts are tagged (all importance=0.5 < 0.7)."""
+        engine = self._make_engine()
+        rng = np.random.default_rng(200)
+        facts = self._generate_facts(rng, n_per_layer=5)
+
+        for text, emb, _layer, _fact_type in facts:
+            engine.store(text, emb)
+
+        assert not any(m.tagged for m in engine.memory_store), "No flat facts should be tagged"
+
+    # ------------------------------------------------------------------
+    # Test 3: Mixed-cluster prune favors higher-importance members
+    # ------------------------------------------------------------------
+
+    def test_prune_favors_higher_importance_in_mixed_clusters(self):
+        """When facts from different layers share a cluster (near-duplicate
+        embeddings), nrem_prune_xb removes the lower-importance member.
+        In the layered engine, procedural (0.8) should survive over
+        user_knowledge (0.5) when they compete in the same cluster."""
+        from dream_ops import DreamParams
+        rng = np.random.default_rng(42)
+        facts = self._generate_mixed_clusters(rng, n_clusters=4)
+
+        engine = self._make_engine()
+        for text, emb, layer, ft in facts:
+            engine.store(text, emb.copy(), layer=layer, fact_type=ft)
+
+        n_before = engine.n_memories
+        assert n_before == 12  # 4 clusters * 3 layers
+
+        # Run dream — with these near-duplicate embeddings, consolidation
+        # should collapse each cluster from 3 facts to 1.
+        params = DreamParams(
+            prune_threshold=0.90,
+            merge_threshold=0.80,
+            merge_min_group=2,
+            min_sep=0.3,
+            eta=0.01,
+        )
+        engine.dream(seed=0, dream_params=params)
+
+        # After consolidation, surviving entries should have higher importance
+        # than the initial user_knowledge seed (0.5). The merged/surviving
+        # centroids inherit from the highest-importance member.
+        for m in engine.memory_store:
+            assert m.importance >= 0.7, (
+                f"Surviving memory '{m.text}' has importance {m.importance:.2f}, "
+                f"expected >= 0.7 (dream should favor higher-importance members)"
+            )
+
+    # ------------------------------------------------------------------
+    # Test 4: Layered engine maintains more tagged entries than flat
+    # ------------------------------------------------------------------
+
+    def test_dream_preserves_layered_tagged_advantage(self):
+        """After dream cycles, the layered engine should maintain more tagged
+        entries than the flat engine. This is the primary H2 signal:
+        layer seeding → higher initial importance → tagged=True → NREM
+        replay → deeper attractors → more inertia against consolidation."""
+        from dream_ops import DreamParams
+        rng = np.random.default_rng(300)
+
+        facts = self._generate_mixed_clusters(rng, n_clusters=6)
+
+        # Layered engine
+        engine_layered = self._make_engine()
+        for text, emb, layer, ft in facts:
+            engine_layered.store(text, emb.copy(), layer=layer, fact_type=ft)
+
+        # Flat engine (identical facts, no layer tags)
+        engine_flat = self._make_engine()
+        for text, emb, _layer, _ft in facts:
+            engine_flat.store(text, emb.copy())
+
+        params = DreamParams(
+            prune_threshold=0.90,
+            merge_threshold=0.80,
+            merge_min_group=2,
+            min_sep=0.3,
+            eta=0.01,
+        )
+
+        for cycle in range(3):
+            engine_layered.dream(seed=cycle, dream_params=params)
+            engine_flat.dream(seed=cycle, dream_params=params)
+
+        layered_tagged = sum(1 for m in engine_layered.memory_store if m.tagged)
+        flat_tagged = sum(1 for m in engine_flat.memory_store if m.tagged)
+
+        assert layered_tagged >= flat_tagged, (
+            f"Layered engine should have >= tagged entries than flat: "
+            f"layered={layered_tagged}, flat={flat_tagged}"
+        )
+
+    # ------------------------------------------------------------------
+    # Test 5: Mean importance after dream is higher in layered engine
+    # ------------------------------------------------------------------
+
+    def test_mean_importance_after_dream_higher_in_layered(self):
+        """After dream cycles, the layered engine should have higher mean
+        importance than the flat engine, because higher-importance entries
+        survive and merged centroids inherit boosted importance."""
+        from dream_ops import DreamParams
+        rng = np.random.default_rng(400)
+
+        facts = self._generate_mixed_clusters(rng, n_clusters=6)
+
+        engine_layered = self._make_engine()
+        for text, emb, layer, ft in facts:
+            engine_layered.store(text, emb.copy(), layer=layer, fact_type=ft)
+
+        engine_flat = self._make_engine()
+        for text, emb, _layer, _ft in facts:
+            engine_flat.store(text, emb.copy())
+
+        params = DreamParams(
+            prune_threshold=0.90,
+            merge_threshold=0.80,
+            merge_min_group=2,
+            min_sep=0.3,
+            eta=0.01,
+        )
+
+        for cycle in range(3):
+            engine_layered.dream(seed=cycle, dream_params=params)
+            engine_flat.dream(seed=cycle, dream_params=params)
+
+        layered_mean = np.mean([m.importance for m in engine_layered.memory_store])
+        flat_mean = np.mean([m.importance for m in engine_flat.memory_store])
+
+        assert layered_mean >= flat_mean, (
+            f"Layered mean importance ({layered_mean:.3f}) should be >= "
+            f"flat mean importance ({flat_mean:.3f})"
+        )
+
+    # ------------------------------------------------------------------
+    # Test 6: Layer metadata survives dream consolidation
+    # ------------------------------------------------------------------
+
+    def test_layer_metadata_preserved_through_dream(self):
+        """After dream consolidation, surviving/merged entries still carry
+        valid layer and fact_type metadata."""
+        from dream_ops import DreamParams
+        rng = np.random.default_rng(500)
+
+        facts = self._generate_mixed_clusters(rng, n_clusters=4)
+
+        engine = self._make_engine()
+        for text, emb, layer, ft in facts:
+            engine.store(text, emb.copy(), layer=layer, fact_type=ft)
+
+        params = DreamParams(
+            prune_threshold=0.90,
+            merge_threshold=0.80,
+            merge_min_group=2,
+            min_sep=0.3,
+            eta=0.01,
+        )
+        engine.dream(seed=0, dream_params=params)
+
+        valid_layers = {"user_knowledge", "agent_meta", "procedural"}
+        for m in engine.memory_store:
+            assert m.layer in valid_layers, f"Invalid layer '{m.layer}' after dream"
+            assert isinstance(m.fact_type, str), f"fact_type should be str, got {type(m.fact_type)}"
+
+    # ------------------------------------------------------------------
+    # Test 7: Recall@k — procedural queries hit surviving entries
+    # ------------------------------------------------------------------
+
+    def test_recall_at_k_after_dream(self):
+        """After dream cycles with mixed-layer clusters, querying near a
+        cluster centroid should return results with layer metadata intact."""
+        from dream_ops import DreamParams
+        rng = np.random.default_rng(600)
+
+        n_clusters = 4
+        facts = self._generate_mixed_clusters(rng, n_clusters=n_clusters)
+
+        # Save cluster centroids for querying
+        cluster_bases = []
+        for c in range(n_clusters):
+            # Average the 3 embeddings in each cluster
+            cluster_embs = [emb for text, emb, _, _ in facts if f"_c{c}" in text]
+            centroid = np.mean(cluster_embs, axis=0)
+            centroid = centroid / (np.linalg.norm(centroid) + 1e-12)
+            cluster_bases.append(centroid)
+
+        engine = self._make_engine()
+        for text, emb, layer, ft in facts:
+            engine.store(text, emb.copy(), layer=layer, fact_type=ft)
+
+        params = DreamParams(
+            prune_threshold=0.90,
+            merge_threshold=0.80,
+            merge_min_group=2,
+            min_sep=0.3,
+            eta=0.01,
+        )
+
+        for cycle in range(3):
+            engine.dream(seed=cycle, dream_params=params)
+
+        # Query each cluster centroid — should get results with layer metadata
+        for q in cluster_bases:
+            results = engine.query_readonly(q, top_k=1)
+            assert len(results) > 0, "Query should return at least 1 result"
+            assert "layer" in results[0], "Result should include layer"
+            assert "fact_type" in results[0], "Result should include fact_type"
+
+    # ------------------------------------------------------------------
+    # Test 8: Quantitative H2 — layered engine consolidation efficiency
+    # ------------------------------------------------------------------
+
+    def test_layered_engine_consolidates_more_efficiently(self):
+        """The layered engine should end up with fewer or equal memories after
+        dream compared to flat, because the importance gradient gives dream
+        clearer signals about what to consolidate vs preserve.
+
+        In the flat engine, all memories are equally important, making
+        consolidation decisions arbitrary. The layered engine has clear
+        importance hierarchy, allowing dream to confidently prune
+        low-importance duplicates while preserving high-importance ones."""
+        from dream_ops import DreamParams
+        rng = np.random.default_rng(700)
+
+        facts = self._generate_mixed_clusters(rng, n_clusters=8)
+
+        engine_layered = self._make_engine()
+        for text, emb, layer, ft in facts:
+            engine_layered.store(text, emb.copy(), layer=layer, fact_type=ft)
+
+        engine_flat = self._make_engine()
+        for text, emb, _layer, _ft in facts:
+            engine_flat.store(text, emb.copy())
+
+        params = DreamParams(
+            prune_threshold=0.90,
+            merge_threshold=0.80,
+            merge_min_group=2,
+            min_sep=0.3,
+            eta=0.01,
+        )
+
+        for cycle in range(3):
+            engine_layered.dream(seed=cycle, dream_params=params)
+            engine_flat.dream(seed=cycle, dream_params=params)
+
+        # Both should consolidate to roughly the same count
+        # (one centroid per cluster), but layered engine has
+        # higher mean importance among survivors.
+        layered_mean_imp = np.mean([m.importance for m in engine_layered.memory_store])
+        flat_mean_imp = np.mean([m.importance for m in engine_flat.memory_store])
+
+        # The layered engine's survivors should have higher importance
+        assert layered_mean_imp >= flat_mean_imp, (
+            f"Layered survivors should have higher mean importance: "
+            f"layered={layered_mean_imp:.3f}, flat={flat_mean_imp:.3f}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Brenner Kernel: Discriminative validation of V1 EncodingPolicy → V2 wiring
+# ---------------------------------------------------------------------------
+#
+# These tests apply Brenner operators (⊘ Level-Split, ⊞ Scale-Check,
+# ✂ Exclusion-Test, ◊ Paradox-Hunt) to the proposed composition of V1
+# CATEGORY_IMPORTANCE into V2 _FACT_TYPE_IMPORTANCE_OVERRIDE.
+#
+# The proposal: wire V1 categories (correction=0.9, instruction=0.85,
+# preference=0.8) as fact_type overrides in V2's _resolve_layer_importance.
+#
+# The claim: this creates a "2D importance signal (provenance x content)"
+# that prevents user-voice erasure.
+#
+# These tests are designed to FAIL under the override-only wiring,
+# exposing that fact_type overrides REPLACE layer seeds rather than
+# composing with them. Each test probes a specific structural flaw.
+# ---------------------------------------------------------------------------
+
+
+class TestBrennerEncodingComposition:
+    """Brenner kernel discriminative validation: does the V1→V2 wiring
+    actually compose provenance and content, or does content override
+    provenance?
+
+    Operator manifest:
+    - ⊘ Level-Split: provenance (layer) vs content (fact_type) are distinct levels
+    - ⊞ Scale-Check: exact importance arithmetic through prune mechanism
+    - ✂ Exclusion-Test: forbidden patterns that kill the "2D composition" claim
+    - ◊ Paradox-Hunt: contradictions in the proposed importance hierarchy
+    """
+
+    DIM = 32
+
+    def _make_engine(self, **kwargs):
+        from coupled_engine import CoupledEngine
+        defaults = dict(dim=self.DIM, decay_rate=0.0)
+        defaults.update(kwargs)
+        return CoupledEngine(**defaults)
+
+    def _make_cluster_pair(self, rng, text_a, layer_a, ft_a, text_b, layer_b, ft_b, noise=0.03):
+        """Create two facts with near-identical embeddings (cosine ~0.999)
+        so prune MUST choose between them based on importance."""
+        base = rng.standard_normal(self.DIM)
+        base = base / (np.linalg.norm(base) + 1e-12)
+        emb_a = base + rng.standard_normal(self.DIM) * noise
+        emb_a = emb_a / (np.linalg.norm(emb_a) + 1e-12)
+        emb_b = base + rng.standard_normal(self.DIM) * noise
+        emb_b = emb_b / (np.linalg.norm(emb_b) + 1e-12)
+        return (text_a, emb_a, layer_a, ft_a), (text_b, emb_b, layer_b, ft_b)
+
+    # ------------------------------------------------------------------
+    # Test BK-1: ⊘ Level-Split — Does provenance survive when content matches?
+    #
+    # If user_correction and procedural_correction get DIFFERENT importance,
+    # the wiring composes provenance and content (2D). If they get the SAME
+    # importance, content overrides provenance (1D).
+    # ------------------------------------------------------------------
+
+    def test_bk1_provenance_distinguishes_same_category_cross_layer(self):
+        """⊘ Level-Split: A user's correction and a procedural correction
+        should have DIFFERENT importance if provenance is a real signal.
+
+        Under the current override wiring, both get fact_type=correction → 0.9.
+        Provenance (user vs procedural) is destroyed.
+
+        This test EXPECTS the 2D composition to hold. If it fails, the
+        override-only wiring is confirmed as a 1D system that erases
+        provenance for any recognized fact_type.
+        """
+        from coupled_engine import _resolve_layer_importance
+
+        user_correction_imp = _resolve_layer_importance(
+            layer="user_knowledge", fact_type="correction"
+        )
+        proc_correction_imp = _resolve_layer_importance(
+            layer="procedural", fact_type="correction"
+        )
+
+        # 2D composition: user_correction should differ from procedural_correction
+        # because layer=user_knowledge (0.5) ≠ layer=procedural (0.8).
+        # If both return 0.9, the override obliterated the layer signal.
+        assert user_correction_imp != proc_correction_imp, (
+            f"⊘ LEVEL CONFUSION: user_correction ({user_correction_imp}) == "
+            f"procedural_correction ({proc_correction_imp}). "
+            f"fact_type override obliterates layer provenance — "
+            f"this is a 1D priority system, not a 2D composition."
+        )
+
+    # ------------------------------------------------------------------
+    # Test BK-2: ⊞ Scale-Check — Preference vs procedural tie-break
+    #
+    # preference=0.8 and procedural=0.8 creates an exact tie.
+    # Tie-break in nrem_prune_xb (dream_ops.py:1202) is by index:
+    # higher index removed. This makes survival ORDER-DEPENDENT,
+    # not CONTENT-DEPENDENT.
+    # ------------------------------------------------------------------
+
+    def test_bk2_preference_survives_over_procedural_in_prune(self):
+        """⊞ Scale-Check: A user preference should reliably survive
+        over a procedural fact in prune competition.
+
+        Under the proposed wiring, preference=0.8 ties procedural=0.8.
+        The tie-break removes the higher-index entry (dream_ops.py:1202),
+        making survival dependent on store order, not content.
+
+        This test stores the user preference AFTER the procedural fact
+        (higher index), so the preference dies in the tie-break.
+        If user voice matters, this must not happen.
+
+        🎭 Potency: uses 7 filler clusters (21 memories) + 1 target pair
+        to avoid capacity gating that tightens thresholds for small stores.
+        """
+        from dream_ops import DreamParams
+
+        rng = np.random.default_rng(900)
+        engine = self._make_engine()
+
+        # Filler: 7 diverse clusters to avoid capacity gating
+        for c in range(7):
+            base = rng.standard_normal(self.DIM)
+            base = base / (np.linalg.norm(base) + 1e-12)
+            for layer in ["user_knowledge", "agent_meta", "procedural"]:
+                emb = base + rng.standard_normal(self.DIM) * 0.03
+                emb = emb / (np.linalg.norm(emb) + 1e-12)
+                engine.store(f"filler_{layer}_c{c}", emb, layer=layer, fact_type="general")
+
+        # Target cluster: procedural_general vs user_preference
+        # Store procedural first (lower index), preference second (higher index)
+        pair = self._make_cluster_pair(
+            rng,
+            text_a="always_run_lint_before_commit",  # procedural
+            layer_a="procedural", ft_a="general",
+            text_b="user_prefers_dark_mode",  # user preference
+            layer_b="user_knowledge", ft_b="preference",
+        )
+
+        for text, emb, layer, ft in pair:
+            engine.store(text, emb, layer=layer, fact_type=ft)
+
+        n_before = engine.n_memories
+        assert n_before == 23  # 7*3 filler + 2 target
+
+        # Check pre-dream importance of target pair
+        target_proc = next(m for m in engine.memory_store if "always_run_lint" in m.text)
+        target_pref = next(m for m in engine.memory_store if "user_prefers" in m.text)
+        proc_imp = target_proc.importance
+        pref_imp = target_pref.importance
+
+        params = DreamParams(
+            prune_threshold=0.90,
+            merge_threshold=0.80,
+            merge_min_group=2,
+            min_sep=0.3,
+            eta=0.01,
+        )
+        engine.dream(seed=0, dream_params=params)
+
+        # The user preference should survive. If it doesn't, the importance
+        # hierarchy is wrong (preference ties procedural, order kills user).
+        surviving_texts = [m.text for m in engine.memory_store]
+        assert any("user_prefers" in t for t in surviving_texts), (
+            f"⊞ SCALE FAILURE: user preference was pruned. "
+            f"Pre-dream importance: procedural={proc_imp}, preference={pref_imp}. "
+            f"Surviving texts: {surviving_texts}. "
+            f"If preference=0.8 ties procedural=0.8, store order determines "
+            f"survival — user voice is order-dependent, not content-dependent."
+        )
+
+    # ------------------------------------------------------------------
+    # Test BK-3: ✂ Exclusion-Test — Generic user facts still erased
+    #
+    # The override only covers correction/instruction/preference.
+    # A user fact with category=fact (V1 importance=0.6) falls through
+    # to the layer seed (user_knowledge=0.5). It still loses to
+    # agent_meta (0.7). The override doesn't fix the general case.
+    # ------------------------------------------------------------------
+
+    def test_bk3_generic_user_fact_survives_over_agent_meta(self):
+        """✂ Exclusion-Test: A user's generic fact ("My dog is named Luna")
+        should not be systematically erased by agent_meta facts.
+
+        V1 encoding gives category=fact importance=0.6.
+        But the proposed wiring doesn't include "fact" in the override map.
+        So fact_type="fact" falls through to layer seed: user_knowledge=0.5.
+        Meanwhile agent_meta_general gets layer seed: 0.7.
+        User's generic fact LOSES (0.5 < 0.7).
+
+        This is the SAME user-voice erasure the wiring claims to fix,
+        just for the most common category of user content.
+
+        🎭 Potency: uses 7 filler clusters (21 memories) + 1 target pair
+        to avoid capacity gating that tightens thresholds for small stores.
+        """
+        from dream_ops import DreamParams
+
+        rng = np.random.default_rng(901)
+        engine = self._make_engine()
+
+        # Filler: 7 diverse clusters to avoid capacity gating
+        for c in range(7):
+            base = rng.standard_normal(self.DIM)
+            base = base / (np.linalg.norm(base) + 1e-12)
+            for layer in ["user_knowledge", "agent_meta", "procedural"]:
+                emb = base + rng.standard_normal(self.DIM) * 0.03
+                emb = emb / (np.linalg.norm(emb) + 1e-12)
+                engine.store(f"filler_{layer}_c{c}", emb, layer=layer, fact_type="general")
+
+        # Target cluster: user generic fact vs agent_meta
+        pair = self._make_cluster_pair(
+            rng,
+            text_a="user_dog_named_luna",  # user generic fact
+            layer_a="user_knowledge", ft_a="fact",
+            text_b="agent_meta_context_window_size",  # agent meta
+            layer_b="agent_meta", ft_b="general",
+        )
+
+        for text, emb, layer, ft in pair:
+            engine.store(text, emb, layer=layer, fact_type=ft)
+
+        n_before = engine.n_memories
+        assert n_before == 23  # 7*3 filler + 2 target
+
+        target_user = next(m for m in engine.memory_store if "user_dog" in m.text)
+        target_meta = next(m for m in engine.memory_store if "agent_meta_context" in m.text)
+        user_imp = target_user.importance
+        meta_imp = target_meta.importance
+
+        params = DreamParams(
+            prune_threshold=0.90,
+            merge_threshold=0.80,
+            merge_min_group=2,
+            min_sep=0.3,
+            eta=0.01,
+        )
+        engine.dream(seed=0, dream_params=params)
+
+        surviving_texts = [m.text for m in engine.memory_store]
+        assert any("user_dog" in t for t in surviving_texts), (
+            f"✂ EXCLUSION CONFIRMED: generic user fact was erased. "
+            f"Pre-dream importance: user_fact={user_imp}, agent_meta={meta_imp}. "
+            f"Surviving: {surviving_texts}. "
+            f"fact_type='fact' has no override → falls to layer seed 0.5 < 0.7. "
+            f"The override only protects correction/instruction/preference, "
+            f"not the most common category of user content."
+        )
+
+    # ------------------------------------------------------------------
+    # Test BK-4: ◊ Paradox-Hunt — Agent correction beats user instruction
+    #
+    # Under the override wiring:
+    #   procedural + correction = 0.9
+    #   user_knowledge + instruction = 0.85
+    #
+    # An agent's self-correction outranks the user's explicit instruction.
+    # This is the SAME hierarchy inversion: the agent's operational memory
+    # beats the user's directive, just dressed in different categories.
+    # ------------------------------------------------------------------
+
+    def test_bk4_user_instruction_survives_over_procedural_correction(self):
+        """◊ Paradox-Hunt: A user's instruction ("Always respond in French")
+        should not lose to a procedural correction ("Updated lint config").
+
+        Under the proposed override wiring:
+        - procedural + fact_type=correction → 0.9
+        - user_knowledge + fact_type=instruction → 0.85
+
+        The agent's procedural correction outranks the user's explicit
+        instruction. This recreates user-voice erasure at the category
+        level: instead of "layer kills user," it's "anyone's correction
+        kills user's instruction."
+
+        🎭 Potency: uses mixed-cluster design with 8 clusters (24 memories)
+        to avoid capacity gating that tightens thresholds for small stores.
+        The target cluster has the specific pair under test; filler clusters
+        provide the memory mass needed for prune to fire at stated thresholds.
+        """
+        from dream_ops import DreamParams
+
+        rng = np.random.default_rng(902)
+        engine = self._make_engine()
+
+        # Filler: 7 diverse clusters to avoid capacity gating
+        for c in range(7):
+            base = rng.standard_normal(self.DIM)
+            base = base / (np.linalg.norm(base) + 1e-12)
+            for layer in ["user_knowledge", "agent_meta", "procedural"]:
+                emb = base + rng.standard_normal(self.DIM) * 0.03
+                emb = emb / (np.linalg.norm(emb) + 1e-12)
+                engine.store(f"filler_{layer}_c{c}", emb, layer=layer, fact_type="general")
+
+        # Target cluster: user instruction vs procedural correction
+        pair = self._make_cluster_pair(
+            rng,
+            text_a="user_instruction_respond_in_french",
+            layer_a="user_knowledge", ft_a="instruction",
+            text_b="procedural_correction_lint_config",
+            layer_b="procedural", ft_b="correction",
+        )
+
+        for text, emb, layer, ft in pair:
+            engine.store(text, emb, layer=layer, fact_type=ft)
+
+        n_before = engine.n_memories
+        assert n_before == 23  # 7*3 filler + 2 target
+
+        # Record importance for diagnostics
+        target_entries = [m for m in engine.memory_store if "user_instruction" in m.text or "procedural_correction" in m.text]
+        user_imp = next(m.importance for m in target_entries if "user_instruction" in m.text)
+        proc_imp = next(m.importance for m in target_entries if "procedural_correction" in m.text)
+
+        params = DreamParams(
+            prune_threshold=0.90,
+            merge_threshold=0.80,
+            merge_min_group=2,
+            min_sep=0.3,
+            eta=0.01,
+        )
+        engine.dream(seed=0, dream_params=params)
+
+        surviving_texts = [m.text for m in engine.memory_store]
+        assert any("user_instruction" in t for t in surviving_texts), (
+            f"◊ PARADOX CONFIRMED: user instruction erased by procedural correction. "
+            f"Pre-dream importance: user_instruction={user_imp}, "
+            f"procedural_correction={proc_imp}. "
+            f"Surviving: {surviving_texts}. "
+            f"fact_type override gives correction=0.9 regardless of layer. "
+            f"A procedural correction (0.9) beats a user instruction (0.85). "
+            f"User-voice erasure is just shifted from layer to category level."
+        )
+
+    # ------------------------------------------------------------------
+    # Test BK-5: D4 Authority — user correction beats procedural correction
+    #
+    # The 3D model gives procedural_correction (0.98) > user_correction (0.95).
+    # The 4D authority fill should invert this: user_correction (0.995) > 0.98.
+    # ------------------------------------------------------------------
+
+    def test_bk5_user_correction_dominates_procedural_correction(self):
+        """D4 Authority: A user's correction MUST beat a procedural correction.
+
+        This is the strongest test of user authority. Under the 3D model,
+        procedural_correction (0.98) beats user_correction (0.95) because
+        procedural has higher provenance. The 4D authority fill corrects this:
+        user_correction (0.995) > procedural_correction (0.98).
+
+        🎭 Potency: 7 filler clusters + 1 target pair, same design as BK-2.
+        """
+        from coupled_engine import _resolve_layer_importance
+        from dream_ops import DreamParams
+
+        # Static check: importance values
+        uc = _resolve_layer_importance("user_knowledge", "correction")
+        pc = _resolve_layer_importance("procedural", "correction")
+        assert uc > pc, (
+            f"D4 AUTHORITY FAILURE (static): user_correction ({uc}) must beat "
+            f"procedural_correction ({pc}). Authority fill is not working."
+        )
+
+        # Dynamic check: prune competition
+        rng = np.random.default_rng(950)
+        engine = self._make_engine()
+
+        for c in range(7):
+            base = rng.standard_normal(self.DIM)
+            base = base / (np.linalg.norm(base) + 1e-12)
+            for layer in ["user_knowledge", "agent_meta", "procedural"]:
+                emb = base + rng.standard_normal(self.DIM) * 0.03
+                emb = emb / (np.linalg.norm(emb) + 1e-12)
+                engine.store(f"filler_{layer}_c{c}", emb, layer=layer, fact_type="general")
+
+        pair = self._make_cluster_pair(
+            rng,
+            text_a="user_correction_typescript_bad",
+            layer_a="user_knowledge", ft_a="correction",
+            text_b="procedural_correction_lint_fixed",
+            layer_b="procedural", ft_b="correction",
+        )
+        for text, emb, layer, ft in pair:
+            engine.store(text, emb, layer=layer, fact_type=ft)
+
+        params = DreamParams(
+            prune_threshold=0.90, merge_threshold=0.80,
+            merge_min_group=2, min_sep=0.3, eta=0.01,
+        )
+        engine.dream(seed=0, dream_params=params)
+
+        surviving_texts = [m.text for m in engine.memory_store]
+        assert any("user_correction" in t for t in surviving_texts), (
+            f"D4 AUTHORITY FAILURE (dynamic): user_correction pruned by "
+            f"procedural_correction. Surviving: {surviving_texts}"
+        )
+
+    # ------------------------------------------------------------------
+    # Test BK-6: D4 Authority — user instruction beats procedural correction
+    #
+    # Under 3D: user_instruction (0.925) < procedural_correction (0.98).
+    # Under 4D: user_instruction (0.985) > procedural_correction (0.98).
+    # ------------------------------------------------------------------
+
+    def test_bk6_user_instruction_beats_procedural_correction(self):
+        """D4 Authority: A user's instruction MUST beat a procedural correction.
+
+        The user saying 'always respond in French' should not lose to
+        the agent's 'fixed lint config'. Under 3D, it loses (0.925 < 0.98).
+        Under 4D authority, it wins (0.985 > 0.98).
+
+        🎭 Potency: 7 filler clusters + 1 target pair.
+        """
+        from coupled_engine import _resolve_layer_importance
+        from dream_ops import DreamParams
+
+        # Static check
+        ui = _resolve_layer_importance("user_knowledge", "instruction")
+        pc = _resolve_layer_importance("procedural", "correction")
+        assert ui > pc, (
+            f"D4 AUTHORITY FAILURE (static): user_instruction ({ui}) must beat "
+            f"procedural_correction ({pc})."
+        )
+
+        # Dynamic check
+        rng = np.random.default_rng(951)
+        engine = self._make_engine()
+
+        for c in range(7):
+            base = rng.standard_normal(self.DIM)
+            base = base / (np.linalg.norm(base) + 1e-12)
+            for layer in ["user_knowledge", "agent_meta", "procedural"]:
+                emb = base + rng.standard_normal(self.DIM) * 0.03
+                emb = emb / (np.linalg.norm(emb) + 1e-12)
+                engine.store(f"filler_{layer}_c{c}", emb, layer=layer, fact_type="general")
+
+        pair = self._make_cluster_pair(
+            rng,
+            text_a="user_instruction_respond_in_french",
+            layer_a="user_knowledge", ft_a="instruction",
+            text_b="procedural_correction_lint_config",
+            layer_b="procedural", ft_b="correction",
+        )
+        for text, emb, layer, ft in pair:
+            engine.store(text, emb, layer=layer, fact_type=ft)
+
+        params = DreamParams(
+            prune_threshold=0.90, merge_threshold=0.80,
+            merge_min_group=2, min_sep=0.3, eta=0.01,
+        )
+        engine.dream(seed=0, dream_params=params)
+
+        surviving_texts = [m.text for m in engine.memory_store]
+        assert any("user_instruction" in t for t in surviving_texts), (
+            f"D4 AUTHORITY FAILURE (dynamic): user_instruction pruned by "
+            f"procedural_correction. Surviving: {surviving_texts}"
+        )

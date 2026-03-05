@@ -98,11 +98,28 @@ _LAYER_IMPORTANCE = {
     "procedural": 0.8,
 }
 
-# Fact-type refinements within a layer. These adjust the layer seed
-# for specific high-value fact types. The fact_type takes precedence
-# over the layer seed to allow fine-grained importance control.
-_FACT_TYPE_IMPORTANCE_OVERRIDE = {
+# D2: Content-category boost factors (from V1 EncodingPolicy CATEGORY_IMPORTANCE).
+# These scale how much of the headroom above the layer seed is filled.
+# A boost of 0.9 fills 90% of headroom; 0.0 fills none.
+# Unrecognized fact_types get 0.0 (no content boost, layer seed only).
+_CATEGORY_BOOST = {
+    "correction": 0.9,
+    "instruction": 0.85,
+    "preference": 0.8,
+    "fact": 0.6,
     "reasoning_chain": 0.75,
+    "reasoning": 0.4,
+}
+
+# D4: Authority fill — user directives get additional headroom fill to
+# guarantee dominance over same-category non-user facts in prune competitions.
+# Authority is about communicative intent: a user CORRECTING the agent carries
+# more force than the agent correcting itself. Only applies to user_knowledge.
+# The fill fraction is applied to headroom remaining AFTER the D1×D2 composition.
+_AUTHORITY_FILL = {
+    "correction": 0.9,     # user_correction: 0.95 → 0.995
+    "instruction": 0.8,    # user_instruction: 0.925 → 0.985
+    "preference": 0.6,     # user_preference: 0.9 → 0.96
 }
 
 
@@ -111,23 +128,39 @@ def _resolve_layer_importance(
     fact_type: str,
     emotional_S_min: float = 0.3,
 ) -> float:
-    """Resolve the base importance for a (layer, fact_type) pair.
+    """Resolve base importance via 4D composition:
+    provenance (D1) × content (D2) × authority (D4).
 
-    Lookup rule:
-    1. If fact_type has an override, use that (e.g. reasoning_chain -> 0.75).
-    2. Else use the layer seed (e.g. procedural -> 0.8).
-    3. Unknown layers fall back to 0.5.
+    D3 (novelty) is applied externally in store() when emotional_tagging=True.
 
-    For layer="user_knowledge", respects emotional_S_min if higher than the
-    layer default (backward compat for callers setting emotional_S_min > 0.5).
+    Composition:
+      step 1: base = layer_seed                        (D1: provenance floor)
+      step 2: imp  = base + boost * (1 - base)         (D2: content fills headroom)
+      step 3: imp += authority_fill * (1 - imp)         (D4: user directives dominate)
+
+    Each dimension fills a fraction of remaining headroom, preserving
+    all previous dimensions as floors. A user_correction gets
+    0.5 → 0.95 → 0.995, while a procedural_correction gets
+    0.8 → 0.98 (no authority). User corrections beat everything.
+
+    Invariants:
+      - importance >= layer_seed (D1 floor never erased)
+      - importance monotone in category_boost (D2)
+      - user directives > same-category non-user facts (D4)
+      - importance ∈ [S_min, 1.0]
     """
-    if fact_type in _FACT_TYPE_IMPORTANCE_OVERRIDE:
-        return _FACT_TYPE_IMPORTANCE_OVERRIDE[fact_type]
     base = _LAYER_IMPORTANCE.get(layer, 0.5)
     # For user_knowledge, respect engine's emotional_S_min if higher
     if layer == "user_knowledge":
         base = max(base, emotional_S_min)
-    return base
+    # D2: content boost fills headroom above layer base
+    boost = _CATEGORY_BOOST.get(fact_type, 0.0)
+    importance = base + boost * (1.0 - base)
+    # D4: authority — user directives fill remaining headroom
+    if layer == "user_knowledge" and fact_type in _AUTHORITY_FILL:
+        fill = _AUTHORITY_FILL[fact_type]
+        importance += fill * (1.0 - importance)
+    return importance
 
 
 class CoupledEngine:
