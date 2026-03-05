@@ -85,3 +85,6 @@ import HermesNLCDM.HybridBridge
 
 -- Phase 14: Dream Convergence Bounds
 import HermesNLCDM.DreamConvergence
+
+-- Phase 15: 4D Importance Composition — Authority Monotonicity
+import HermesNLCDM.AuthorityMonotonicity
