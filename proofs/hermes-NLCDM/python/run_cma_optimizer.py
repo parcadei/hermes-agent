@@ -36,7 +36,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def make_objective(dataset, use_llm_judge: bool = True):
+def make_objective(dataset, use_llm_judge: bool = True, capacity_gating: bool = False):
     """Create an objective function that evaluates dream params on the longitudinal eval.
 
     The returned callable matches the ObjectiveFunction protocol:
@@ -71,6 +71,7 @@ def make_objective(dataset, use_llm_judge: bool = True):
             dataset=dataset,
             dream_idle_threshold=dream_idle_threshold,
             use_llm_judge=use_llm_judge,
+            capacity_gating=capacity_gating,
         )
 
         t0 = time.time()
@@ -100,6 +101,7 @@ def run_cma(
     sigma0: float = 0.5,
     seed: int = 42,
     use_llm_judge: bool = True,
+    capacity_gating: bool = False,
     output_path: str | None = None,
 ) -> dict:
     """Run CMA-ES optimization and return results."""
@@ -111,7 +113,7 @@ def run_cma(
         len(dataset.sessions), len(dataset.questions),
     )
 
-    objective = make_objective(dataset, use_llm_judge=use_llm_judge)
+    objective = make_objective(dataset, use_llm_judge=use_llm_judge, capacity_gating=capacity_gating)
 
     # Grid sweep showed best at threshold ~0-5. Start CMA-ES near threshold=2.
     # Use default DreamParams as the starting point for other dimensions.
@@ -268,6 +270,8 @@ if __name__ == "__main__":
                         help="RNG seed (default: 42)")
     parser.add_argument("--no-llm-judge", action="store_true",
                         help="Use SubEM only (no OpenRouter API calls)")
+    parser.add_argument("--capacity-gating", action="store_true",
+                        help="Enable capacity-gated dreaming (Lean formula)")
     parser.add_argument("--output", type=str, default="output/cma_results.json",
                         help="Path to save results JSON")
     args = parser.parse_args()
@@ -278,5 +282,6 @@ if __name__ == "__main__":
         sigma0=args.sigma0,
         seed=args.seed,
         use_llm_judge=not args.no_llm_judge,
+        capacity_gating=args.capacity_gating,
         output_path=args.output,
     )
