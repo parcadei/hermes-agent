@@ -54,6 +54,7 @@ class DreamParams:
     merge_min_group: int = 3  # Minimum group size for merging
     n_probes: int = 200  # REM unlearn probe count
     separation_rate: float = 0.02  # REM unlearn separation rate
+    bridge_threshold: float = 0.3  # REM cross-domain bridge detection tau (BridgeFormation.lean)
 
     def __post_init__(self):
         self.validate()
@@ -72,6 +73,10 @@ class DreamParams:
             raise ValueError(
                 f"Lean bound violated: need 0 < merge ({self.merge_threshold}) "
                 f"< prune ({self.prune_threshold}) <= 1"
+            )
+        if not (0 < self.bridge_threshold <= 1):
+            raise ValueError(
+                f"Need 0 < bridge_threshold ({self.bridge_threshold}) <= 1"
             )
 
 
@@ -1364,24 +1369,35 @@ def rem_explore_cross_domain_xb(
     labels_or_clusters: np.ndarray,
     n_probes: int = 100,
     rng: np.random.Generator | None = None,
+    bridge_threshold: float = 0.3,
 ) -> list[tuple[int, int, float]]:
     """REM cross-domain exploration: discover associations across clusters.
 
-    Implements PGO wave simulation (Lewis & Durrant 2011). During REM sleep,
-    PGO waves activate patterns across unrelated memory domains, enabling
-    creative associations. This function explicitly samples cross-cluster
-    pairs and measures structural similarity via perturbation response
-    correlation.
+    Uses centroid bridge detection (BridgeFormation.lean Phase 8). A pattern
+    is a "bridge" if it has cosine similarity >= tau to the centroid of a
+    cluster it does NOT belong to. Bridge patterns create cross-domain
+    association edges connecting their own cluster to the foreign cluster.
 
-    Algorithm:
-        1. For each probe, sample two distinct clusters and one pattern each.
-        2. Generate K random perturbation vectors.
-        3. For each perturbation, compute similarity-vector responses for
-           both patterns against the full pattern store.
-        4. Compute Pearson correlation of response vectors across probes.
-        5. Record pairs with |correlation| > significance threshold (0.3).
+    Algorithm (Lean-aligned, two-phase):
+        1. Derive core clusters using a tight threshold (0.7) so that bridge
+           patterns (which straddle subspaces) don't merge all clusters into
+           one connected component. Standard 0.5 threshold fails because
+           bridges have cosine ~0.6 to both domains.
+        2. Compute centroid for each core cluster (>= 2 members).
+        3. For each pattern, compute cosine to every OTHER cluster's centroid.
+        4. If cosine >= bridge_threshold (tau), the pattern is a bridge
+           candidate for that foreign cluster.
+        5. For each bridge candidate, create association edges between the
+           bridge and the nearest patterns in the foreign cluster.
         6. Deduplicate by (min(i,j), max(i,j)), keeping max similarity.
         7. Sort by similarity descending.
+
+    Lean proofs:
+        - BridgeFormation.lean:126-154 centroid_creates_two_bridges:
+          centroids with alignment >= tau to both domains create >= 2 bridges
+        - BridgeFormation.lean:200-206 cross_domain_bridge:
+          K traces with similarity >= sigma to both domains =>
+          centroid preserves alignment to both
 
     Contracts:
         X1: All pairs are cross-cluster
@@ -1393,27 +1409,32 @@ def rem_explore_cross_domain_xb(
 
     Args:
         patterns: (N, d) unit vectors (not mutated)
-        labels_or_clusters: (N,) integer cluster assignments
-        n_probes: number of cross-domain probe iterations
-        rng: random number generator for reproducibility
+        labels_or_clusters: (N,) integer cluster assignments (used as hint;
+            re-clustered internally with tight threshold for bridge detection)
+        n_probes: unused (kept for API compatibility)
+        rng: unused (kept for API compatibility)
+        bridge_threshold: tau — minimum cosine to foreign centroid for bridge
 
     Returns:
         List of (idx_i, idx_j, similarity_score) sorted by score descending.
     """
-    if rng is None:
-        rng = np.random.default_rng()
-
     N = patterns.shape[0]
     if N <= 1:
         return []
 
-    labels = np.asarray(labels_or_clusters)
+    # Re-cluster with tight threshold for bridge detection.
+    # Standard threshold (0.5) merges everything when bridge patterns exist
+    # because bridges have cosine ~0.6 to both domains, creating one component.
+    # A tighter threshold (0.7) separates core domain clusters from bridges.
+    labels = _assign_clusters(patterns, threshold=0.7)
     unique_clusters = np.unique(labels)
 
+    # If tight clustering still yields only 1 cluster, try even tighter
     if len(unique_clusters) < 2:
-        return []
+        labels = _assign_clusters(patterns, threshold=0.85)
+        unique_clusters = np.unique(labels)
 
-    if n_probes <= 0:
+    if len(unique_clusters) < 2:
         return []
 
     # Build cluster-to-indices mapping
@@ -1424,64 +1445,63 @@ def rem_explore_cross_domain_xb(
             cluster_indices[c] = []
         cluster_indices[c].append(idx)
 
-    cluster_ids = list(cluster_indices.keys())
-    K = 10  # number of perturbation vectors per probe
-    epsilon = 0.01  # perturbation scale
+    # Compute normalized centroids for clusters with >= 2 members
+    centroids: dict[int, np.ndarray] = {}
+    for c, indices in cluster_indices.items():
+        if len(indices) < 2:
+            continue
+        centroid = patterns[indices].mean(axis=0)
+        norm = np.linalg.norm(centroid)
+        if norm > 1e-12:
+            centroid = centroid / norm
+        centroids[c] = centroid
+
+    if len(centroids) < 2:
+        # Need at least 2 clusters with meaningful centroids
+        # Fall back: include singleton clusters too
+        for c, indices in cluster_indices.items():
+            if c not in centroids:
+                centroid = patterns[indices].mean(axis=0)
+                norm = np.linalg.norm(centroid)
+                if norm > 1e-12:
+                    centroid = centroid / norm
+                centroids[c] = centroid
+
+    if len(centroids) < 2:
+        return []
+
+    centroid_cluster_ids = list(centroids.keys())
 
     # Accumulate pair similarities: key = (min_idx, max_idx) -> max sim
     pair_best: dict[tuple[int, int], float] = {}
 
-    for _probe in range(n_probes):
-        # Sample two distinct clusters
-        c1_idx, c2_idx = rng.choice(len(cluster_ids), size=2, replace=False)
-        c1, c2 = cluster_ids[c1_idx], cluster_ids[c2_idx]
+    # For each pattern, check alignment to foreign cluster centroids
+    for idx in range(N):
+        own_cluster = int(labels[idx])
+        pattern = patterns[idx]
 
-        # Sample one pattern from each cluster
-        i = int(rng.choice(cluster_indices[c1]))
-        j = int(rng.choice(cluster_indices[c2]))
+        for foreign_cluster in centroid_cluster_ids:
+            if foreign_cluster == own_cluster:
+                continue
 
-        if i == j:
-            continue
+            # Check cosine similarity to foreign centroid
+            cos_to_foreign = float(pattern @ centroids[foreign_cluster])
 
-        # Generate K perturbation vectors and compute response correlation
-        xi = patterns[i]
-        xj = patterns[j]
+            if cos_to_foreign < bridge_threshold:
+                continue
 
-        # Batch all K perturbations as matrix operations
-        deltas = rng.standard_normal((K, patterns.shape[1]))
-        deltas /= np.linalg.norm(deltas, axis=1, keepdims=True)
-
-        qi_batch = xi[np.newaxis, :] + epsilon * deltas  # (K, d)
-        qi_norms = np.linalg.norm(qi_batch, axis=1, keepdims=True)
-        qi_batch = np.where(qi_norms > 1e-12, qi_batch / qi_norms, qi_batch)
-
-        qj_batch = xj[np.newaxis, :] + epsilon * deltas  # (K, d)
-        qj_norms = np.linalg.norm(qj_batch, axis=1, keepdims=True)
-        qj_batch = np.where(qj_norms > 1e-12, qj_batch / qj_norms, qj_batch)
-
-        # 2 matmuls instead of 2*K
-        ri_stack = gpu_ops.batch_matmul(patterns, qi_batch.T).T  # (K, N)
-        rj_stack = gpu_ops.batch_matmul(patterns, qj_batch.T).T  # (K, N)
-
-        # Flatten and compute Pearson correlation across all K*N values
-        ri_flat = ri_stack.ravel()
-        rj_flat = rj_stack.ravel()
-
-        # Pearson correlation
-        ri_centered = ri_flat - ri_flat.mean()
-        rj_centered = rj_flat - rj_flat.mean()
-        denom = np.sqrt(np.sum(ri_centered**2) * np.sum(rj_centered**2))
-        if denom < 1e-12:
-            continue
-        corr = float(np.sum(ri_centered * rj_centered) / denom)
-
-        # Clamp to [0, 1] (negative correlations are not associations)
-        similarity = max(0.0, min(corr, 1.0))
-
-        if similarity > 0.3:  # significance threshold
-            key = (min(i, j), max(i, j))
-            if key not in pair_best or similarity > pair_best[key]:
-                pair_best[key] = similarity
+            # This pattern is a bridge to the foreign cluster.
+            # Create association edges: bridge <-> each foreign cluster member
+            for foreign_idx in cluster_indices[foreign_cluster]:
+                if foreign_idx == idx:
+                    continue
+                similarity = float(pattern @ patterns[foreign_idx])
+                # Clamp to [0, 1]
+                similarity = max(0.0, min(similarity, 1.0))
+                if similarity > 0:
+                    key = (min(idx, foreign_idx), max(idx, foreign_idx))
+                    if key not in pair_best or similarity > pair_best[key]:
+                        pair_best[key] = similarity
 
     # Build result list
     associations = [(k[0], k[1], v) for k, v in pair_best.items()]
@@ -1616,6 +1636,7 @@ def dream_cycle_v2(
     seed: int | None = None,
     merge_percentile: float = 70.0,
     prune_percentile: float = 90.0,
+    bridge_threshold: float = 0.3,
 ) -> DreamReport:
     """Full dream cycle v2 — corrected pipeline with adaptive thresholds.
 
@@ -1821,6 +1842,7 @@ def dream_cycle_v2(
         labels_out,
         n_probes=max(N_out, 50),
         rng=rng,
+        bridge_threshold=bridge_threshold,
     )
 
     # ---------------------------------------------------------------
@@ -2034,6 +2056,7 @@ def dream_cycle_xb(
         labels_out,
         n_probes=max(N_out, 50),
         rng=rng,
+        bridge_threshold=params.bridge_threshold,
     )
 
     return DreamReport(

@@ -5947,42 +5947,34 @@ class TestCrossDomainDiscriminative:
             )
 
     # ------------------------------------------------------------------
-    # Test 6: Dream cross-domain correlation limitation
+    # Test 6: Dream cross-domain bridge detection
     #
-    # ⌂ Materialize: "rem_explore_cross_domain_xb uses Pearson
-    #   correlation over flattened K×N response vectors. This is
-    #   dominated by the fixed similarity structure (patterns @ xi),
-    #   not the perturbation delta. For patterns in different clusters,
-    #   the fixed responses are anti-correlated (X has high similarity
-    #   to X-cluster, low to Y-cluster; Y is the reverse). Dream
-    #   cannot bridge truly orthogonal domains."
+    # ⌂ Materialize: "rem_explore_cross_domain_xb uses centroid bridge
+    #   detection (BridgeFormation.lean Phase 8). Bridge patterns with
+    #   alignment to both domain centroids create cross-domain association
+    #   edges. This replaces the broken perturbation-response correlation
+    #   approach (proven equivalent to cosine in PerturbationResponse.lean)."
     #
     # ✂ Exclusion:
-    #   - Dream produces ONLY within-cluster associations (positive
-    #     Pearson correlation = patterns in same neighborhood)
-    #   - NO cross-cluster associations (negative correlation)
-    #   - This is a structural property of the algorithm, not a
-    #     parameter tuning issue
+    #   - Dream produces cross-cluster associations via bridge patterns
+    #   - Bridge patterns have cosine >= tau to foreign cluster centroids
+    #   - Without bridge patterns, no cross-domain associations
     # ------------------------------------------------------------------
 
-    def test_dream_xdom_correlation_limitation(self):
-        """Documents that rem_explore_cross_domain_xb cannot produce
-        genuine cross-domain associations because the Pearson correlation
-        of perturbation responses is dominated by the fixed similarity
-        structure.
+    def test_dream_xdom_bridge_detection(self):
+        """Verifies that rem_explore_cross_domain_xb discovers cross-domain
+        associations via bridge patterns that span orthogonal subspaces.
 
-        For patterns p in cluster X and q in cluster Y:
-          response_p = [sim(p, x1), sim(p, x2), ..., sim(p, xN)]
-          response_q = [sim(q, x1), sim(q, x2), ..., sim(q, xN)]
-        These are anti-correlated: p is similar to X-patterns, q to
-        Y-patterns. The perturbation (epsilon=0.01) is 100x too weak
-        to overcome this fixed structure.
+        Bridge detection algorithm (BridgeFormation.lean):
+          1. Re-cluster with tight threshold to separate core domains
+          2. Compute centroids per cluster
+          3. Patterns with cosine >= tau to foreign centroid = bridges
+          4. Bridges create cross-domain association edges
 
-        Dream DOES produce within-cluster associations (same-cluster
-        patterns have positively correlated response vectors).
-
-        This test documents this structural ceiling and verifies that
-        dream's association count is always within-cluster only."""
+        Previously this test documented a limitation: the old perturbation-
+        response correlation approach was proven equivalent to cosine
+        similarity (PerturbationResponse.lean), making it unable to bridge
+        orthogonal domains. The redesigned algorithm fixes this."""
         engine = self._make_engine(beta=5.0)
 
         # Domain A (dims 0-7): 5 patterns
@@ -6020,41 +6012,41 @@ class TestCrossDomainDiscriminative:
         dream_result = engine.dream(seed=42)
         associations = dream_result.get("associations", [])
 
-        # Dream SHOULD produce within-cluster associations
-        # (A patterns are mutually similar, B patterns are mutually similar)
+        # Dream SHOULD produce associations (both within-cluster and cross-domain)
         assert len(associations) > 0, (
-            "Dream should produce at least within-cluster associations"
+            "Dream should produce associations via bridge detection"
         )
 
-        # Verify NO cross-cluster associations exist:
-        # With 12 patterns: 0-4=A, 5-9=B, 10-11=bridge
-        # After dream (prune/merge), indices may shift. But associations
-        # should all be within-cluster (both indices from same domain).
-        # We verify the stored co-retrieval edges instead.
+        # Classify surviving patterns by domain
         a_indices = set()
         b_indices = set()
+        bridge_indices = set()
         for i, m in enumerate(engine.memory_store):
-            if "Dream-A" in m.text or "bridge" in m.text:
+            if "Dream-A" in m.text:
                 a_indices.add(i)
             elif "Dream-B" in m.text:
                 b_indices.add(i)
+            elif "bridge" in m.text:
+                bridge_indices.add(i)
 
-        # Check for cross-domain co-retrieval edges
-        cross_domain_edges = 0
-        for idx in a_indices:
-            for nbr in engine._co_retrieval.get(idx, {}):
-                if nbr in b_indices:
-                    cross_domain_edges += 1
-        for idx in b_indices:
-            for nbr in engine._co_retrieval.get(idx, {}):
-                if nbr in a_indices:
-                    cross_domain_edges += 1
+        # Key assertion: cross-domain associations should exist.
+        # Bridge patterns connect A and B domains.
+        cross_domain_assocs = 0
+        for idx_i, idx_j, _sim in associations:
+            i_domain = ("A" if idx_i in a_indices else
+                        "B" if idx_i in b_indices else
+                        "X" if idx_i in bridge_indices else "?")
+            j_domain = ("A" if idx_j in a_indices else
+                        "B" if idx_j in b_indices else
+                        "X" if idx_j in bridge_indices else "?")
+            if i_domain != j_domain:
+                cross_domain_assocs += 1
 
-        # The structural finding: no cross-domain edges from dream
-        if cross_domain_edges == 0:
-            pass  # Expected: Pearson correlation is negative across clusters
-        else:
-            pass  # Dream found cross-domain edges (unexpected but welcome)
+        assert cross_domain_assocs > 0, (
+            f"Dream should produce cross-domain associations via bridge detection. "
+            f"Got {len(associations)} associations, all within-domain. "
+            f"A: {a_indices}, B: {b_indices}, Bridge: {bridge_indices}"
+        )
 
     # ------------------------------------------------------------------
     # Test 7: PPR + Hopfield complementary cross-domain coverage
@@ -6195,3 +6187,104 @@ class TestCrossDomainDiscriminative:
             pass  # Combined finds more than any single mechanism
         elif len(combined_xdom) == max_single and len(ppr_xdom) > 0 and len(assoc_xdom) > 0:
             pass  # Both contribute (overlapping coverage)
+
+    # ------------------------------------------------------------------
+    # Test 8: Dream bridge detection via centroid alignment
+    #
+    # ⌂ Materialize: "After redesigning rem_explore_cross_domain_xb to
+    #   use BridgeFormation.lean's centroid bridge detection, dream should
+    #   discover cross-domain associations when bridge patterns exist
+    #   that span both orthogonal subspaces."
+    #
+    # ✂ Exclusion:
+    #   - Bridge patterns have cosine >= tau to BOTH cluster centroids
+    #   - Dream associations list includes cross-cluster pairs
+    #   - Without bridges, no cross-domain associations produced
+    # ------------------------------------------------------------------
+
+    def test_dream_bridge_detection(self):
+        """Dream discovers cross-domain associations via bridge patterns
+        that have high alignment to both cluster centroids.
+
+        Algorithm (BridgeFormation.lean):
+          1. Cluster patterns → compute centroids
+          2. For each pattern, check cosine to OTHER cluster centroids
+          3. Patterns with cosine >= tau to both own and other centroid
+             are bridge candidates
+          4. Bridge candidates generate cross-domain association edges
+
+        This replaces the broken perturbation-response correlation approach
+        (which equals cosine similarity — Lean-proven in PerturbationResponse.lean)."""
+        engine = self._make_engine(beta=5.0)
+
+        # Domain A (dims 0-7): 4 tightly-clustered patterns
+        a_patterns = [
+            (self._unit([0, 1, 2, 3]), "BridgeTest-A1: gradient descent"),
+            (self._unit([1, 2, 3, 4]), "BridgeTest-A2: backpropagation"),
+            (self._unit([0, 1, 3, 4]), "BridgeTest-A3: learning rates"),
+            (self._unit([0, 2, 3, 4]), "BridgeTest-A4: weight updates"),
+        ]
+
+        # Domain B (dims 16-23): 4 tightly-clustered patterns
+        b_patterns = [
+            (self._unit([16, 17, 18, 19]), "BridgeTest-B1: synaptic plasticity"),
+            (self._unit([17, 18, 19, 20]), "BridgeTest-B2: dendritic spikes"),
+            (self._unit([16, 17, 19, 20]), "BridgeTest-B3: neural oscillations"),
+            (self._unit([16, 18, 19, 20]), "BridgeTest-B4: hebbian learning"),
+        ]
+
+        # Bridge patterns: components in BOTH subspaces
+        # These should have nonzero cosine to both cluster centroids
+        bridge_patterns = [
+            (self._unit([0, 1, 2, 16, 17, 18]),
+             "BridgeTest-X1: optimization as neural adaptation"),
+            (self._unit([2, 3, 4, 18, 19, 20]),
+             "BridgeTest-X2: gradient signals in biological networks"),
+        ]
+
+        all_patterns = a_patterns + b_patterns + bridge_patterns
+        for emb, text in all_patterns:
+            engine.store(text=text, embedding=emb, importance=0.7,
+                         recency=1.0, layer="user_knowledge", fact_type="fact")
+
+        # Run dream
+        dream_result = engine.dream(seed=42)
+        associations = dream_result.get("associations", [])
+
+        # Verify associations exist
+        assert len(associations) > 0, (
+            "Dream should produce associations"
+        )
+
+        # Key assertion: at least one association must be cross-domain.
+        # After dream, identify which surviving patterns belong to which domain.
+        a_indices = set()
+        b_indices = set()
+        bridge_indices = set()
+        for i, m in enumerate(engine.memory_store):
+            if "BridgeTest-A" in m.text:
+                a_indices.add(i)
+            elif "BridgeTest-B" in m.text:
+                b_indices.add(i)
+            elif "BridgeTest-X" in m.text:
+                bridge_indices.add(i)
+
+        # Cross-domain associations: pairs where one index is in A (or bridge)
+        # and the other is in B (or bridge), excluding pure within-cluster pairs
+        cross_domain_assocs = []
+        for idx_i, idx_j, sim in associations:
+            i_domain = ("A" if idx_i in a_indices else
+                        "B" if idx_i in b_indices else
+                        "X" if idx_i in bridge_indices else "?")
+            j_domain = ("A" if idx_j in a_indices else
+                        "B" if idx_j in b_indices else
+                        "X" if idx_j in bridge_indices else "?")
+            if i_domain != j_domain:
+                cross_domain_assocs.append((idx_i, idx_j, sim, i_domain, j_domain))
+
+        assert len(cross_domain_assocs) > 0, (
+            f"Dream should produce cross-domain associations via bridge detection. "
+            f"Got {len(associations)} associations, all within-cluster. "
+            f"A indices: {a_indices}, B indices: {b_indices}, "
+            f"Bridge indices: {bridge_indices}"
+        )
