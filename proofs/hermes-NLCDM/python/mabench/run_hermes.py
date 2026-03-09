@@ -8,8 +8,10 @@ Usage (from hermes-agent root):
 Reuses MABench data loading and metrics, substitutes HermesMemoryAgent for AgentWrapper.
 """
 
+import hashlib
 import json
 import os
+import pickle
 import time
 from argparse import ArgumentParser
 from collections import defaultdict
@@ -155,7 +157,163 @@ def parse_args():
         "--probes_per_session", type=int, default=3,
         help="Number of cross-domain probes per firing session (default: 3)",
     )
+    parser.add_argument("--triadic", action="store_true",
+                        help="Enable triadic memory for structural recall via Overmann 3D tensor")
+    parser.add_argument(
+        "--triadic_n", type=int, default=1000,
+        help="Triadic memory dimension n (default: 1000)",
+    )
+    parser.add_argument(
+        "--triadic_p", type=int, default=10,
+        help="Triadic memory sparsity p (default: 10)",
+    )
+    parser.add_argument(
+        "--triadic_expand_k", type=int, default=5,
+        help="Triadic expansion top-k (default: 5)",
+    )
+    parser.add_argument(
+        "--decompose_query", action="store_true",
+        help="Enable multi-hop query decomposition via LLM",
+    )
+    parser.add_argument(
+        "--decompose_max_hops", type=int, default=3,
+        help="Maximum sub-queries for decomposition (default: 3)",
+    )
+    parser.add_argument("--no_cache", action="store_true",
+                        help="Disable ingest caching (always ingest fresh)")
     return parser.parse_args()
+
+
+def _cache_key(dataset_config: dict, chunk_size: int) -> str:
+    """Deterministic cache key from dataset config + chunk size."""
+    key_data = json.dumps({
+        "dataset": dataset_config.get("dataset"),
+        "sub_dataset": dataset_config.get("sub_dataset"),
+        "chunk_size": chunk_size,
+        "data_path": dataset_config.get("data_path"),
+    }, sort_keys=True)
+    return hashlib.sha256(key_data.encode()).hexdigest()[:16]
+
+
+def _cache_dir(dataset_config: dict, chunk_size: int) -> Path:
+    """Return the cache directory for a given dataset config."""
+    key = _cache_key(dataset_config, chunk_size)
+    sub = dataset_config.get("sub_dataset", "unknown")
+    return _NLCDM_PYTHON / "output" / "ingest_cache" / f"{sub}_{key}"
+
+
+def _save_ingest_cache(
+    cache_path: Path,
+    context_idx: int,
+    agent,
+) -> None:
+    """Save agent state after ingestion for a single context."""
+    ctx_dir = cache_path / f"context_{context_idx}"
+    ctx_dir.mkdir(parents=True, exist_ok=True)
+
+    # Coupled engine: memory_store + graph structures
+    ce = agent.coupled_engine
+    with open(ctx_dir / "coupled_engine.pkl", "wb") as f:
+        pickle.dump({
+            "memory_store": ce.memory_store,
+            "co_occurrence": getattr(ce, "_co_occurrence", None),
+            "co_retrieval": getattr(ce, "_co_retrieval", None),
+            "W_temporal": getattr(ce, "_W_temporal", None),
+            "session_buffer": getattr(ce, "_session_buffer", []),
+            "session_indices": getattr(ce, "_session_indices", []),
+        }, f)
+
+    # Triadic: save text_to_triples for reconstruction (NOT the tensor)
+    triadic = getattr(agent, "_triadic", None)
+    if triadic is not None:
+        with open(ctx_dir / "triadic.pkl", "wb") as f:
+            pickle.dump({
+                "text_to_triples": triadic._text_to_triples,
+                "n": triadic.n,
+                "p": triadic.p,
+            }, f)
+
+    # V1 orchestrator memories
+    with open(ctx_dir / "orchestrator.pkl", "wb") as f:
+        pickle.dump(agent.orchestrator._memories, f)
+
+    # Store count
+    with open(ctx_dir / "meta.pkl", "wb") as f:
+        pickle.dump({"store_count": agent._store_count}, f)
+
+
+def _load_ingest_cache(
+    cache_path: Path,
+    context_idx: int,
+    agent,
+    enable_triadic: bool,
+) -> bool:
+    """Load cached ingest state into agent. Returns True if successful."""
+    ctx_dir = cache_path / f"context_{context_idx}"
+    ce_path = ctx_dir / "coupled_engine.pkl"
+    if not ce_path.exists():
+        return False
+
+    # Coupled engine
+    with open(ce_path, "rb") as f:
+        ce_data = pickle.load(f)
+    agent.coupled_engine.memory_store = ce_data["memory_store"]
+    if ce_data.get("co_occurrence") is not None:
+        agent.coupled_engine._co_occurrence = ce_data["co_occurrence"]
+    if ce_data.get("co_retrieval") is not None:
+        agent.coupled_engine._co_retrieval = ce_data["co_retrieval"]
+    if ce_data.get("W_temporal") is not None:
+        agent.coupled_engine._W_temporal = ce_data["W_temporal"]
+    if ce_data.get("session_buffer"):
+        agent.coupled_engine._session_buffer = ce_data["session_buffer"]
+    if ce_data.get("session_indices"):
+        agent.coupled_engine._session_indices = ce_data["session_indices"]
+    if hasattr(agent.coupled_engine, "_invalidate_cache"):
+        agent.coupled_engine._invalidate_cache()
+
+    # Rebuild FAISS index from loaded embeddings
+    entries = agent.coupled_engine.memory_store
+    if entries:
+        import faiss
+        dim = len(entries[0].embedding)
+        index = faiss.IndexFlatIP(dim)
+        embs = np.array([e.embedding for e in entries], dtype=np.float32)
+        norms = np.linalg.norm(embs, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        embs = embs / norms
+        index.add(embs)
+        agent.coupled_engine._faiss_index = index
+
+    # Triadic: rebuild from text_to_triples (not raw tensor)
+    tri_path = ctx_dir / "triadic.pkl"
+    if enable_triadic and tri_path.exists():
+        with open(tri_path, "rb") as f:
+            tri_data = pickle.load(f)
+        from mabench.triadic_memory import TriadicMemory
+        triadic = TriadicMemory(
+            n=tri_data.get("n", 1000), p=tri_data.get("p", 10),
+        )
+        for text, triples in tri_data["text_to_triples"].items():
+            triadic.store_fact(text, [tuple(t) for t in triples])
+        agent._triadic = triadic
+
+    # V1 orchestrator
+    orch_path = ctx_dir / "orchestrator.pkl"
+    if orch_path.exists():
+        with open(orch_path, "rb") as f:
+            agent.orchestrator._memories = pickle.load(f)
+        if agent.orchestrator._memories:
+            max_ct = max(m.creation_time for m in agent.orchestrator._memories)
+            agent.orchestrator._next_time = max_ct + 1.0
+
+    # Meta
+    meta_path = ctx_dir / "meta.pkl"
+    if meta_path.exists():
+        with open(meta_path, "rb") as f:
+            meta = pickle.load(f)
+        agent._store_count = meta["store_count"]
+
+    return True
 
 
 def main():
@@ -221,6 +379,10 @@ def main():
             print(f"Retrieval: PPR (weight={args.ppr_weight}, damping={args.ppr_damping})")
         else:
             print(f"Retrieval: cosine (baseline)")
+        if args.triadic:
+            print(f"Triadic retrieval: True (n={args.triadic_n}, p={args.triadic_p}, expand_k={args.triadic_expand_k})")
+        if args.decompose_query:
+            print(f"Query decomposition: True (max_hops={args.decompose_max_hops})")
     print()
 
     # Load data
@@ -268,7 +430,21 @@ def main():
             coretrieval_min_count=getattr(args, 'coretrieval_min_count', 2.0),
             transfer_retrieval=args.transfer,
             transfer_k=args.transfer_k if args.transfer_k > 0 else None,
+            triadic_retrieval=args.triadic,
+            triadic_n=args.triadic_n,
+            triadic_p=args.triadic_p,
+            triadic_expand_k=args.triadic_expand_k,
+            decompose_query=args.decompose_query,
+            decompose_max_hops=args.decompose_max_hops,
         )
+
+    # Ingest cache setup
+    chunk_size = dataset_config.get("chunk_size", 0)
+    cache_path = _cache_dir(dataset_config, chunk_size)
+    use_cache = not args.fullpass and not args.no_cache
+
+    if use_cache:
+        print(f"Ingest cache: {cache_path}")
 
     # Run evaluation
     metrics: dict[str, list] = defaultdict(list)
@@ -290,12 +466,27 @@ def main():
         else:
             # Reset agent for each new context
             agent.reset()
-            # Memorize all chunks for this context
-            print(f"\n--- Context {context_idx}: memorizing {len(chunks)} chunks ---")
-            for chunk_idx, chunk in enumerate(tqdm(chunks, desc="Memorizing", leave=False)):
-                agent.send_message(chunk, memorizing=True)
-            # Persist embedding cache after memorization
-            agent._scorer.save_disk_cache()
+
+            # Try loading from cache first
+            if use_cache and _load_ingest_cache(
+                cache_path, context_idx, agent, args.triadic,
+            ):
+                n_mem = len(agent.coupled_engine.memory_store)
+                tri_info = ""
+                if getattr(agent, "_triadic", None) is not None:
+                    tri_info = f", triadic={agent._triadic._n_facts_with_triples} facts"
+                print(f"\n--- Context {context_idx}: loaded from cache ({n_mem} memories{tri_info}) ---")
+            else:
+                # Fresh ingest
+                print(f"\n--- Context {context_idx}: memorizing {len(chunks)} chunks ---")
+                for chunk_idx, chunk in enumerate(tqdm(chunks, desc="Memorizing", leave=False)):
+                    agent.send_message(chunk, memorizing=True)
+                # Persist embedding cache after memorization
+                agent._scorer.save_disk_cache()
+                # Save ingest cache for future runs
+                if use_cache:
+                    _save_ingest_cache(cache_path, context_idx, agent)
+                    print(f"    Cached ingest to {cache_path / f'context_{context_idx}'}")
 
         # Query
         print(f"    Querying {len(qa_pairs)} questions...")
