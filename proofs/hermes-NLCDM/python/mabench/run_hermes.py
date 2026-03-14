@@ -216,6 +216,11 @@ def parse_args():
                              "(flag high-similarity chunks as SUPERSEDED/CURRENT)")
     parser.add_argument("--contradiction_sim_threshold", type=float, default=0.85,
                         help="Cosine similarity threshold for contradiction detection (default: 0.85)")
+    parser.add_argument("--iterative_query", action="store_true",
+                        help="Enable iterative multi-hop retrieval with LLM-in-the-loop "
+                             "termination (retrieve → judge → re-query loop)")
+    parser.add_argument("--iterative_max_hops", type=int, default=3,
+                        help="Maximum hops for iterative retrieval (default: 3)")
     parser.add_argument("--no_cache", action="store_true",
                         help="Disable ingest caching (always ingest fresh)")
     return parser.parse_args()
@@ -414,6 +419,8 @@ def main():
         prefix += "_decompose"
     if args.decompose_rrf:
         prefix += "_rrf"
+    if args.iterative_query:
+        prefix += "_iterative"
     if args.decompose_coverage:
         prefix += "_coverage"
     if args.bm25_weight > 0:
@@ -466,6 +473,8 @@ def main():
             print(f"Triadic retrieval: True (n={args.triadic_n}, p={args.triadic_p}, expand_k={args.triadic_expand_k})")
         if args.decompose_query:
             print(f"Query decomposition: True (max_hops={args.decompose_max_hops})")
+        if args.iterative_query:
+            print(f"Iterative retrieval: True (max_hops={args.iterative_max_hops}, LLM-in-the-loop)")
         if args.decompose_coverage:
             print(f"Coverage audit: True (decompose as gap-fill, not hop-chain)")
         if getattr(args, 'graph_dream', False):
@@ -527,6 +536,8 @@ def main():
             decompose_max_hops=args.decompose_max_hops,
             decompose_coverage=args.decompose_coverage,
             decompose_rrf=args.decompose_rrf,
+            iterative_query=args.iterative_query,
+            iterative_max_hops=args.iterative_max_hops,
             bm25_weight=args.bm25_weight,
             dedup_threshold=args.dedup_threshold,
             dream_weight=args.dream_weight,

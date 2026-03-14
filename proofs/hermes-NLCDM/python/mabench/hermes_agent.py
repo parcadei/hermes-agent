@@ -204,6 +204,8 @@ class HermesMemoryAgent:
         decompose_max_hops: int = 3,
         decompose_coverage: bool = False,
         decompose_rrf: bool = False,
+        iterative_query: bool = False,
+        iterative_max_hops: int = 3,
         bm25_weight: float = 0.0,
         dedup_threshold: float = 0.0,
         dream_weight: float = 0.0,
@@ -236,6 +238,8 @@ class HermesMemoryAgent:
         self.decompose_max_hops = decompose_max_hops
         self.decompose_coverage = decompose_coverage
         self.decompose_rrf = decompose_rrf
+        self.iterative_query = iterative_query
+        self.iterative_max_hops = iterative_max_hops
         self.retrieve_num = retrieve_num
         self.dream_interval = dream_interval
         self.temperature = temperature
@@ -337,6 +341,8 @@ class HermesMemoryAgent:
         """
         if memorizing:
             return self._store(message)
+        elif self.iterative_query:
+            return self._iterative_query(message)
         else:
             return self._query(message)
 
@@ -740,6 +746,192 @@ class HermesMemoryAgent:
             return (response.choices[0].message.content or "").strip()
         except Exception:
             return ""
+
+    def _iterative_query(self, question: str) -> dict:
+        """Iterative multi-hop retrieval with LLM-in-the-loop termination.
+
+        Instead of decomposing the question upfront (like decompose_query),
+        this method retrieves iteratively: after each retrieval pass, the LLM
+        judges whether it can answer the question. If not, the LLM identifies
+        the missing entity, which becomes the query for the next hop.
+
+        The key insight: multi-hop is a property of the agent's current
+        knowledge state, not the question. The LLM is the only general
+        termination criterion because "do I have enough to answer?" is a
+        semantic judgment.
+
+        Loop:
+          1. Retrieve for question (or entity from prior hop)
+          2. LLM: "Can you answer? If not, what entity do you need next?"
+          3. If can answer → break. If not → retrieve for that entity.
+          4. Max hops as safety valve.
+        """
+        query_start = time.time()
+        bare_question = self._extract_question(question)
+        self._ensure_llm_client()
+
+        all_chunks: list[str] = []
+        all_results: list[dict] = []
+        seen: set[str] = set()
+        hops_taken = 0
+        # Evidence chain: tracks what was queried and found at each hop,
+        # so the judge LLM has full reasoning context (not stateless).
+        evidence_chain: list[dict] = []  # [{query, found, entity}]
+
+        current_query = bare_question
+
+        for hop in range(self.iterative_max_hops):
+            # Retrieve for current query
+            results = self._retrieve_v2(current_query)
+
+            # Triadic expansion on this hop's results
+            hop_texts = [r["text"] for r in results]
+            if getattr(self, '_triadic', None) is not None and hop_texts:
+                triadic_texts = self._triadic.expand(
+                    hop_texts, top_k=self._triadic_expand_k,
+                )
+                for t in triadic_texts:
+                    key = t.strip()[:200]
+                    if key not in seen:
+                        seen.add(key)
+                        all_chunks.append(t)
+
+            # Add new chunks (dedup across hops)
+            hop_new_chunks: list[str] = []
+            for r in results:
+                key = r["text"].strip()[:200]
+                if key not in seen:
+                    seen.add(key)
+                    all_chunks.append(r["text"])
+                    all_results.append(r)
+                    hop_new_chunks.append(r["text"])
+
+            hops_taken = hop + 1
+
+            # Don't judge on last possible hop — just use what we have
+            if hop >= self.iterative_max_hops - 1:
+                evidence_chain.append({
+                    "query": current_query,
+                    "found": hop_new_chunks[:3],
+                    "entity": None,
+                })
+                break
+
+            # Build chain summary for the judge so it has full hop context
+            chain_summary = ""
+            if evidence_chain:
+                lines = []
+                for i, step in enumerate(evidence_chain, 1):
+                    found_preview = step["found"][0][:100] if step["found"] else "nothing relevant"
+                    entity_str = f" → extracted \"{step['entity']}\"" if step.get("entity") else ""
+                    lines.append(
+                        f"  Hop {i}: searched \"{step['query']}\" "
+                        f"→ found \"{found_preview}...\"{entity_str}"
+                    )
+                chain_summary = (
+                    "Reasoning chain so far:\n"
+                    + "\n".join(lines)
+                    + "\n\n"
+                )
+
+            # LLM judge: can we answer, or what entity is missing?
+            context_for_judge = "\n".join(all_chunks[:self.retrieve_num])
+            try:
+                judge_response = self._llm_client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": (
+                            "You are evaluating whether retrieved facts "
+                            "EXPLICITLY contain the answer to a question. "
+                            "You must be certain — do NOT guess or infer.\n\n"
+                            "The answer must be STATED in the facts, not "
+                            "something you could reason about or guess from "
+                            "partial information.\n\n"
+                            "If the answer is explicitly stated in the facts, "
+                            "respond: ANSWER_READY\n"
+                            "If you would need to guess or infer, respond: "
+                            "NEED: <specific entity or phrase to search for>\n"
+                            "Do NOT repeat a previous search. Only output "
+                            "one of these two formats."
+                        )},
+                        {"role": "user", "content": (
+                            f"Question: {bare_question}\n\n"
+                            f"{chain_summary}"
+                            f"Retrieved facts:\n{context_for_judge}\n\n"
+                            f"Is the answer explicitly stated in these facts, "
+                            f"or what do you still need to look up?"
+                        )},
+                    ],
+                    temperature=0.0,
+                    max_tokens=64,
+                )
+                judge_text = (
+                    judge_response.choices[0].message.content or ""
+                ).strip()
+            except Exception:
+                evidence_chain.append({
+                    "query": current_query,
+                    "found": hop_new_chunks[:3],
+                    "entity": None,
+                })
+                break  # LLM failure → use what we have
+
+            if judge_text.startswith("ANSWER_READY"):
+                evidence_chain.append({
+                    "query": current_query,
+                    "found": hop_new_chunks[:3],
+                    "entity": None,
+                })
+                break
+            elif judge_text.startswith("NEED:"):
+                next_entity = judge_text[len("NEED:"):].strip()
+                evidence_chain.append({
+                    "query": current_query,
+                    "found": hop_new_chunks[:3],
+                    "entity": next_entity,
+                })
+                if next_entity:
+                    current_query = next_entity
+                else:
+                    break  # empty entity → bail
+            else:
+                # Unparseable response → treat as ready
+                evidence_chain.append({
+                    "query": current_query,
+                    "found": hop_new_chunks[:3],
+                    "entity": None,
+                })
+                break
+
+        # Build metadata lookup
+        metadata_by_key: dict[str, dict] = {}
+        for r in all_results:
+            k = r["text"].strip()[:200]
+            if k not in metadata_by_key:
+                metadata_by_key[k] = r
+
+        # Trim to retrieve_num and format via outgestion
+        final_chunks = all_chunks[:self.retrieve_num]
+        memory_context, outgestion_instructions = self._format_outgestion(
+            final_chunks, metadata_by_key,
+        )
+        memory_time = time.time() - query_start
+
+        # Generate answer
+        answer, input_tokens, output_tokens, gen_time = self._generate_answer(
+            question, memory_context,
+            extra_system_instructions=outgestion_instructions,
+        )
+        query_time = time.time() - query_start
+
+        return {
+            "output": answer,
+            "input_len": input_tokens,
+            "output_len": output_tokens,
+            "memory_construction_time": memory_time,
+            "query_time_len": query_time,
+            "hops": hops_taken,
+        }
 
     def _retrieve_v2(self, query_text: str) -> list[dict]:
         """Run V2 embedding retrieval for a single query string."""
