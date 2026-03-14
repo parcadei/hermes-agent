@@ -461,23 +461,94 @@ class HermesMemoryAgent:
                 for key, val in answers.items():
                     sq = sq.replace(key, val)
 
-                # Retrieve facts for this sub-query
-                sq_results = self._retrieve_v2(sq)
-                sq_texts = [r["text"] for r in sq_results]
-                sq_chunks.append(sq_texts)
-                sq_chunks_raw.append(sq_results)
+                # Mini iterative loop per sub-query: retrieve → judge →
+                # retry with targeted NEED if first retrieval misses.
+                sq_all_texts: list[str] = []
+                sq_all_results: list[dict] = []
+                sq_seen: set[str] = set()
+                current_sq = sq
+                max_sq_retries = 2  # 1 original + 1 retry
+
+                for retry in range(max_sq_retries):
+                    sq_results = self._retrieve_v2(current_sq)
+                    for r in sq_results:
+                        key = r["text"].strip()[:200]
+                        if key not in sq_seen:
+                            sq_seen.add(key)
+                            sq_all_texts.append(r["text"])
+                            sq_all_results.append(r)
+
+                    # Triadic expansion on this sub-query's results
+                    if getattr(self, '_triadic', None) is not None:
+                        hop_texts = [r["text"] for r in sq_results]
+                        if hop_texts:
+                            for t in self._triadic.expand(
+                                hop_texts, top_k=self._triadic_expand_k,
+                            ):
+                                tkey = t.strip()[:200]
+                                if tkey not in sq_seen:
+                                    sq_seen.add(tkey)
+                                    sq_all_texts.append(t)
+
+                    # On last retry or final sub-query, skip judge
+                    if retry >= max_sq_retries - 1:
+                        break
+
+                    # Judge: can we answer this sub-query?
+                    try:
+                        judge_resp = self._llm_client.chat.completions.create(
+                            model=self.model,
+                            messages=[
+                                {"role": "system", "content": (
+                                    "Given retrieved facts, can you answer "
+                                    "this specific sub-question?\n"
+                                    "If YES: respond ANSWER_READY\n"
+                                    "If NO: respond NEED: <3-6 word search "
+                                    "using concrete entity names>"
+                                )},
+                                {"role": "user", "content": (
+                                    f"Sub-question: {current_sq}\n\n"
+                                    f"Facts:\n"
+                                    + "\n".join(sq_all_texts[:10])
+                                    + "\n\nCan you answer?"
+                                )},
+                            ],
+                            temperature=0.0,
+                            max_tokens=64,
+                        )
+                        jt = (judge_resp.choices[0].message.content
+                              or "").strip()
+                        import sys
+                        print(f"  [sq {i+1} retry {retry}] {jt[:120]}",
+                              file=sys.stderr)
+                    except Exception:
+                        break  # LLM error → use what we have
+
+                    if jt.startswith("ANSWER_READY"):
+                        break
+                    elif "NEED:" in jt:
+                        need = jt[jt.index("NEED:") + 5:].strip().strip("'\"")
+                        if need and need != current_sq:
+                            current_sq = need
+                        else:
+                            break
+                    else:
+                        break  # unparseable → use what we have
+
+                sq_chunks.append(sq_all_texts)
+                sq_chunks_raw.append(sq_all_results)
 
                 # Extract intermediate answer for chaining to next hop
-                if i < len(subqueries) - 1 and sq_texts:
+                if i < len(subqueries) - 1 and sq_all_texts:
                     short_ans = self._extract_short_answer(
-                        sq, sq_texts, evidence_chain,
+                        sq, sq_all_texts, evidence_chain,
                     )
                     if short_ans:
                         answers[f"{{answer_{i + 1}}}"] = short_ans
                         evidence_chain.append({
                             "q": sq,
                             "a": short_ans,
-                            "evidence": sq_texts[:2],
+                            "evidence": sq_all_texts[:2],
                         })
 
             # Merge sub-query and original results
