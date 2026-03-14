@@ -877,12 +877,13 @@ class HermesMemoryAgent:
         # Sort oldest → newest (ascending recency)
         annotated.sort(key=lambda x: x[0])
 
-        # Contradiction detection: find pairs of chunks that are
+        # Soft contradiction surfacing: find pairs of chunks that are
         # semantically similar (cosine > threshold) but have different
-        # recency values. The older one is superseded by the newer one.
+        # recency values. Cross-reference BOTH with [CONFLICT] tags —
+        # surface the conflict, never remove content.
         contradiction_threshold = getattr(self, "contradiction_sim_threshold", 0.85)
-        superseded: set[int] = set()   # indices of older conflicting facts
-        current: set[int] = set()      # indices of newer conflicting facts
+        from collections import defaultdict
+        conflict_pairs: dict[int, list[int]] = defaultdict(list)
 
         if getattr(self, "contradiction_context", False):
             import numpy as np
@@ -895,40 +896,41 @@ class HermesMemoryAgent:
                         continue
                     sim = float(np.dot(emb_i, emb_j))
                     if sim >= contradiction_threshold:
-                        # i is older (sorted), j is newer
                         rec_i = annotated[i][0]
                         rec_j = annotated[j][0]
                         if rec_i != rec_j:
-                            superseded.add(i)
-                            current.add(j)
+                            conflict_pairs[i].append(j)
+                            conflict_pairs[j].append(i)
 
-        # Format with temporal + contradiction annotations
+        # Format with fact numbering + temporal + soft contradiction
         lines = []
         n = len(annotated)
         for i, (recency, text, _emb) in enumerate(annotated):
-            # Contradiction tags take priority over temporal tags
-            if i in superseded:
-                tag = "[SUPERSEDED] "
-            elif i in current:
-                tag = "[CURRENT] "
+            fact_num = i + 1  # 1-indexed for LLM readability
+
+            if i in conflict_pairs:
+                partners = ", ".join(str(p + 1) for p in conflict_pairs[i])
+                tag = f"[fact {fact_num}, CONFLICTS WITH fact {partners}] "
             elif n <= 1:
                 tag = ""
             elif i < n // 3:
-                tag = "[older] "
+                tag = f"[fact {fact_num}, older] "
             elif i >= n - n // 3:
-                tag = "[newer] "
+                tag = f"[fact {fact_num}, newer] "
             else:
-                tag = ""
+                tag = f"[fact {fact_num}] "
             lines.append(f"{tag}{text}")
 
         instructions = (
-            "Facts in the knowledge pool are ordered from oldest to newest. "
-            "When facts conflict, prefer the most recent (newer) information."
+            "Facts in the knowledge pool are numbered and ordered from oldest "
+            "to newest. When facts conflict, prefer the most recent (newer) "
+            "information."
         )
-        if superseded:
+        if conflict_pairs:
             instructions += (
-                " Facts marked [SUPERSEDED] have been replaced by newer "
-                "[CURRENT] facts — ignore superseded facts entirely."
+                " Facts marked [CONFLICTS WITH] represent potentially "
+                "conflicting versions — prefer the newer one among "
+                "conflicting facts."
             )
         return "\n\n".join(lines), instructions
 

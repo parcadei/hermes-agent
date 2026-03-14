@@ -156,7 +156,7 @@ class TestTemporalOrdering:
         assert "Fact C" in lines[2]
 
     def test_temporal_adds_annotations(self):
-        """Temporal context should add [older]/[newer] tags."""
+        """Temporal context should add [fact N, older]/[fact N, newer] tags."""
         agent = self._make_agent_minimal(temporal_context=True)
         # Need enough facts for the 1/3 split to produce tags
         chunks = [f"Fact {i}" for i in range(6)]
@@ -167,14 +167,15 @@ class TestTemporalOrdering:
         context, instructions = agent._format_outgestion(chunks, metadata)
         lines = context.split("\n\n")
 
-        # First third should have [older]
-        assert lines[0].startswith("[older]"), f"Expected [older] tag: {lines[0]}"
-        assert lines[1].startswith("[older]"), f"Expected [older] tag: {lines[1]}"
-        # Last third should have [newer]
-        assert lines[-1].startswith("[newer]"), f"Expected [newer] tag: {lines[-1]}"
-        assert lines[-2].startswith("[newer]"), f"Expected [newer] tag: {lines[-2]}"
-        # Middle should have no tag
-        assert not lines[2].startswith("["), f"Middle should have no tag: {lines[2]}"
+        # First third should have [fact N, older]
+        assert "older]" in lines[0], f"Expected older tag: {lines[0]}"
+        assert "older]" in lines[1], f"Expected older tag: {lines[1]}"
+        # Last third should have [fact N, newer]
+        assert "newer]" in lines[-1], f"Expected newer tag: {lines[-1]}"
+        assert "newer]" in lines[-2], f"Expected newer tag: {lines[-2]}"
+        # All facts should have fact numbering
+        for i, line in enumerate(lines):
+            assert f"[fact {i + 1}" in line, f"Missing fact number: {line}"
 
     def test_temporal_system_instructions(self):
         """Temporal context should produce system prompt instructions."""
@@ -182,8 +183,8 @@ class TestTemporalOrdering:
         chunks = ["Fact A"]
         metadata = {"Fact A": {"recency": 1.0}}
         _, instructions = agent._format_outgestion(chunks, metadata)
-        assert "oldest to newest" in instructions
-        assert "most recent" in instructions.lower() or "newer" in instructions.lower()
+        assert "oldest to newest" in instructions or "oldest" in instructions
+        assert "newer" in instructions.lower() or "recent" in instructions.lower()
 
     def test_missing_metadata_gets_zero_recency(self):
         """Chunks without metadata (e.g. from triadic expansion) get recency=0."""
@@ -339,8 +340,9 @@ class TestMetadataFlow:
 
         context, instructions = stub._format_outgestion(texts, metadata_by_key)
 
-        # Verify sorted by recency
-        lines = [l.lstrip("[older] ").lstrip("[newer] ")
+        # Verify sorted by recency — strip fact number + temporal tags
+        import re
+        lines = [re.sub(r'^\[fact \d+.*?\]\s*', '', l)
                  for l in context.split("\n\n")]
 
         recency_order = []
@@ -365,9 +367,14 @@ class TestMetadataFlow:
 # Test 5: Contradiction detection
 # ---------------------------------------------------------------------------
 
-class TestContradictionDetection:
+class TestSoftContradictionSurfacing:
     """Verify that high-similarity chunks with different recency values
-    are flagged as SUPERSEDED/CURRENT."""
+    are cross-referenced with [CONFLICTS WITH] tags on BOTH facts.
+
+    The key insight: surface conflicts, never remove content. Both facts
+    remain visible, cross-referenced by fact number, with temporal ordering
+    as the primary resolution signal.
+    """
 
     def _make_agent_minimal(self, temporal_context=True,
                             contradiction_context=True,
@@ -384,8 +391,8 @@ class TestContradictionDetection:
         return MinimalAgent(temporal_context, contradiction_context,
                             contradiction_sim_threshold)
 
-    def test_contradicting_facts_flagged(self):
-        """Two similar embeddings with different recency → SUPERSEDED/CURRENT."""
+    def test_conflicting_facts_cross_referenced(self):
+        """Two similar embeddings with different recency → both get CONFLICTS WITH."""
         agent = self._make_agent_minimal()
         dim = 8
         emb_base = _unit_vec(dim, 0)
@@ -401,20 +408,41 @@ class TestContradictionDetection:
 
         context, instructions = agent._format_outgestion(chunks, metadata)
 
-        # Lima (older, similar) should be SUPERSEDED
-        assert "[SUPERSEDED]" in context, f"Expected SUPERSEDED tag: {context}"
-        assert "Born in Lima" in context.split("[SUPERSEDED]")[1].split("\n")[0]
-        # Madrid (newer, similar) should be CURRENT
-        assert "[CURRENT]" in context, f"Expected CURRENT tag: {context}"
-        assert "Born in Madrid" in context.split("[CURRENT]")[1].split("\n")[0]
-        # MIT (unrelated) should NOT be tagged as contradiction
-        for line in context.split("\n\n"):
-            if "Studied at MIT" in line:
-                assert "[SUPERSEDED]" not in line
-                assert "[CURRENT]" not in line
+        # Both Lima AND Madrid should have CONFLICTS WITH tags
+        lines = context.split("\n\n")
+        lima_line = [l for l in lines if "Born in Lima" in l][0]
+        madrid_line = [l for l in lines if "Born in Madrid" in l][0]
+        assert "CONFLICTS WITH" in lima_line, f"Lima should be cross-referenced: {lima_line}"
+        assert "CONFLICTS WITH" in madrid_line, f"Madrid should be cross-referenced: {madrid_line}"
+
+        # Both facts should still be present (not removed)
+        assert "Born in Lima" in context
+        assert "Born in Madrid" in context
+
+        # MIT (unrelated) should NOT have CONFLICTS WITH tag
+        mit_line = [l for l in lines if "Studied at MIT" in l][0]
+        assert "CONFLICTS WITH" not in mit_line
+
+    def test_cross_reference_fact_numbers(self):
+        """Conflicting facts should reference each other by fact number."""
+        agent = self._make_agent_minimal()
+        dim = 8
+        emb = _unit_vec(dim, 0)
+
+        chunks = ["Born in Lima", "Born in Madrid"]
+        metadata = {
+            "Born in Lima": {"recency": 100.0, "embedding": emb},
+            "Born in Madrid": {"recency": 500.0, "embedding": _similar_vec(emb, noise=0.02, seed=54)},
+        }
+        context, _ = agent._format_outgestion(chunks, metadata)
+        lines = context.split("\n\n")
+
+        # Lima is fact 1 (older, sorted first), Madrid is fact 2
+        assert "[fact 1, CONFLICTS WITH fact 2]" in lines[0], f"Wrong cross-ref: {lines[0]}"
+        assert "[fact 2, CONFLICTS WITH fact 1]" in lines[1], f"Wrong cross-ref: {lines[1]}"
 
     def test_no_contradiction_without_flag(self):
-        """With contradiction_context=False, no SUPERSEDED/CURRENT tags."""
+        """With contradiction_context=False, no CONFLICTS WITH tags."""
         agent = self._make_agent_minimal(contradiction_context=False)
         dim = 8
         emb = _unit_vec(dim, 0)
@@ -425,8 +453,7 @@ class TestContradictionDetection:
             "Born in Madrid": {"recency": 500.0, "embedding": _similar_vec(emb, noise=0.02, seed=51)},
         }
         context, _ = agent._format_outgestion(chunks, metadata)
-        assert "[SUPERSEDED]" not in context
-        assert "[CURRENT]" not in context
+        assert "CONFLICTS WITH" not in context
 
     def test_low_similarity_not_flagged(self):
         """Dissimilar chunks should not be flagged even if recency differs."""
@@ -439,8 +466,7 @@ class TestContradictionDetection:
             "Studied at MIT": {"recency": 500.0, "embedding": _unit_vec(dim, 3)},
         }
         context, _ = agent._format_outgestion(chunks, metadata)
-        assert "[SUPERSEDED]" not in context
-        assert "[CURRENT]" not in context
+        assert "CONFLICTS WITH" not in context
 
     def test_same_recency_not_flagged(self):
         """Similar chunks with same recency should not be flagged."""
@@ -454,11 +480,10 @@ class TestContradictionDetection:
             "Born in Madrid": {"recency": 100.0, "embedding": _similar_vec(emb, noise=0.02, seed=52)},
         }
         context, _ = agent._format_outgestion(chunks, metadata)
-        assert "[SUPERSEDED]" not in context
-        assert "[CURRENT]" not in context
+        assert "CONFLICTS WITH" not in context
 
-    def test_instructions_include_superseded_guidance(self):
-        """When contradictions found, instructions should mention SUPERSEDED."""
+    def test_instructions_mention_conflicts(self):
+        """When contradictions found, instructions should mention CONFLICTS WITH."""
         agent = self._make_agent_minimal()
         dim = 8
         emb = _unit_vec(dim, 0)
@@ -469,11 +494,13 @@ class TestContradictionDetection:
             "Born in Madrid": {"recency": 500.0, "embedding": _similar_vec(emb, noise=0.02, seed=53)},
         }
         _, instructions = agent._format_outgestion(chunks, metadata)
-        assert "SUPERSEDED" in instructions
-        assert "ignore" in instructions.lower()
+        assert "CONFLICTS WITH" in instructions
+        assert "prefer" in instructions.lower()
+        # Should NOT mention "ignore" — soft signals don't remove content
+        assert "ignore" not in instructions.lower()
 
     def test_contradiction_with_engine_embeddings(self):
-        """End-to-end: store in CoupledEngine, query, check contradiction tags."""
+        """End-to-end: store in CoupledEngine, query, check CONFLICTS WITH tags."""
         e = _make_engine()
         dim = 8
         base_emb = _unit_vec(dim, 0)
@@ -502,18 +529,17 @@ class TestContradictionDetection:
 
         context, instructions = stub._format_outgestion(texts, metadata_by_key)
 
-        # Paris (older) should be superseded, Berlin (newer) should be current
+        # Both Paris and Berlin should have CONFLICTS WITH tags
         lines = context.split("\n\n")
         paris_line = [l for l in lines if "Paris" in l][0]
         berlin_line = [l for l in lines if "Berlin" in l][0]
-        assert "[SUPERSEDED]" in paris_line, f"Paris should be superseded: {paris_line}"
-        assert "[CURRENT]" in berlin_line, f"Berlin should be current: {berlin_line}"
+        assert "CONFLICTS WITH" in paris_line, f"Paris should be cross-referenced: {paris_line}"
+        assert "CONFLICTS WITH" in berlin_line, f"Berlin should be cross-referenced: {berlin_line}"
 
         # Population line should not be tagged as contradiction
         pop_lines = [l for l in lines if "Population" in l]
         if pop_lines:
-            assert "[SUPERSEDED]" not in pop_lines[0]
-            assert "[CURRENT]" not in pop_lines[0]
+            assert "CONFLICTS WITH" not in pop_lines[0]
 
     def test_missing_embedding_skips_contradiction(self):
         """Chunks without embeddings in metadata should not crash."""
@@ -525,5 +551,17 @@ class TestContradictionDetection:
         }
         context, _ = agent._format_outgestion(chunks, metadata)
         # Should not crash, no contradiction tags
-        assert "[SUPERSEDED]" not in context
-        assert "[CURRENT]" not in context
+        assert "CONFLICTS WITH" not in context
+
+    def test_all_facts_numbered(self):
+        """All facts should have [fact N] numbering when temporal is enabled."""
+        agent = self._make_agent_minimal(contradiction_context=False)
+        chunks = [f"Fact {i}" for i in range(4)]
+        metadata = {
+            f"Fact {i}": {"recency": float(i * 100)}
+            for i in range(4)
+        }
+        context, _ = agent._format_outgestion(chunks, metadata)
+        lines = context.split("\n\n")
+        for i, line in enumerate(lines):
+            assert f"[fact {i + 1}" in line, f"Missing fact number in: {line}"
