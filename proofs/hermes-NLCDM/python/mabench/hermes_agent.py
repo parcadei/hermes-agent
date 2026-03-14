@@ -823,10 +823,11 @@ class HermesMemoryAgent:
                 lines = []
                 for i, step in enumerate(evidence_chain, 1):
                     found_preview = step["found"][0][:100] if step["found"] else "nothing relevant"
-                    entity_str = f" → extracted \"{step['entity']}\"" if step.get("entity") else ""
+                    learned_str = f" → learned: {step['learned']}" if step.get("learned") else ""
+                    entity_str = f" → next search: \"{step['entity']}\"" if step.get("entity") else ""
                     lines.append(
                         f"  Hop {i}: searched \"{step['query']}\" "
-                        f"→ found \"{found_preview}...\"{entity_str}"
+                        f"→ found \"{found_preview}...\"{learned_str}{entity_str}"
                     )
                 chain_summary = (
                     "Reasoning chain so far:\n"
@@ -834,32 +835,37 @@ class HermesMemoryAgent:
                     + "\n\n"
                 )
 
-            # LLM judge: can we answer, or what entity is missing?
-            context_for_judge = "\n".join(all_chunks[:self.retrieve_num])
+            # LLM judge sees ALL accumulated chunks (not capped at retrieve_num).
+            # Each hop adds new deduped chunks; the judge needs the full
+            # evidence to decide if the chain is complete.
+            context_for_judge = "\n".join(all_chunks)
             try:
                 judge_response = self._llm_client.chat.completions.create(
                     model=self.model,
                     messages=[
                         {"role": "system", "content": (
-                            "You are evaluating whether retrieved facts "
-                            "EXPLICITLY contain the answer to a question. "
-                            "You must be certain — do NOT guess or infer.\n\n"
-                            "The answer must be STATED in the facts, not "
-                            "something you could reason about or guess from "
-                            "partial information.\n\n"
-                            "If the answer is explicitly stated in the facts, "
-                            "respond: ANSWER_READY\n"
-                            "If you would need to guess or infer, respond: "
-                            "NEED: <specific entity or phrase to search for>\n"
-                            "Do NOT repeat a previous search. Only output "
-                            "one of these two formats."
+                            "You evaluate whether retrieved facts can answer "
+                            "a question, and extract intermediate answers.\n\n"
+                            "If the facts contain enough to answer, respond:\n"
+                            "ANSWER_READY\n\n"
+                            "If not, extract what you DID learn and state "
+                            "what simple fact to search next. Format:\n"
+                            "LEARNED: <what you found, e.g. 'Abbiati plays "
+                            "association football'>\n"
+                            "NEED: <simple search, e.g. 'association football "
+                            "country of origin'>\n\n"
+                            "The NEED query will be used for embedding search. "
+                            "Use CONCRETE entities from what you learned, "
+                            "NOT abstract references like 'the sport' or "
+                            "'the person'. Keep NEED to 3-8 words.\n"
+                            "Do NOT repeat a previous search."
                         )},
                         {"role": "user", "content": (
                             f"Question: {bare_question}\n\n"
                             f"{chain_summary}"
                             f"Retrieved facts:\n{context_for_judge}\n\n"
-                            f"Is the answer explicitly stated in these facts, "
-                            f"or what do you still need to look up?"
+                            f"Can you answer? If not, what did you learn "
+                            f"and what concrete fact is still missing?"
                         )},
                     ],
                     temperature=0.0,
@@ -876,6 +882,9 @@ class HermesMemoryAgent:
                 })
                 break  # LLM failure → use what we have
 
+            import sys
+            print(f"  [hop {hop+1}] judge: {repr(judge_text[:300])}", file=sys.stderr)
+
             if judge_text.startswith("ANSWER_READY"):
                 evidence_chain.append({
                     "query": current_query,
@@ -883,17 +892,29 @@ class HermesMemoryAgent:
                     "entity": None,
                 })
                 break
-            elif judge_text.startswith("NEED:"):
+
+            # Parse LEARNED/NEED format
+            learned = ""
+            next_entity = ""
+            for line in judge_text.split("\n"):
+                line = line.strip()
+                if line.startswith("LEARNED:"):
+                    learned = line[len("LEARNED:"):].strip()
+                elif line.startswith("NEED:"):
+                    next_entity = line[len("NEED:"):].strip()
+
+            # Fallback: old format (just "NEED: ...")
+            if not next_entity and judge_text.startswith("NEED:"):
                 next_entity = judge_text[len("NEED:"):].strip()
+
+            if next_entity:
                 evidence_chain.append({
                     "query": current_query,
                     "found": hop_new_chunks[:3],
                     "entity": next_entity,
+                    "learned": learned,
                 })
-                if next_entity:
-                    current_query = next_entity
-                else:
-                    break  # empty entity → bail
+                current_query = next_entity
             else:
                 # Unparseable response → treat as ready
                 evidence_chain.append({
