@@ -22,7 +22,6 @@ Two contradiction layers:
 from __future__ import annotations
 
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -45,6 +44,10 @@ from hermes_memory.encoding import EncodingConfig
 from coupled_engine import CoupledEngine
 from dream_ops import DreamParams
 from nlcdm_core import cosine_sim
+from mabench.ingestion import (
+    IngestionPipeline, IngestionConfig, IngestionResult, _MutableEntityGraph,
+)
+from mabench.triadic_memory import TriadicMemory
 
 
 class EmbeddingRelevanceScorer(RelevanceScorer):
@@ -193,8 +196,23 @@ class HermesMemoryAgent:
         coretrieval_min_count: float = 2.0,
         transfer_retrieval: bool = False,
         transfer_k: int | None = None,
+        triadic_retrieval: bool = False,
+        triadic_n: int = 1000,
+        triadic_p: int = 10,
+        triadic_expand_k: int = 5,
+        decompose_query: bool = False,
+        decompose_max_hops: int = 3,
+        decompose_coverage: bool = False,
+        decompose_rrf: bool = False,
+        bm25_weight: float = 0.0,
+        dedup_threshold: float = 0.0,
+        dream_weight: float = 0.0,
+        temporal_context: bool = False,
+        contradiction_context: bool = False,
+        contradiction_sim_threshold: float = 0.85,
     ):
         self.model = model
+        self.dedup_threshold = dedup_threshold
         self.dim = dim
         self.contradiction_threshold = contradiction_threshold
         self.associative_retrieval = associative_retrieval
@@ -203,6 +221,7 @@ class HermesMemoryAgent:
         self.cooc_boost_retrieval = cooc_boost_retrieval
         self.cooc_weight = cooc_weight
         self.cooc_gate_threshold = cooc_gate_threshold
+        self.bm25_weight = bm25_weight
         self.ppr_retrieval = ppr_retrieval
         self.ppr_weight = ppr_weight
         self.ppr_damping = ppr_damping
@@ -211,11 +230,21 @@ class HermesMemoryAgent:
         self.coretrieval_min_count = coretrieval_min_count
         self.transfer_retrieval = transfer_retrieval
         self.transfer_k = transfer_k
+        self.triadic_retrieval = triadic_retrieval
+        self._triadic_expand_k = triadic_expand_k
+        self.decompose_query = decompose_query
+        self.decompose_max_hops = decompose_max_hops
+        self.decompose_coverage = decompose_coverage
+        self.decompose_rrf = decompose_rrf
         self.retrieve_num = retrieve_num
         self.dream_interval = dream_interval
         self.temperature = temperature
         self._max_gen_tokens = max_gen_tokens
         self.dream_params = dream_params
+        self.dream_weight = dream_weight
+        self.temporal_context = temporal_context
+        self.contradiction_context = contradiction_context
+        self.contradiction_sim_threshold = contradiction_sim_threshold
 
         # V1: Text-based orchestrator (validated baseline from test_engine.py)
         params = ParameterSet(
@@ -258,7 +287,25 @@ class HermesMemoryAgent:
             reconsolidation=False,
             recency_alpha=recency_alpha,
             dream_params=dream_params,
+            dedup_threshold=dedup_threshold,
         )
+
+        # Ingestion pipeline (replaces regex _parse_facts)
+        try:
+            import torch
+            _coref_device = "cuda" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            _coref_device = "cpu"
+        self._ingestion = IngestionPipeline(IngestionConfig(
+            coref_device=_coref_device,
+            coref_enabled=True,
+            boundary_threshold=0.2,
+            strip_numbered_prefix=False,
+        ))
+        self._entity_accumulator = _MutableEntityGraph()
+
+        # Triadic memory: structural recall via Overmann sparse 3D tensor
+        self._triadic = TriadicMemory(n=triadic_n, p=triadic_p) if triadic_retrieval else None
 
         self._store_count = 0
         self._start_time = time.time()
@@ -293,66 +340,59 @@ class HermesMemoryAgent:
         else:
             return self._query(message)
 
-    # Regex: split on "N. " where N is one or more digits at a fact boundary.
-    # Lookbehind ensures we split after the previous fact's trailing ". "
-    _FACT_SPLIT_RE = re.compile(r"(?<=\.) (?=\d+\. )")
-    _FACT_SN_RE = re.compile(r"^(\d+)\. (.+)")
-
-    @staticmethod
-    def _parse_facts(text: str) -> list[tuple[int, str]]:
-        """Parse a chunk into individual (serial_number, fact_text) pairs.
-
-        Handles the MABench FactConsolidation format:
-          "Here is a list of facts:\\n0. Fact zero. 1. Fact one. ..."
-
-        Returns list of (sn, fact_text).  Falls back to [(-1, text)] if
-        the chunk doesn't match the expected SN pattern.
-        """
-        body = text
-        if body.startswith("Here is a list of facts:\n"):
-            body = body[len("Here is a list of facts:\n"):]
-
-        parts = HermesMemoryAgent._FACT_SPLIT_RE.split(body)
-        facts: list[tuple[int, str]] = []
-        for part in parts:
-            m = HermesMemoryAgent._FACT_SN_RE.match(part.strip())
-            if m:
-                facts.append((int(m.group(1)), m.group(2).strip()))
-        if not facts:
-            # Fallback: store entire chunk as one entry
-            facts.append((-1, text))
-        return facts
-
     def _store(self, text: str) -> str:
-        """Store text through V1 (text contradiction) + V2 (cosine contradiction).
+        """Store text through ingestion pipeline + V1 + V2 contradiction layers.
 
-        Parses chunks into individual facts (split on serial numbers) so that:
-        - V1 contradiction detection compares single facts (subject extraction works)
-        - V2 cosine contradiction fires on facts about the same entity/predicate
-        - Dream consolidation operates at fact granularity
-        - Retrieval matches queries to individual facts, not multi-fact chunks
+        Uses IngestionPipeline.segment() for multi-stage text decomposition:
+        - Sentence splitting with numbered-prefix stripping
+        - Topic boundary detection
+        - Coreference resolution
+        - Clause decomposition into atomic facts
+        - Entity graph construction
+
+        Each atomic fact is stored individually for fine-grained retrieval,
+        contradiction detection, and dream consolidation.
         """
-        facts = self._parse_facts(text)
+        result = self._ingestion.segment(text)
 
-        # Batch-embed all facts at once (single GPU pass instead of N individual calls)
-        fact_texts = [ft for _, ft in facts]
+        # Batch-embed all atomic facts (single GPU pass)
+        fact_texts = [f.text for f in result.facts]
         embeddings = self._scorer.embed_batch(fact_texts)
 
-        for (sn, fact_text), emb in zip(facts, embeddings):
-            original_text = f"{sn}. {fact_text}" if sn >= 0 else fact_text
+        for fact, emb in zip(result.facts, embeddings):
+            # V1: Text-based store
+            self.orchestrator.store(content=fact.text, embedding=emb)
 
-            # V1: Text-based store with contradiction detection + ANN pre-filter
-            self.orchestrator.store(content=fact_text, embedding=emb)
-
-            # V2: Store with pre-computed embedding
+            # V2: Coupled engine store (no serial number prefix -- D3)
             self.coupled_engine.store(
-                text=original_text, embedding=emb,
+                text=fact.text, embedding=emb,
                 recency=float(self._store_count),
             )
 
+            # Triadic: store fact's triples in the 3D tensor
+            if getattr(self, '_triadic', None) is not None:
+                self._triadic.store_fact(fact.text, list(fact.triples))
+
             self._store_count += 1
 
-        # Optional dream cycle at configurable intervals (per chunk, not per fact)
+        # Synonym dict: feed coref clusters and verb mappings to triadic
+        if getattr(self, '_triadic', None) is not None:
+            if result.coref_clusters:
+                self._triadic.add_coref_clusters(result.coref_clusters)
+            if result.verb_mappings:
+                self._triadic.add_verb_mappings(result.verb_mappings)
+
+        # Accumulate entity graph with global offset
+        if hasattr(self, '_entity_accumulator'):
+            offset = self._store_count - len(result.facts)
+            self._entity_accumulator.merge(result.entity_graph, offset)
+
+        # Flush session buffer per chunk if Hebbian enabled (D8)
+        if hasattr(self.coupled_engine, '_session_buffer') and \
+           len(getattr(self.coupled_engine, '_session_buffer', [])) > 0:
+            self.coupled_engine.flush_session()
+
+        # Dream cycle -- unchanged logic
         if self.dream_interval > 0 and self._store_count % self.dream_interval == 0:
             self.coupled_engine.dream()
 
@@ -393,51 +433,130 @@ class HermesMemoryAgent:
         # Extract bare question for embedding (strip MABench prompt preamble)
         bare_question = self._extract_question(question)
 
-        # Embed the bare question (not the full prompt with instructions)
-        q_emb = self._scorer.embed(bare_question)
-
         # V2 retrieval from coupled engine
-        if self.transfer_retrieval:
-            v2_results = self.coupled_engine.query_transfer(
-                embedding=q_emb, top_k=self.retrieve_num,
-                transfer_k=self.transfer_k,
-            )
-        elif self.coretrieval_retrieval:
-            v2_results = self.coupled_engine.query_coretrieval(
-                embedding=q_emb, top_k=self.retrieve_num,
-                coretrieval_bonus=self.coretrieval_bonus,
-                min_coretrieval_count=self.coretrieval_min_count,
-            )
-        elif self.cooc_boost_retrieval:
-            v2_results = self.coupled_engine.query_cooc_boost(
-                embedding=q_emb, top_k=self.retrieve_num,
-                cooc_weight=self.cooc_weight,
-                gate_threshold=self.cooc_gate_threshold,
-            )
-        elif self.ppr_retrieval:
-            v2_results = self.coupled_engine.query_ppr(
-                embedding=q_emb, top_k=self.retrieve_num,
-                ppr_weight=self.ppr_weight,
-                damping=self.ppr_damping,
-            )
-        elif self.hybrid_retrieval:
-            v2_results = self.coupled_engine.query_hybrid(
-                embedding=q_emb, top_k=self.retrieve_num,
-            )
-        elif self.associative_retrieval or self.sparse_retrieval:
-            v2_results = self.coupled_engine.query_associative(
-                embedding=q_emb, top_k=self.retrieve_num,
-                sparse=self.sparse_retrieval,
-            )
+        if self.decompose_query:
+            # Iterative multi-hop: decompose → retrieve → extract → substitute
+            # Each hop receives the growing evidence chain for context.
+            #
+            # Priority merge (fixes slot starvation):
+            #   Original question gets top-5 priority slots (proven best chunks).
+            #   Each sub-query contributes top-3 unique chunks as hop-specific
+            #   supplements, without displacing the base retrieval.
+            subqueries = self._decompose_query(bare_question)
+            seen_texts: set[str] = set()
+            answers: dict[str, str] = {}  # {answer_1} → resolved value
+            evidence_chain: list[dict] = []  # growing context across hops
+            sq_chunks: list[list[str]] = []  # per-subquery chunk lists
+            sq_chunks_raw: list[list[dict]] = []  # raw result dicts for metadata
+
+            for i, sq_template in enumerate(subqueries):
+                # Substitute any {answer_N} placeholders from prior hops
+                sq = sq_template
+                for key, val in answers.items():
+                    sq = sq.replace(key, val)
+
+                # Retrieve facts for this sub-query
+                sq_results = self._retrieve_v2(sq)
+                sq_texts = [r["text"] for r in sq_results]
+                sq_chunks.append(sq_texts)
+                sq_chunks_raw.append(sq_results)
+
+                # Extract intermediate answer for chaining to next hop
+                if i < len(subqueries) - 1 and sq_texts:
+                    short_ans = self._extract_short_answer(
+                        sq, sq_texts, evidence_chain,
+                    )
+                    if short_ans:
+                        answers[f"{{answer_{i + 1}}}"] = short_ans
+                        evidence_chain.append({
+                            "q": sq,
+                            "a": short_ans,
+                            "evidence": sq_texts[:2],
+                        })
+
+            # Merge sub-query and original results
+            orig_results = self._retrieve_v2(bare_question)
+            orig_texts = [r["text"] for r in orig_results]
+
+            if self.decompose_rrf:
+                # Reciprocal Rank Fusion: score each chunk by its rank
+                # across all query result lists. Chunks appearing in
+                # multiple lists get boosted naturally.
+                # RRF score = sum(1 / (k + rank)) across all lists
+                rrf_k = 60  # standard RRF constant
+                rrf_scores: dict[str, float] = {}
+                all_lists = [orig_texts] + sq_chunks
+                for ranked_list in all_lists:
+                    for rank, text in enumerate(ranked_list):
+                        key = text.strip()[:200]
+                        if key not in rrf_scores:
+                            rrf_scores[key] = 0.0
+                        rrf_scores[key] += 1.0 / (rrf_k + rank)
+                # Map keys back to full texts
+                key_to_text: dict[str, str] = {}
+                for ranked_list in all_lists:
+                    for text in ranked_list:
+                        key = text.strip()[:200]
+                        if key not in key_to_text:
+                            key_to_text[key] = text
+                # Sort by RRF score descending, take top retrieve_num
+                sorted_keys = sorted(
+                    rrf_scores.keys(),
+                    key=lambda k: rrf_scores[k],
+                    reverse=True,
+                )
+                v2_texts = [
+                    key_to_text[k] for k in sorted_keys[:self.retrieve_num]
+                ]
+            else:
+                # Priority merge: orig top-5, then sub-queries top-3 each
+                v2_texts = []
+                for r in orig_results[:5]:
+                    t = r["text"]
+                    if t not in seen_texts:
+                        seen_texts.add(t)
+                        v2_texts.append(t)
+                for sq_text_list in sq_chunks:
+                    added = 0
+                    for t in sq_text_list:
+                        if added >= 3:
+                            break
+                        if t not in seen_texts:
+                            seen_texts.add(t)
+                            v2_texts.append(t)
+                            added += 1
         else:
-            v2_results = self.coupled_engine.query(
-                embedding=q_emb, top_k=self.retrieve_num
-            )
-        v2_texts = [r["text"] for r in v2_results]
+            v2_results = self._retrieve_v2(bare_question)
+            v2_texts = [r["text"] for r in v2_results]
+            sq_chunks_raw = []  # no sub-query results in non-decompose path
+
+        # Build metadata lookup: text key → result dict.
+        # The merge pipeline deduplicates on text, so we index metadata by
+        # the same key (first 200 chars) used for dedup. This lets the
+        # outgestion formatter access recency/importance/score without
+        # rewriting every merge path.
+        _metadata_by_key: dict[str, dict] = {}
+        _all_v2_results = []
+        if self.decompose_query:
+            _all_v2_results = list(orig_results)
+            for sq_r in sq_chunks_raw:
+                _all_v2_results.extend(sq_r)
+        else:
+            _all_v2_results = list(v2_results)
+        for r in _all_v2_results:
+            k = r["text"].strip()[:200]
+            if k not in _metadata_by_key:
+                _metadata_by_key[k] = r
 
         # V1 retrieval: text-based recall from orchestrator
-        v1_result = self.orchestrator.query(message=question)
-        v1_context = v1_result.context if v1_result.context else ""
+        # Skip V1 when V2 cooc_boost is active — V1 iterates all N memories
+        # in pure Python (O(N) Jaccard + score_memory per query) and its
+        # output is strictly weaker than V2 cosine+cooc+triadic.
+        if self.cooc_boost_retrieval:
+            v1_context = ""
+        else:
+            v1_result = self.orchestrator.query(message=question)
+            v1_context = v1_result.context if v1_result.context else ""
 
         # Merge: V2 results as primary (embedding-ranked), V1 as supplement
         seen = set()
@@ -447,6 +566,27 @@ class HermesMemoryAgent:
             if key not in seen:
                 seen.add(key)
                 merged_chunks.append(text)
+        # Triadic expansion: structural recall from retrieved facts' triples
+        if getattr(self, '_triadic', None) is not None and v2_texts:
+            triadic_texts = self._triadic.expand(
+                v2_texts, top_k=self._triadic_expand_k
+            )
+            for text in triadic_texts:
+                key = text.strip()[:200]
+                if key not in seen:
+                    seen.add(key)
+                    merged_chunks.append(text)
+
+        # Coverage audit: decompose question into sub-queries and check
+        # if retrieved chunks cover each hop. Fill gaps with targeted retrieval.
+        if self.decompose_coverage and not self.decompose_query:
+            gap_texts = self._coverage_audit(bare_question, v2_texts)
+            for text in gap_texts:
+                key = text.strip()[:200]
+                if key not in seen:
+                    seen.add(key)
+                    merged_chunks.append(text)
+
         # Add V1 context lines that aren't already covered
         if v1_context:
             for line in v1_context.split("\n---\n"):
@@ -456,13 +596,17 @@ class HermesMemoryAgent:
                     seen.add(key)
                     merged_chunks.append(line)
 
-        # Build context for LLM
-        memory_context = "\n\n".join(merged_chunks[:self.retrieve_num])
+        # Build context for LLM via outgestion formatter
+        final_chunks = merged_chunks[:self.retrieve_num]
+        memory_context, outgestion_instructions = self._format_outgestion(
+            final_chunks, _metadata_by_key
+        )
         memory_time = time.time() - query_start
 
         # Generate answer via LLM
         answer, input_tokens, output_tokens, gen_time = self._generate_answer(
-            question, memory_context
+            question, memory_context,
+            extra_system_instructions=outgestion_instructions,
         )
         query_time = time.time() - query_start
 
@@ -474,8 +618,323 @@ class HermesMemoryAgent:
             "query_time_len": query_time,
         }
 
+    def _decompose_query(self, question: str) -> list[str]:
+        """Decompose a multi-hop question into chained sub-queries.
+
+        Uses the LLM to break compositional questions like
+        "country of origin of sport played by X" into:
+          1. "What sport did Christian Abbiati play?"
+          2. "What is the country of origin of {answer_1}?"
+
+        Sub-queries use {answer_N} placeholders for chaining.
+        Returns a list of sub-query template strings.
+        """
+        self._ensure_llm_client()
+
+        prompt = (
+            "Break this question into simple sub-questions that each require "
+            "looking up a single fact. Start from the innermost entity and "
+            "work outward. Use {answer_1}, {answer_2} etc. as placeholders "
+            "for answers from previous sub-questions. Use the actual entity "
+            "names from the question, not pronouns.\n\n"
+            "Example:\n"
+            "Q: What is the country of origin of the sport played by Christian Abbiati?\n"
+            "1. What sport did Christian Abbiati play?\n"
+            "2. What is the country of origin of {answer_1}?\n\n"
+            "Example:\n"
+            "Q: Where was the creator of the religion Karl Lueger followed born?\n"
+            "1. What religion did Karl Lueger follow?\n"
+            "2. Who created {answer_1}?\n"
+            "3. Where was {answer_2} born?\n\n"
+            f"Q: {question}\n"
+        )
+
+        try:
+            response = self._llm_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": (
+                        "You decompose multi-hop questions into chained "
+                        "sub-questions. Use {answer_N} placeholders. "
+                        "Be concise."
+                    )},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=256,
+            )
+            text = response.choices[0].message.content or ""
+        except Exception:
+            return [question]
+
+        # Parse numbered sub-questions
+        subqs = []
+        for line in text.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            # Strip numbering: "1. ...", "1) ...", "- ..."
+            for prefix in ("1.", "2.", "3.", "4.", "5.",
+                           "1)", "2)", "3)", "4)", "5)", "-"):
+                if line.startswith(prefix):
+                    line = line[len(prefix):].strip()
+                    break
+            if line:
+                subqs.append(line)
+
+        # Cap at max_hops
+        subqs = subqs[:self.decompose_max_hops]
+        return subqs if subqs else [question]
+
+    def _extract_short_answer(
+        self, question: str, facts: list[str],
+        evidence_chain: list[dict] | None = None,
+    ) -> str:
+        """Extract a short factual answer from retrieved facts.
+
+        Used in iterative query decomposition to resolve intermediate
+        sub-queries before substituting into the next sub-query template.
+
+        Args:
+            question: The current sub-query to answer.
+            facts: Retrieved fact texts for this sub-query.
+            evidence_chain: List of dicts from prior hops, each with
+                keys 'q' (question), 'a' (answer), 'evidence' (key facts).
+                Provides reasoning context so the LLM understands the
+                multi-hop chain being resolved.
+        """
+        self._ensure_llm_client()
+        context = "\n".join(facts[:10])
+
+        # Build reasoning history from prior hops
+        history = ""
+        if evidence_chain:
+            lines = []
+            for i, hop in enumerate(evidence_chain, 1):
+                lines.append(
+                    f"Hop {i}: \"{hop['q']}\" → \"{hop['a']}\""
+                    f" (from: \"{hop['evidence'][0][:120]}...\")"
+                    if hop['evidence'] else
+                    f"Hop {i}: \"{hop['q']}\" → \"{hop['a']}\""
+                )
+            history = "Previous reasoning:\n" + "\n".join(lines) + "\n\n"
+
+        try:
+            response = self._llm_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": (
+                        "Answer the question using ONLY the provided facts. "
+                        "Use the previous reasoning chain for context. "
+                        "Give just the entity name, nothing else."
+                    )},
+                    {"role": "user", "content": (
+                        f"{history}"
+                        f"Facts:\n{context}\n\n"
+                        f"Question: {question}\nAnswer:"
+                    )},
+                ],
+                temperature=0.0,
+                max_tokens=32,
+            )
+            return (response.choices[0].message.content or "").strip()
+        except Exception:
+            return ""
+
+    def _retrieve_v2(self, query_text: str) -> list[dict]:
+        """Run V2 embedding retrieval for a single query string."""
+        q_emb = self._scorer.embed(query_text)
+
+        if self.transfer_retrieval:
+            return self.coupled_engine.query_transfer(
+                embedding=q_emb, top_k=self.retrieve_num,
+                transfer_k=self.transfer_k,
+            )
+        elif self.coretrieval_retrieval:
+            return self.coupled_engine.query_coretrieval(
+                embedding=q_emb, top_k=self.retrieve_num,
+                coretrieval_bonus=self.coretrieval_bonus,
+                min_coretrieval_count=self.coretrieval_min_count,
+            )
+        elif self.cooc_boost_retrieval and self.ppr_retrieval:
+            return self.coupled_engine.query_cooc_ppr(
+                embedding=q_emb, top_k=self.retrieve_num,
+                cooc_weight=self.cooc_weight,
+                gate_threshold=self.cooc_gate_threshold,
+                ppr_weight=self.ppr_weight,
+                damping=self.ppr_damping,
+            )
+        elif self.cooc_boost_retrieval and self.bm25_weight > 0:
+            return self.coupled_engine.query_cooc_bm25(
+                embedding=q_emb, query_text=query_text,
+                top_k=self.retrieve_num,
+                cooc_weight=self.cooc_weight,
+                bm25_weight=self.bm25_weight,
+                gate_threshold=self.cooc_gate_threshold,
+            )
+        elif self.cooc_boost_retrieval:
+            return self.coupled_engine.query_cooc_boost(
+                embedding=q_emb, top_k=self.retrieve_num,
+                cooc_weight=self.cooc_weight,
+                dream_weight=self.dream_weight,
+                gate_threshold=self.cooc_gate_threshold,
+            )
+        elif self.ppr_retrieval:
+            return self.coupled_engine.query_ppr(
+                embedding=q_emb, top_k=self.retrieve_num,
+                ppr_weight=self.ppr_weight,
+                damping=self.ppr_damping,
+            )
+        elif self.hybrid_retrieval:
+            return self.coupled_engine.query_hybrid(
+                embedding=q_emb, top_k=self.retrieve_num,
+            )
+        elif self.associative_retrieval or self.sparse_retrieval:
+            return self.coupled_engine.query_associative(
+                embedding=q_emb, top_k=self.retrieve_num,
+                sparse=self.sparse_retrieval,
+            )
+        else:
+            return self.coupled_engine.query(
+                embedding=q_emb, top_k=self.retrieve_num,
+            )
+
+    def _coverage_audit(
+        self, bare_question: str, v2_texts: list[str],
+    ) -> list[str]:
+        """Use decomposition as a coverage check, not a retrieval strategy.
+
+        1. Decompose the question into sub-queries.
+        2. Embed each sub-query and each already-retrieved chunk.
+        3. For each sub-query, check if any retrieved chunk has
+           cosine > threshold — if not, do a targeted retrieval.
+        4. Return additional texts to append (may be empty).
+        """
+        subqueries = self._decompose_query(bare_question)
+        if len(subqueries) <= 1:
+            return []  # single-hop, nothing to audit
+
+        # Embed sub-queries and retrieved chunks
+        sq_embs = [self._scorer.embed(sq) for sq in subqueries]
+        chunk_embs = self._scorer.embed_batch(v2_texts)
+
+        coverage_threshold = 0.35
+        gap_texts: list[str] = []
+        seen = set(t.strip()[:200] for t in v2_texts)
+
+        for sq_idx, (sq, sq_emb) in enumerate(zip(subqueries, sq_embs)):
+            # Check if any existing chunk covers this sub-query
+            max_sim = 0.0
+            for c_emb in chunk_embs:
+                sim = float(np.dot(sq_emb, c_emb))
+                if sim > max_sim:
+                    max_sim = sim
+            if max_sim >= coverage_threshold:
+                continue  # sub-query is covered
+
+            # Gap found — targeted retrieval for this sub-query
+            sq_results = self._retrieve_v2(sq)
+            for r in sq_results[:3]:  # inject at most 3 gap-fillers
+                key = r["text"].strip()[:200]
+                if key not in seen:
+                    seen.add(key)
+                    gap_texts.append(r["text"])
+
+        return gap_texts
+
+    def _format_outgestion(
+        self,
+        chunks: list[str],
+        metadata_by_key: dict[str, dict],
+    ) -> tuple[str, str]:
+        """Format retrieved chunks with outgestion signals.
+
+        Returns (formatted_context, extra_system_instructions).
+        When temporal_context is disabled, returns flat text with no
+        extra instructions (baseline behavior).
+
+        Signals applied (when enabled):
+        1. Temporal ordering: sort oldest→newest, add [older]/[newer] tags
+        2. Contradiction detection: flag high-similarity chunk pairs as
+           [SUPERSEDED]/[CURRENT] when they likely represent conflicting
+           versions of the same fact
+        """
+        if not getattr(self, "temporal_context", False):
+            # Baseline: flat text, no metadata
+            return "\n\n".join(chunks), ""
+
+        # Build (recency, text, embedding) tuples for sorting + contradiction.
+        # Chunks without metadata (e.g. from V1 or triadic expansion)
+        # get recency=0 so they sort as oldest.
+        annotated: list[tuple[float, str, "np.ndarray | None"]] = []
+        for text in chunks:
+            key = text.strip()[:200]
+            meta = metadata_by_key.get(key)
+            recency = meta["recency"] if meta else 0.0
+            embedding = meta.get("embedding") if meta else None
+            annotated.append((recency, text, embedding))
+
+        # Sort oldest → newest (ascending recency)
+        annotated.sort(key=lambda x: x[0])
+
+        # Contradiction detection: find pairs of chunks that are
+        # semantically similar (cosine > threshold) but have different
+        # recency values. The older one is superseded by the newer one.
+        contradiction_threshold = getattr(self, "contradiction_sim_threshold", 0.85)
+        superseded: set[int] = set()   # indices of older conflicting facts
+        current: set[int] = set()      # indices of newer conflicting facts
+
+        if getattr(self, "contradiction_context", False):
+            import numpy as np
+            n_ann = len(annotated)
+            for i in range(n_ann):
+                for j in range(i + 1, n_ann):
+                    emb_i = annotated[i][2]
+                    emb_j = annotated[j][2]
+                    if emb_i is None or emb_j is None:
+                        continue
+                    sim = float(np.dot(emb_i, emb_j))
+                    if sim >= contradiction_threshold:
+                        # i is older (sorted), j is newer
+                        rec_i = annotated[i][0]
+                        rec_j = annotated[j][0]
+                        if rec_i != rec_j:
+                            superseded.add(i)
+                            current.add(j)
+
+        # Format with temporal + contradiction annotations
+        lines = []
+        n = len(annotated)
+        for i, (recency, text, _emb) in enumerate(annotated):
+            # Contradiction tags take priority over temporal tags
+            if i in superseded:
+                tag = "[SUPERSEDED] "
+            elif i in current:
+                tag = "[CURRENT] "
+            elif n <= 1:
+                tag = ""
+            elif i < n // 3:
+                tag = "[older] "
+            elif i >= n - n // 3:
+                tag = "[newer] "
+            else:
+                tag = ""
+            lines.append(f"{tag}{text}")
+
+        instructions = (
+            "Facts in the knowledge pool are ordered from oldest to newest. "
+            "When facts conflict, prefer the most recent (newer) information."
+        )
+        if superseded:
+            instructions += (
+                " Facts marked [SUPERSEDED] have been replaced by newer "
+                "[CURRENT] facts — ignore superseded facts entirely."
+            )
+        return "\n\n".join(lines), instructions
+
     def _generate_answer(
-        self, question: str, context: str
+        self, question: str, context: str,
+        extra_system_instructions: str = "",
     ) -> tuple[str, int, int, float]:
         """Call LLM to generate an answer from retrieved context."""
         self._ensure_llm_client()
@@ -484,6 +943,8 @@ class HermesMemoryAgent:
             "You are a helpful assistant that answers questions from a "
             "knowledge pool. Give a very concise answer."
         )
+        if extra_system_instructions:
+            system_msg = system_msg + " " + extra_system_instructions
         # The MABench query already contains full instructions about serial
         # numbers and recency. Prepend retrieved memories as the knowledge pool.
         user_msg = (
@@ -535,6 +996,17 @@ class HermesMemoryAgent:
             reconsolidation=False,
             recency_alpha=self.coupled_engine.recency_alpha,
             dream_params=self.dream_params,
+            dedup_threshold=self.dedup_threshold,
         )
         self._store_count = 0
         self._scorer._cache.clear()
+
+        # Reset triadic memory (fresh tensor, codebook, mappings)
+        if getattr(self, '_triadic', None) is not None:
+            self._triadic = TriadicMemory(
+                n=self._triadic.n, p=self._triadic.p,
+            )
+
+        # Reset entity accumulator
+        if hasattr(self, '_entity_accumulator'):
+            self._entity_accumulator = _MutableEntityGraph()

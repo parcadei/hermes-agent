@@ -140,47 +140,98 @@ def _is_acknowledgment(text: str) -> bool:
     return normalized in _ACKNOWLEDGMENTS
 
 
-def _classify_fact(text: str) -> str:
-    """Classify fact type based on content heuristics.
+# ---- Speech-act taxonomy patterns for _classify_fact ----
 
-    Returns one of: "decision", "explanation", "gotcha", "architecture",
-    "debug", "general".
+_SPEECH_CORRECTION_MARKERS = [
+    r"\bactually\b",
+    r"\bno,\s",
+    r"\bwrong\b",
+    r"\bcorrection:",
+    r"\binstead\s+of\b",
+    r"\bdon'?t\s+use\b",
+    r"\bnot\s+\w+\s*,\s*(?:but|rather)\b",
+    r"\bstop\s+using\b",
+    r"\bthat'?s\s+(?:not|in)correct\b",
+    r"\bwait\b.*\bactually\b",
+    r"\bi\s+was\s+wrong\b",
+]
+_SPEECH_CORRECTION_RE = re.compile(
+    "|".join(_SPEECH_CORRECTION_MARKERS), re.IGNORECASE
+)
+
+_SPEECH_INSTRUCTION_MARKERS = [
+    r"\b(?:should|must|shall)\s",
+    r"\balways\s",
+    r"\bnever\s",
+    r"\bmake\s+sure\b",
+    r"\buse\s+\w+\s+(?:for|to|when|instead)\b",
+    r"\bdecided\s+to\b",
+    r"\bwe\s+(?:chose|decided|agreed)\b",
+    r"^\s*(?:do|run|set|add|remove|configure|enable|disable)\s",
+]
+_SPEECH_INSTRUCTION_RE = re.compile(
+    "|".join(_SPEECH_INSTRUCTION_MARKERS), re.IGNORECASE | re.MULTILINE
+)
+
+_SPEECH_PREFERENCE_MARKERS = [
+    r"\bprefer\b",
+    r"\bi\s+like\b",
+    r"\bi'?d\s+rather\b",
+    r"\bfavorite\b",
+    r"\bpersonally\b",
+    r"\bmy\s+(?:style|preference|choice)\b",
+]
+_SPEECH_PREFERENCE_RE = re.compile(
+    "|".join(_SPEECH_PREFERENCE_MARKERS), re.IGNORECASE
+)
+
+_SPEECH_REASONING_MARKERS = [
+    r"\btherefore\b",
+    r"\bwhich\s+means\b",
+    r"\bthis\s+implies\b",
+    r"\bso\s+(?:the|we|it)\b",
+    r"\b(?:because|since)\b.*\b(?:therefore|so|thus)\b",
+]
+_SPEECH_REASONING_RE = re.compile(
+    "|".join(_SPEECH_REASONING_MARKERS), re.IGNORECASE
+)
+
+
+def _classify_fact(text: str, source: str = "assistant") -> str:
+    """Classify fact type using speech-act taxonomy.
+
+    Returns one of the keys in coupled_engine._CATEGORY_BOOST:
+      "correction", "instruction", "preference", "fact", "reasoning_chain",
+      "reasoning".
+
+    Classification priority (highest to lowest):
+      1. correction  -- speaker corrects/overrides prior information
+      2. instruction -- speaker directs an action or establishes a rule
+      3. preference  -- speaker expresses a non-binding preference
+      4. reasoning_chain -- multi-step inference with connectives
+      5. fact        -- default fallback (objective statement)
+
+    The source parameter is available for callers but does NOT change
+    classification logic. Classification is based purely on text content.
     """
-    lower = text.lower()
+    # 1. Correction markers (highest priority)
+    if _SPEECH_CORRECTION_RE.search(text):
+        return "correction"
 
-    # Decision keywords
-    if any(
-        kw in lower
-        for kw in ("decided", "decision", "chose", "should use", "we chose")
-    ):
-        return "decision"
+    # 2. Instruction markers
+    if _SPEECH_INSTRUCTION_RE.search(text):
+        return "instruction"
 
-    # Explanation keywords
-    if any(
-        kw in lower
-        for kw in ("because", "reason", "the issue was", "root cause")
-    ):
-        return "explanation"
+    # 3. Preference markers
+    if _SPEECH_PREFERENCE_RE.search(text):
+        return "preference"
 
-    # Gotcha / warning keywords
-    if any(
-        kw in lower
-        for kw in ("gotcha", "careful", "watch out", "don't forget", "important:")
-    ):
-        return "gotcha"
+    # 4. Reasoning chain markers (text blocks only)
+    if _SPEECH_REASONING_RE.search(text):
+        return "reasoning_chain"
 
-    # Architecture / design keywords
-    if any(
-        kw in lower
-        for kw in ("architecture", "design", "pattern", "structure")
-    ):
-        return "architecture"
-
-    # Debug keywords
-    if any(kw in lower for kw in ("bug", "fix", "error", "debug", "stack trace")):
-        return "debug"
-
-    return "general"
+    # 5. Everything else -> "fact"
+    return "fact"
 
 
 # ---- Metacognition markers for thinking blocks (Layer 2) ----
@@ -226,6 +277,17 @@ _HYPOTHESIS_RE = re.compile("|".join(_HYPOTHESIS_MARKERS), re.IGNORECASE)
 
 # ---- Text block classification markers (Layer 2 vs noise) ----
 
+_TEXT_CORRECTION_MARKERS = [
+    r"\bi\s+was\s+wrong\b",
+    r"\bthat'?s\s+(?:not|in)correct\b",
+    r"\bactually\s+no\b",
+    r"\bcorrection:",
+    r"\bi\s+(?:made\s+a\s+mistake|need\s+to\s+correct)\b",
+    r"\blet\s+me\s+correct\b",
+    r"\bi\s+(?:apologize|misspoke)\b",
+]
+_TEXT_CORRECTION_RE = re.compile("|".join(_TEXT_CORRECTION_MARKERS), re.IGNORECASE)
+
 _TEXT_FINDING_MARKERS = [
     r"this\s+is\s+revealing",
     r"interesting",
@@ -269,15 +331,25 @@ def _is_metacognitive_text(text: str) -> Optional[str]:
     """Check if an assistant text block contains metacognition (Layer 2).
 
     Returns fact_type if metacognitive, None if not.
-    Text blocks that are findings, reasoning, or decisions get routed to
-    Layer 2 instead of Layer 1.
+    Text blocks that are corrections, findings, reasoning, or decisions
+    get routed to Layer 2 (agent_meta) instead of Layer 1 (user_knowledge).
+
+    Return values are mapped to _CATEGORY_BOOST keys:
+      correction -> "self_correction" (agent correcting itself)
+      finding    -> "fact"            (agent observation, factual)
+      reasoning  -> "fact"            (explanation is a factual statement)
+      decision   -> "instruction"     (a decision establishes a directive)
+
+    Priority order matches _classify_fact: correction > finding > reasoning > decision.
     """
+    if _TEXT_CORRECTION_RE.search(text):
+        return "self_correction"
     if _TEXT_FINDING_RE.search(text):
-        return "finding"
+        return "fact"
     if _TEXT_REASONING_RE.search(text):
-        return "explanation"
+        return "fact"
     if _TEXT_DECISION_RE.search(text):
-        return "decision"
+        return "instruction"
     return None
 
 
@@ -343,6 +415,8 @@ def _extract_thinking_facts(
         if fact_type is None:
             continue
         chain_info = chain_map.get(i)
+        # Map internal thinking labels to _CATEGORY_BOOST keys
+        boost_key = _THINKING_TO_BOOST_KEY.get(fact_type, fact_type)
         facts.append(
             MemoryFact(
                 text=para,
@@ -350,7 +424,7 @@ def _extract_thinking_facts(
                 project=turn.project,
                 session_id=turn.session_id,
                 source="thinking",
-                fact_type=fact_type,
+                fact_type=boost_key,
                 layer="agent_meta",
                 chain_id=chain_info[0] if chain_info else None,
                 chain_position=chain_info[1] if chain_info else None,
@@ -399,6 +473,15 @@ _ARC_LABELS = {
     "self_correction": "CORR",
     "finding": "FIND",
     "hypothesis": "HYP",
+}
+
+# Mapping from internal _classify_thinking_paragraph labels to _CATEGORY_BOOST
+# keys. Internal labels are preserved for arc-pattern generation (above), but
+# fact_type stored in MemoryFact must be a _CATEGORY_BOOST key.
+_THINKING_TO_BOOST_KEY = {
+    "self_correction": "self_correction",
+    "finding": "finding",
+    "hypothesis": "hypothesis",
 }
 
 

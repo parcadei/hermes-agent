@@ -19,6 +19,7 @@ Privacy invariant: dream() NEVER accesses text content.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import time
 import dataclasses
@@ -26,6 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+import scipy.sparse as sp
+
+logger = logging.getLogger(__name__)
 
 try:
     import faiss
@@ -40,7 +44,10 @@ from dream_metrics import (
 from dream_ops import (
     DreamParams,
     DreamReport,
+    GraphDreamParams,
+    GraphDreamReport,
     dream_cycle_xb,
+    graph_dream_cycle,
     hopfield_update,
     hopfield_update_biased,
     spreading_activation,
@@ -88,6 +95,26 @@ class MemoryEntry:
     fact_type: str = "general"  # freeform, e.g. "finding", "reasoning_chain", "decision"
 
 
+def _make_result(index: int, score: float, m: "MemoryEntry") -> dict:
+    """Build a retrieval result dict with full metadata envelope.
+
+    All query methods return results through this helper so that
+    outgestion formatters can access any stored signal without
+    modifying every retrieval path independently.
+    """
+    return {
+        "index": index,
+        "score": score,
+        "text": m.text,
+        "recency": float(m.recency),
+        "importance": float(m.importance),
+        "access_count": int(m.access_count),
+        "layer": m.layer,
+        "fact_type": m.fact_type,
+        "embedding": m.embedding,
+    }
+
+
 # Layer-aware importance seed map.
 # Each cognitive layer has a default importance floor that determines
 # dream survival (tagged threshold >= 0.7). This is a dream-survival
@@ -104,9 +131,12 @@ _LAYER_IMPORTANCE = {
 # Unrecognized fact_types get 0.0 (no content boost, layer seed only).
 _CATEGORY_BOOST = {
     "correction": 0.9,
+    "self_correction": 0.7,    # agent self-correction (weaker than user correction)
     "instruction": 0.85,
     "preference": 0.8,
     "fact": 0.6,
+    "finding": 0.65,           # agent finding (slightly above generic fact)
+    "hypothesis": 0.5,         # agent hypothesis (speculative, below fact)
     "reasoning_chain": 0.75,
     "reasoning": 0.4,
 }
@@ -192,6 +222,7 @@ class CoupledEngine:
         hebbian_epsilon: float = 0.01,
         ppr_blend_weight: float = 0.3,
         ppr_damping: float = 0.5,
+        dedup_threshold: float = 0.0,
     ):
         self.dim = dim
         self.beta = beta
@@ -207,6 +238,8 @@ class CoupledEngine:
         self.contradiction_threshold = contradiction_threshold
         self.recency_alpha = recency_alpha
         self.dream_params = dream_params
+        self.dedup_threshold = dedup_threshold
+        self._dedup_skipped = 0  # counter for logging
         self.memory_store: list[MemoryEntry] = []
         self.ppr_blend_weight = ppr_blend_weight
         self.ppr_damping = ppr_damping
@@ -218,6 +251,9 @@ class CoupledEngine:
         self._session_buffer: list[np.ndarray] = []
         self._session_indices: list[int] = []  # indices of facts stored in current session
         self._co_occurrence: dict[int, dict[int, float]] = {}  # index -> {neighbor: weight}
+        self._cooc_csr_cache: sp.csr_matrix | None = None  # cached row-normalized sparse matrix
+        self._dream_edges: dict[int, dict[int, float]] = {}  # cross-session dream graph (neocortical)
+        self._dream_csr_cache: sp.csr_matrix | None = None  # cached row-normalized dream sparse matrix
         self._co_retrieval: dict[int, dict[int, float]] = {}  # co-retrieval graph (right invariance)
         self._co_retrieval_query_count: int = 0
         self._W_temporal = np.zeros((dim, dim), dtype=np.float64)
@@ -256,6 +292,86 @@ class CoupledEngine:
     def _invalidate_cache(self) -> None:
         self._embeddings_cache = None
         self._W_cache = None
+        self._cooc_csr_cache = None
+        self._dream_csr_cache = None
+
+    def _cooc_sparse_normalized(self) -> sp.csr_matrix:
+        """Build row-normalized CSR matrix from _co_occurrence dict (cached).
+
+        Each row is normalized so weights sum to 1. Multiplying this matrix
+        by a score vector gives the weighted mean neighbor score for each node.
+        This replaces the O(nnz)-in-Python loop with O(nnz)-in-C sparse matmul.
+        """
+        if self._cooc_csr_cache is not None:
+            return self._cooc_csr_cache
+
+        N = self.n_memories
+        if N == 0 or not self._co_occurrence:
+            self._cooc_csr_cache = sp.csr_matrix((N, N), dtype=np.float64)
+            return self._cooc_csr_cache
+
+        rows, cols, data = [], [], []
+        for i, neighbors in self._co_occurrence.items():
+            if i >= N:
+                continue
+            for j, w in neighbors.items():
+                if j < N:
+                    rows.append(i)
+                    cols.append(j)
+                    data.append(w)
+
+        A = sp.csr_matrix(
+            (np.array(data, dtype=np.float64),
+             (np.array(rows, dtype=np.int32),
+              np.array(cols, dtype=np.int32))),
+            shape=(N, N),
+        )
+        # Row-normalize: each row sums to 1
+        row_sums = np.array(A.sum(axis=1), dtype=np.float64).ravel()
+        row_sums[row_sums == 0] = 1.0
+        D_inv = sp.diags(1.0 / row_sums, format="csr")
+        A_norm = D_inv @ A
+
+        self._cooc_csr_cache = A_norm
+        return A_norm
+
+    def _dream_sparse_normalized(self) -> sp.csr_matrix:
+        """Build row-normalized CSR matrix from _dream_edges dict (cached).
+
+        Same structure as _cooc_sparse_normalized but for the dream graph.
+        Dream edges are cross-session bridges discovered by graph_dream.
+        """
+        if self._dream_csr_cache is not None:
+            return self._dream_csr_cache
+
+        N = self.n_memories
+        if N == 0 or not self._dream_edges:
+            self._dream_csr_cache = sp.csr_matrix((N, N), dtype=np.float64)
+            return self._dream_csr_cache
+
+        rows, cols, data = [], [], []
+        for i, neighbors in self._dream_edges.items():
+            if i >= N:
+                continue
+            for j, w in neighbors.items():
+                if j < N:
+                    rows.append(i)
+                    cols.append(j)
+                    data.append(w)
+
+        A = sp.csr_matrix(
+            (np.array(data, dtype=np.float64),
+             (np.array(rows, dtype=np.int32),
+              np.array(cols, dtype=np.int32))),
+            shape=(N, N),
+        )
+        row_sums = np.array(A.sum(axis=1), dtype=np.float64).ravel()
+        row_sums[row_sums == 0] = 1.0
+        D_inv = sp.diags(1.0 / row_sums, format="csr")
+        A_norm = D_inv @ A
+
+        self._dream_csr_cache = A_norm
+        return A_norm
 
     def _compute_effective_importance(self, m: MemoryEntry, now: float) -> float:
         """Compute time-decayed importance with novelty bonus.
@@ -373,6 +489,24 @@ class CoupledEngine:
         # Lazy-init FAISS index
         if faiss is not None and self._faiss_index is None:
             self._faiss_index = faiss.IndexFlatIP(self.dim)
+
+        # Ingestion-time deduplication: skip near-duplicate embeddings entirely.
+        # This prevents overlapping text chunks from inflating memory count,
+        # reducing the need for aggressive dream prune/merge later.
+        if self.dedup_threshold > 0 and self.n_memories > 0:
+            if self._faiss_index is not None and self._faiss_index.ntotal > 0:
+                emb_f32 = emb_normed.astype(np.float32).reshape(1, -1)
+                D, I = self._faiss_index.search(emb_f32, 1)
+                if float(D[0, 0]) > self.dedup_threshold:
+                    self._dedup_skipped += 1
+                    return int(I[0, 0])
+            elif emb_norm > 1e-12:
+                X = self._embeddings_matrix()
+                sims = X @ emb / (np.linalg.norm(X, axis=1) * emb_norm + 1e-12)
+                best_sim = float(np.max(sims))
+                if best_sim > self.dedup_threshold:
+                    self._dedup_skipped += 1
+                    return int(np.argmax(sims))
 
         # Contradiction detection: find the most similar existing pattern
         if self.contradiction_aware and self.n_memories > 0:
@@ -510,6 +644,8 @@ class CoupledEngine:
         self._session_buffer = []
         self._session_indices = []
         self._co_occurrence: dict[int, dict[int, float]] = {}
+        self._dream_edges: dict[int, dict[int, float]] = {}
+        self._dream_csr_cache = None
         self._co_retrieval: dict[int, dict[int, float]] = {}
         self._co_retrieval_query_count: int = 0
 
@@ -722,6 +858,164 @@ class CoupledEngine:
                 nbrs_b[a] = nbrs_b.get(a, 0.0) + edge_delta
 
         return results
+
+    def query_partitioned(
+        self,
+        embedding: np.ndarray,
+        beta: float | None = None,
+        user_top_k: int = 5,
+        agent_top_k: int = 5,
+    ) -> dict:
+        """Retrieve memories with separate top-k per pool.
+
+        Partitions memory_store into two pools:
+          - user pool: layer == "user_knowledge"
+          - agent pool: layer in ("agent_meta", "procedural")
+
+        Each pool gets independent top-k selection, score ordering,
+        and PPR co-retrieval expansion.
+
+        Returns:
+            dict with keys "user_memories" and "agent_memories",
+            each a list of dicts with keys: index, score, text, layer, fact_type.
+            Indices are global (position in self.memory_store).
+        """
+        if beta is None:
+            beta = self.beta
+
+        emb = np.asarray(embedding, dtype=np.float64).ravel()
+        if emb.shape[0] != self.dim:
+            raise ValueError(
+                f"Query dimension {emb.shape[0]} != engine dim {self.dim}"
+            )
+
+        N = self.n_memories
+        if N == 0:
+            return {"user_memories": [], "agent_memories": []}
+
+        embeddings = self._embeddings_matrix()
+
+        # Direct cosine similarity between query and each stored pattern
+        emb_norm = np.linalg.norm(emb)
+        if emb_norm < 1e-12:
+            return {"user_memories": [], "agent_memories": []}
+        norms = np.linalg.norm(embeddings, axis=1) * emb_norm + 1e-12
+        cosine_scores = embeddings @ emb / norms
+
+        # Phase 13 coherence switching (same logic as query())
+        scores = cosine_scores.copy()
+        if self.recency_alpha > 0.0:
+            recencies = np.array(
+                [m.recency for m in self.memory_store], dtype=np.float64
+            )
+            max_rec = recencies.max()
+            if max_rec > 0.0:
+                norm_rec = recencies / max_rec
+                multi_scores = cosine_scores * (
+                    1.0 + self.recency_alpha * norm_rec
+                )
+                cosine_rank1 = int(np.argmax(cosine_scores))
+                multi_rank1 = int(np.argmax(multi_scores))
+                if cosine_rank1 == multi_rank1:
+                    scores = multi_scores
+
+        # PPR co-retrieval expansion (global, then partition)
+        has_co_retrieval = any(
+            len(v) > 0 for v in self._co_retrieval.values()
+        ) if self._co_retrieval else False
+
+        if has_co_retrieval and N > 1:
+            seed_k = min(5, N)
+            seed_idx = np.argsort(cosine_scores)[::-1][:seed_k]
+            seed_vals = cosine_scores[seed_idx]
+            ppr = self._ppr_scores(seed_idx, seed_vals)
+
+            ppr_99 = np.percentile(ppr, 99) if N > 1 else ppr.max()
+            if ppr_99 > 0:
+                ppr_normalized = np.clip(ppr / ppr_99, 0.0, 1.0)
+                blended = (
+                    (1 - self.ppr_blend_weight) * scores
+                    + self.ppr_blend_weight * ppr_normalized
+                )
+                cosine_rank1 = int(np.argmax(cosine_scores))
+                blended_rank1 = int(np.argmax(blended))
+                if cosine_rank1 == blended_rank1:
+                    scores = blended
+
+        # Partition indices by pool
+        user_indices = [
+            i for i, m in enumerate(self.memory_store)
+            if m.layer == "user_knowledge"
+        ]
+        agent_indices = [
+            i for i, m in enumerate(self.memory_store)
+            if m.layer in ("agent_meta", "procedural")
+        ]
+
+        # Per-pool top-k selection
+        user_scored = sorted(
+            [(i, float(scores[i])) for i in user_indices],
+            key=lambda x: -x[1],
+        )
+        agent_scored = sorted(
+            [(i, float(scores[i])) for i in agent_indices],
+            key=lambda x: -x[1],
+        )
+
+        user_top = user_scored[:user_top_k]
+        agent_top = agent_scored[:agent_top_k]
+
+        # Build result dicts and apply side effects (same as query())
+        now = time.time()
+
+        def _build_results(top_list):
+            results = []
+            for i, sc in top_list:
+                m = self.memory_store[i]
+                m.access_count += 1
+                m.last_access_time = now
+                m.importance = _importance_update(
+                    m.importance, self.importance_delta, 1.0
+                )
+                results.append(_make_result(int(i), sc, m))
+            return results
+
+        user_results = _build_results(user_top)
+        agent_results = _build_results(agent_top)
+
+        # Reconsolidation: same as query()
+        if self.reconsolidation:
+            eta = self.reconsolidation_eta
+            all_top_indices = [i for i, _ in user_top] + [i for i, _ in agent_top]
+            for i in all_top_indices:
+                m = self.memory_store[i]
+                old_emb = m.embedding
+                m.embedding = old_emb + eta * (emb - old_emb)
+                norm = np.linalg.norm(m.embedding)
+                if norm > 1e-12:
+                    m.embedding = m.embedding / norm
+            if all_top_indices:
+                self._invalidate_cache()
+
+        # Co-retrieval edge logging (within each pool independently)
+        self._co_retrieval_query_count += 1
+        for top_list in (user_top, agent_top):
+            k_eff = len(top_list)
+            specificity = 1.0 / math.sqrt(k_eff) if k_eff > 0 else 1.0
+            for ii in range(k_eff):
+                for jj in range(ii + 1, k_eff):
+                    a, b = top_list[ii][0], top_list[jj][0]
+                    strength = math.sqrt(
+                        max(top_list[ii][1], 0.0)
+                        * max(top_list[jj][1], 0.0)
+                    )
+                    edge_delta = strength * specificity
+                    nbrs_a = self._co_retrieval.setdefault(a, {})
+                    nbrs_b = self._co_retrieval.setdefault(b, {})
+                    nbrs_a[b] = nbrs_a.get(b, 0.0) + edge_delta
+                    nbrs_b[a] = nbrs_b.get(a, 0.0) + edge_delta
+
+        return {"user_memories": user_results, "agent_memories": agent_results}
 
     def query_readonly(
         self,
@@ -1161,11 +1455,7 @@ class CoupledEngine:
             m.importance = _importance_update(
                 m.importance, self.importance_delta, 1.0
             )
-            results.append({
-                "index": int(i),
-                "score": float(combined_scores[i]),
-                "text": m.text,
-            })
+            results.append(_make_result(int(i), float(combined_scores[i]), m))
 
         # Co-retrieval edge logging: Hebbian weights
         self._co_retrieval_query_count += 1
@@ -1303,11 +1593,7 @@ class CoupledEngine:
             m.importance = _importance_update(
                 m.importance, self.importance_delta, 1.0
             )
-            results.append({
-                "index": int(idx),
-                "score": float(score),
-                "text": m.text,
-            })
+            results.append(_make_result(int(idx), float(score), m))
 
         return results
 
@@ -1400,11 +1686,7 @@ class CoupledEngine:
             m.importance = _importance_update(
                 m.importance, self.importance_delta, 1.0
             )
-            results.append({
-                "index": int(idx),
-                "score": float(score),
-                "text": m.text,
-            })
+            results.append(_make_result(int(idx), float(score), m))
 
         # Log co-retrieval edges from this query too: Hebbian weights
         top_result_indices = [r["index"] for r in results]
@@ -1433,6 +1715,7 @@ class CoupledEngine:
         beta: float | None = None,
         top_k: int = 10,
         cooc_weight: float = 0.3,
+        dream_weight: float = 0.0,
         gate_threshold: float = 0.0,
     ) -> list[dict]:
         """Full-store co-occurrence boost: every memory gets credit from neighbors.
@@ -1443,15 +1726,14 @@ class CoupledEngine:
         For each memory i:
           final_score[i] = cosine_score[i]
                          + cooc_weight * mean(cosine_score[j] for j in cooc[i])
+                         + dream_weight * mean(cosine_score[j] for j in dream[i])
 
-        This means fact_B at cosine rank 81 still gets a boost if its
-        co-occurrence partner fact_A scored 0.60, even though neither
-        is in the cosine top-10.
+        Dual-graph architecture: cooc_boost uses intra-session co-occurrence,
+        dream_boost uses cross-session dream edges. Two independent signals
+        combined additively.
 
         Confidence gating: if gate_threshold > 0 and the top cosine score
-        exceeds the threshold, skip the co-occurrence boost entirely and
-        return pure cosine results. This prevents hubness noise from
-        overriding confident retrievals at scale.
+        exceeds the threshold, skip boosts entirely and return pure cosine.
 
         Complexity: O(N + sum of co-occurrence degrees) — cheap for sparse graphs.
         """
@@ -1481,23 +1763,18 @@ class CoupledEngine:
         if gate_threshold > 0.0 and cos_scores.max() >= gate_threshold:
             final_scores = cos_scores.copy()
         else:
-            # Co-occurrence boost: each memory gets weighted mean cosine of neighbors.
-            # Edge weights encode session size — bridge pairs (session of 2) get
-            # weight 0.5 per partner, while background facts in sessions of 20 get
-            # weight 0.05 each. This naturally prioritizes co-occurrence from small,
-            # focused sessions.
-            final_scores = cos_scores.copy()
-            for idx in range(N):
-                neighbors = self._co_occurrence.get(idx, {})
-                if neighbors:
-                    weighted_sum = sum(
-                        w * cos_scores[j] for j, w in neighbors.items() if j < N
-                    )
-                    total_weight = sum(
-                        w for j, w in neighbors.items() if j < N
-                    )
-                    if total_weight > 0:
-                        final_scores[idx] += cooc_weight * weighted_sum / total_weight
+            # Co-occurrence boost via sparse matmul (vectorized).
+            # A_norm @ cos_scores gives weighted mean neighbor cosine for each node.
+            A_norm = self._cooc_sparse_normalized()
+            cooc_boost_vec = A_norm @ cos_scores
+            final_scores = cos_scores + cooc_weight * cooc_boost_vec
+
+            # Dream boost: separate signal from cross-session dream edges.
+            # Only active when dream_weight > 0 and _dream_edges is populated.
+            if dream_weight > 0.0 and self._dream_edges:
+                A_dream = self._dream_sparse_normalized()
+                dream_boost_vec = A_dream @ cos_scores
+                final_scores = final_scores + dream_weight * dream_boost_vec
 
         # Recency weighting
         if self.recency_alpha > 0.0:
@@ -1521,11 +1798,108 @@ class CoupledEngine:
             m.importance = _importance_update(
                 m.importance, self.importance_delta, 1.0
             )
-            results.append({
-                "index": int(i),
-                "score": float(final_scores[i]),
-                "text": m.text,
-            })
+            results.append(_make_result(int(i), float(final_scores[i]), m))
+
+        return results
+
+    # --- BM25 index (lazy-built from memory_store texts) ---
+
+    _bm25_index = None  # rank_bm25.BM25Okapi instance
+    _bm25_corpus_size: int = 0  # track when to rebuild
+
+    def _ensure_bm25(self) -> None:
+        """Lazy-build BM25 index from memory_store texts."""
+        if self._bm25_index is not None and self._bm25_corpus_size == self.n_memories:
+            return
+        from rank_bm25 import BM25Okapi
+        tokenized = [m.text.lower().split() for m in self.memory_store]
+        self._bm25_index = BM25Okapi(tokenized)
+        self._bm25_corpus_size = self.n_memories
+
+    def query_cooc_bm25(
+        self,
+        embedding: np.ndarray,
+        query_text: str,
+        beta: float | None = None,
+        top_k: int = 10,
+        cooc_weight: float = 0.3,
+        bm25_weight: float = 0.3,
+        gate_threshold: float = 0.0,
+    ) -> list[dict]:
+        """Co-occurrence boost + BM25 hybrid retrieval.
+
+        Blends three signals:
+          final_score[i] = cosine_score[i]
+                         + cooc_weight * cooc_boost[i]
+                         + bm25_weight * bm25_norm[i]
+
+        BM25 provides lexical matching that discriminates entity names
+        (e.g. "John Smith" vs "Jane Smith") which embeddings conflate.
+        """
+        if beta is None:
+            beta = self.beta
+
+        emb = np.asarray(embedding, dtype=np.float64).ravel()
+        if emb.shape[0] != self.dim:
+            raise ValueError(
+                f"Query dimension {emb.shape[0]} != engine dim {self.dim}"
+            )
+
+        N = self.n_memories
+        if N == 0:
+            return []
+
+        embeddings = self._embeddings_matrix()
+
+        # --- Cosine scores ---
+        emb_norm = np.linalg.norm(emb)
+        if emb_norm < 1e-12:
+            return []
+        norms = np.linalg.norm(embeddings, axis=1) * emb_norm + 1e-12
+        cos_scores = embeddings @ emb / norms
+
+        # --- BM25 scores (normalized to [0, 1]) ---
+        self._ensure_bm25()
+        tokenized_query = query_text.lower().split()
+        bm25_raw = self._bm25_index.get_scores(tokenized_query)
+        bm25_max = bm25_raw.max()
+        if bm25_max > 0:
+            bm25_norm = bm25_raw / bm25_max
+        else:
+            bm25_norm = bm25_raw
+
+        # --- Combine ---
+        if gate_threshold > 0.0 and cos_scores.max() >= gate_threshold:
+            final_scores = cos_scores + bm25_weight * bm25_norm
+        else:
+            # Cooc boost via sparse matmul (vectorized)
+            A_norm = self._cooc_sparse_normalized()
+            cooc_boost_arr = A_norm @ cos_scores
+            final_scores = cos_scores + cooc_weight * cooc_boost_arr + bm25_weight * bm25_norm
+
+        # Recency weighting
+        if self.recency_alpha > 0.0:
+            recencies = np.array(
+                [m.recency for m in self.memory_store], dtype=np.float64
+            )
+            max_rec = recencies.max()
+            if max_rec > 0.0:
+                norm_rec = recencies / max_rec
+                final_scores = final_scores * (1.0 + self.recency_alpha * norm_rec)
+
+        k = min(top_k, N)
+        top_indices = np.argsort(final_scores)[::-1][:k]
+
+        now = time.time()
+        results = []
+        for i in top_indices:
+            m = self.memory_store[i]
+            m.access_count += 1
+            m.last_access_time = now
+            m.importance = _importance_update(
+                m.importance, self.importance_delta, 1.0
+            )
+            results.append(_make_result(int(i), float(final_scores[i]), m))
 
         return results
 
@@ -1603,11 +1977,7 @@ class CoupledEngine:
             m.importance = _importance_update(
                 m.importance, self.importance_delta, 1.0
             )
-            results.append({
-                "index": int(i),
-                "score": float(final_scores[i]),
-                "text": m.text,
-            })
+            results.append(_make_result(int(i), float(final_scores[i]), m))
 
         return results
 
@@ -1686,11 +2056,7 @@ class CoupledEngine:
             m.importance = _importance_update(
                 m.importance, self.importance_delta, 1.0
             )
-            results.append({
-                "index": int(i),
-                "score": float(final_scores[i]),
-                "text": m.text,
-            })
+            results.append(_make_result(int(i), float(final_scores[i]), m))
 
         return results
 
@@ -1796,11 +2162,129 @@ class CoupledEngine:
             m.importance = _importance_update(
                 m.importance, self.importance_delta, 1.0
             )
-            results.append({
-                "index": int(i),
-                "score": float(final_scores[i]),
-                "text": m.text,
-            })
+            results.append(_make_result(int(i), float(final_scores[i]), m))
+
+        return results
+
+    def query_cooc_ppr(
+        self,
+        embedding: np.ndarray,
+        beta: float | None = None,
+        top_k: int = 10,
+        cooc_weight: float = 1.0,
+        gate_threshold: float = 0.0,
+        damping: float = 0.85,
+        ppr_steps: int = 10,
+        ppr_weight: float = 0.3,
+    ) -> list[dict]:
+        """Combined co-occurrence boost + PPR retrieval.
+
+        Combines two complementary graph signals:
+          1. Cooc boost: local 1-hop neighbor averaging (fast, high precision)
+          2. PPR: multi-hop diffusion (captures transitive bridging)
+
+        Scoring:
+          cooc_score[i] = cosine[i] + cooc_weight * mean(cosine[j] for j in cooc[i])
+          ppr_score[i]  = PPR stationary distribution seeded by cosine
+          final[i]      = (1 - ppr_weight) * cooc_score[i] + ppr_weight * ppr_norm[i]
+
+        PPR weight should be low (0.2-0.3) since cooc already captures most signal;
+        PPR adds transitive hops that cooc misses.
+        """
+        if beta is None:
+            beta = self.beta
+
+        emb = np.asarray(embedding, dtype=np.float64).ravel()
+        if emb.shape[0] != self.dim:
+            raise ValueError(
+                f"Query dimension {emb.shape[0]} != engine dim {self.dim}"
+            )
+
+        N = self.n_memories
+        if N == 0:
+            return []
+
+        embeddings = self._embeddings_matrix()
+
+        # Cosine scores for ALL memories
+        emb_norm = np.linalg.norm(emb)
+        if emb_norm < 1e-12:
+            return []
+        norms = np.linalg.norm(embeddings, axis=1) * emb_norm + 1e-12
+        cos_scores = embeddings @ emb / norms
+
+        # --- Stage 1: Co-occurrence boost ---
+        if gate_threshold > 0.0 and cos_scores.max() >= gate_threshold:
+            cooc_scores = cos_scores.copy()
+        else:
+            cooc_scores = cos_scores.copy()
+            for idx in range(N):
+                neighbors = self._co_occurrence.get(idx, {})
+                if neighbors:
+                    weighted_sum = sum(
+                        w * cos_scores[j] for j, w in neighbors.items() if j < N
+                    )
+                    total_weight = sum(
+                        w for j, w in neighbors.items() if j < N
+                    )
+                    if total_weight > 0:
+                        cooc_scores[idx] += cooc_weight * weighted_sum / total_weight
+
+        # --- Stage 2: PPR diffusion ---
+        temperature = 5.0
+        exp_scores = np.exp(temperature * (cos_scores - cos_scores.max()))
+        seed = exp_scores / exp_scores.sum()
+
+        # Build row-normalized adjacency
+        adj_weights: dict[int, dict[int, float]] = {}
+        for idx in range(N):
+            neighbors = self._co_occurrence.get(idx, {})
+            valid = {j: w for j, w in neighbors.items() if j < N}
+            if valid:
+                total = sum(valid.values())
+                adj_weights[idx] = {j: w / total for j, w in valid.items()}
+
+        r = seed.copy()
+        for _ in range(ppr_steps):
+            r_new = (1.0 - damping) * seed
+            for idx in range(N):
+                if idx in adj_weights:
+                    for j, w in adj_weights[idx].items():
+                        r_new[idx] += damping * w * r[j]
+            r = r_new
+
+        r_max = r.max()
+        if r_max > 1e-12:
+            r_normed = r / r_max
+        else:
+            r_normed = r
+
+        # --- Stage 3: Combine cooc + PPR ---
+        final_scores = (1.0 - ppr_weight) * cooc_scores + ppr_weight * r_normed
+
+        # Recency weighting
+        if self.recency_alpha > 0.0:
+            recencies = np.array(
+                [m.recency for m in self.memory_store], dtype=np.float64
+            )
+            max_rec = recencies.max()
+            if max_rec > 0.0:
+                norm_rec = recencies / max_rec
+                final_scores = final_scores * (1.0 + self.recency_alpha * norm_rec)
+
+        k = min(top_k, N)
+        top_indices = np.argsort(final_scores)[::-1][:k]
+
+        now = time.time()
+        results = []
+        for i in top_indices:
+            m = self.memory_store[i]
+            m.access_count += 1
+            m.last_access_time = now
+            m.importance = _importance_update(
+                m.importance, self.importance_delta, 1.0
+            )
+            results.append(_make_result(int(i), float(final_scores[i]), m))
 
         return results
 
@@ -1917,11 +2401,7 @@ class CoupledEngine:
             m.importance = _importance_update(
                 m.importance, self.importance_delta, 1.0
             )
-            results.append({
-                "index": int(i),
-                "score": float(final_scores[i]),
-                "text": m.text,
-            })
+            results.append(_make_result(int(i), float(final_scores[i]), m))
 
         return results
 
@@ -2007,6 +2487,30 @@ class CoupledEngine:
         return bool(low <= utilization <= high)
 
     # ------------------------------------------------------------------
+    # structural importance — bridge-aware dream protection
+    # ------------------------------------------------------------------
+
+    def _compute_structural_importance(self) -> np.ndarray:
+        """Structural importance from co-occurrence graph weighted degree.
+
+        Bridge facts (high cross-cluster connectivity) get high importance,
+        protecting them from dream's repulsion/prune/unlearn phases.
+        Implements Tononi & Cirelli's "protection from depression" rule:
+        well-integrated synapses resist synaptic homeostasis.
+        """
+        N = self.n_memories
+        if N == 0:
+            return np.zeros(0, dtype=np.float64)
+        degrees = np.zeros(N, dtype=np.float64)
+        for idx in range(N):
+            neighbors = self._co_occurrence.get(idx, {})
+            degrees[idx] = sum(neighbors.values())
+        max_deg = degrees.max()
+        if max_deg > 0:
+            degrees /= max_deg
+        return degrees
+
+    # ------------------------------------------------------------------
     # dream — proof-aligned {X, β} dream cycle
     # ------------------------------------------------------------------
 
@@ -2015,10 +2519,22 @@ class CoupledEngine:
         tagged_indices: list[int] | None = None,
         seed: int | None = None,
         dream_params: DreamParams | None = None,
+        bridge_aware: bool = False,
+        batch_mode: bool = False,
+        graph_mode: bool = False,
+        graph_dream_params: GraphDreamParams | None = None,
     ) -> dict:
         """Run proof-aligned dream cycle on {X, beta}. NEVER accesses text.
 
-        Runs the redesigned dream pipeline:
+        Partitioned dream: splits memory_store into user_pool
+        (layer=="user_knowledge") and agent_pool (layer in
+        ("agent_meta", "procedural")), runs dream_cycle_xb independently
+        on each pool, then reassembles the memory_store.
+
+        This guarantees that user corrections and agent observations about
+        the same topic never compete during prune/merge (C2.3 pool isolation).
+
+        Pipeline per pool:
           1. nrem_repulsion_xb (SHY: push apart close patterns)
           2. nrem_prune_xb (remove near-duplicates)
           3. nrem_merge_xb (merge similar groups into centroids)
@@ -2026,9 +2542,8 @@ class CoupledEngine:
           5. rem_explore_cross_domain_xb (cross-domain associations)
 
         Capacity-aware gating (Phase 14, Capacity.lean):
-          When N/N_max < 0.8, prune/merge thresholds are tightened to 0.99
-          so only exact duplicates are removed.  This prevents premature
-          consolidation when the network has ample room.
+          When N/N_max < 0.8 per pool, prune/merge thresholds are tightened
+          to 0.99 so only exact duplicates are removed.
 
         Modifies the pattern store X. Memory count may decrease (prune/merge).
         W is derived, not primary.
@@ -2039,14 +2554,89 @@ class CoupledEngine:
                 "modified": False, "associations": [], "n_tagged": 0,
                 "pruned": 0, "merged": 0, "n_before": 0, "n_after": 0,
                 "capacity_ratio": 0.0,
+                "user_pool_size_before": 0, "user_pool_size_after": 0,
+                "agent_pool_size_before": 0, "agent_pool_size_after": 0,
+                "user_pruned": 0, "agent_pruned": 0,
+                "user_merged": 0, "agent_merged": 0,
+            }
+
+        # --- Graph-mode dream: operate on SEPARATE dream graph, not embeddings ---
+        # Dual-graph architecture: cooc stays immutable, dream_edges gets bridges.
+        if graph_mode:
+            embeddings = self._embeddings_matrix()
+            gdp = graph_dream_params or GraphDreamParams()
+            report = graph_dream_cycle(
+                embeddings, self._co_occurrence, params=gdp,
+                dream_edges=self._dream_edges,
+                session_indices=self._session_indices,
+            )
+            self._dream_csr_cache = None  # invalidate after graph-dream mutates dream_edges
+            logger.info(
+                "GRAPH DREAM complete: edges %d->%d (replay=%d, tc=%d, pruned=%d)",
+                report.total_edges_before, report.total_edges_after,
+                report.edges_discovered, report.edges_from_tc, report.edges_pruned,
+            )
+            return {
+                "modified": report.edges_discovered > 0 or report.edges_from_tc > 0,
+                "graph_mode": True,
+                "n_before": N,
+                "n_after": N,  # graph dream never removes facts
+                "edges_before": report.total_edges_before,
+                "edges_after": report.total_edges_after,
+                "edges_discovered": report.edges_discovered,
+                "edges_from_tc": report.edges_from_tc,
+                "edges_pruned": report.edges_pruned,
+                # Backward-compat keys (all zero for graph mode)
+                "pruned": 0,
+                "merged": 0,
+                "associations": [],
+                "n_tagged": 0,
+                "capacity_ratio": 0.0,
+                "user_pool_size_before": 0, "user_pool_size_after": 0,
+                "agent_pool_size_before": 0, "agent_pool_size_after": 0,
+                "user_pruned": 0, "agent_pruned": 0,
+                "user_merged": 0, "agent_merged": 0,
             }
 
         # Compute effective importances via V1 bridge (decay + novelty)
         now = time.time()
-        importances = np.array([
+        time_importances = np.array([
             self._compute_effective_importance(m, now)
             for m in self.memory_store
         ])
+        if bridge_aware:
+            structural = self._compute_structural_importance()
+            importances = np.maximum(time_importances, structural)
+            # Diagnostic: importance distribution with bridge_aware
+            logger.info(
+                "DREAM DIAGNOSTICS bridge_aware=True N=%d | "
+                "time_imp: min=%.4f max=%.4f mean=%.4f >=0.7: %d/%d | "
+                "structural: min=%.4f max=%.4f mean=%.4f >=0.7: %d/%d | "
+                "combined: min=%.4f max=%.4f mean=%.4f >=0.7: %d/%d",
+                N,
+                time_importances.min(), time_importances.max(), time_importances.mean(),
+                int(np.sum(time_importances >= 0.7)), N,
+                structural.min(), structural.max(), structural.mean(),
+                int(np.sum(structural >= 0.7)), N,
+                importances.min(), importances.max(), importances.mean(),
+                int(np.sum(importances >= 0.7)), N,
+            )
+            # Percentile breakdown of structural importance
+            pcts = np.percentile(structural, [10, 25, 50, 75, 90, 95, 99])
+            logger.info(
+                "DREAM DIAGNOSTICS structural percentiles: "
+                "p10=%.4f p25=%.4f p50=%.4f p75=%.4f p90=%.4f p95=%.4f p99=%.4f",
+                *pcts,
+            )
+        else:
+            importances = time_importances
+            logger.info(
+                "DREAM DIAGNOSTICS bridge_aware=False N=%d | "
+                "time_imp: min=%.4f max=%.4f mean=%.4f >=0.7: %d/%d",
+                N,
+                time_importances.min(), time_importances.max(), time_importances.mean(),
+                int(np.sum(time_importances >= 0.7)), N,
+            )
 
         # Auto-tag: uses effective importance, NOT text
         if tagged_indices is None:
@@ -2059,32 +2649,111 @@ class CoupledEngine:
 
         embeddings = self._embeddings_matrix()
 
-        # --- Phase 14: Capacity-aware dream gating (Capacity.lean) ---
-        capacity_ratio = self._compute_capacity_ratio(embeddings)
-
         # Use explicit dream_params if provided, else fall back to stored default
-        effective_params = dream_params or self.dream_params or DreamParams()
+        base_params = dream_params or self.dream_params or DreamParams()
 
-        # When well below capacity, tighten thresholds to only prune
-        # exact duplicates (cosine > 0.99).  This prevents premature
-        # consolidation that removes patterns the eval still needs.
+        # --- Partition into user and agent pools (C2.1) ---
+        user_indices = [i for i, m in enumerate(self.memory_store)
+                        if m.layer == "user_knowledge"]
+        agent_indices = [i for i, m in enumerate(self.memory_store)
+                         if m.layer in ("agent_meta", "procedural")]
+
+        # Build reverse maps: global index -> pool-local index
+        tagged_set = set(tagged_indices)
+        user_set = set(user_indices)
+        agent_set = set(agent_indices)
+        global_to_user = {g: l for l, g in enumerate(user_indices)}
+        global_to_agent = {g: l for l, g in enumerate(agent_indices)}
+
+        # Map tagged_indices to per-pool local indices
+        tagged_user = [global_to_user[i] for i in tagged_indices if i in user_set]
+        tagged_agent = [global_to_agent[i] for i in tagged_indices if i in agent_set]
+
+        # --- Per-pool capacity-aware dream gating ---
         CAPACITY_GATE = 0.8
-        NEAR_DUP_PRUNE = 0.995   # Only prune exact duplicates
-        NEAR_DUP_MERGE = 0.99    # Only merge near-exact duplicates
-        if capacity_ratio < CAPACITY_GATE:
-            effective_params = dataclasses.replace(
-                effective_params,
-                prune_threshold=max(effective_params.prune_threshold, NEAR_DUP_PRUNE),
-                merge_threshold=max(effective_params.merge_threshold, NEAR_DUP_MERGE),
+        NEAR_DUP_PRUNE = 0.995
+        NEAR_DUP_MERGE = 0.99
+
+        def _run_pool_dream(pool_indices, pool_tagged, pool_seed):
+            """Run dream_cycle_xb on a single pool and return the DreamReport."""
+            n_pool = len(pool_indices)
+            if n_pool == 0:
+                return DreamReport(
+                    patterns=np.zeros((0, self.dim)),
+                    associations=[],
+                    pruned_indices=[],
+                    merge_map={},
+                )
+            pool_embs = embeddings[pool_indices]
+            pool_imps = importances[pool_indices]
+
+            # Per-pool capacity ratio
+            capacity = self._compute_capacity_ratio(pool_embs)
+            pool_params = dataclasses.replace(base_params)
+            if capacity < CAPACITY_GATE:
+                pool_params = dataclasses.replace(
+                    pool_params,
+                    prune_threshold=max(pool_params.prune_threshold, NEAR_DUP_PRUNE),
+                    merge_threshold=max(pool_params.merge_threshold, NEAR_DUP_MERGE),
+                )
+
+            if not pool_tagged:
+                pool_tagged = list(range(n_pool))
+
+            return dream_cycle_xb(
+                pool_embs, self.beta,
+                tagged_indices=pool_tagged,
+                importances=pool_imps,
+                seed=pool_seed,
+                params=pool_params,
+                batch_mode=batch_mode,
             )
 
-        report: DreamReport = dream_cycle_xb(
-            embeddings, self.beta,
-            tagged_indices=tagged_indices,
-            importances=importances,
-            seed=seed,
-            params=effective_params,
-        )
+        # Independent seeds per pool for reproducibility isolation
+        user_seed = seed
+        agent_seed = (seed + 1) if seed is not None else None
+
+        report_user = _run_pool_dream(user_indices, tagged_user, user_seed)
+        report_agent = _run_pool_dream(agent_indices, tagged_agent, agent_seed)
+
+        # Diagnostic: per-pool dream operation results
+        for pool_name, pool_idx, report in [
+            ("user", user_indices, report_user),
+            ("agent", agent_indices, report_agent),
+        ]:
+            n_pool = len(pool_idx)
+            n_pruned = len(report.pruned_indices)
+            n_merged_groups = len(report.merge_map)
+            n_merged_members = sum(len(g) for g in report.merge_map.values())
+            n_after = n_pool - n_pruned - n_merged_members + n_merged_groups
+            # Measure embedding drift from dream
+            if n_pool > 0:
+                pool_embs_before = embeddings[pool_idx]
+                pool_embs_after = report.patterns
+                if pool_embs_before.shape == pool_embs_after.shape:
+                    diffs = np.linalg.norm(pool_embs_after - pool_embs_before, axis=1)
+                    n_moved = int(np.sum(diffs > 1e-6))
+                    max_drift = float(diffs.max())
+                    mean_drift = float(diffs.mean())
+                else:
+                    n_moved = -1  # shape changed due to prune/merge
+                    max_drift = -1.0
+                    mean_drift = -1.0
+            else:
+                n_moved = 0
+                max_drift = 0.0
+                mean_drift = 0.0
+            logger.info(
+                "DREAM DIAGNOSTICS pool=%s n=%d pruned=%d "
+                "merged_groups=%d merged_members=%d n_after=%d "
+                "n_moved=%d max_drift=%.6f mean_drift=%.6f",
+                pool_name, n_pool, n_pruned,
+                n_merged_groups, n_merged_members, n_after,
+                n_moved, max_drift, mean_drift,
+            )
+
+        # --- Global capacity ratio (for backward compat) ---
+        capacity_ratio = self._compute_capacity_ratio(embeddings)
 
         # --- Decay co-retrieval edges (one dream cycle worth of decay) ---
         decay_factor = _strength_decay(self.decay_rate, 1.0, 1.0)
@@ -2093,52 +2762,89 @@ class CoupledEngine:
                 self._co_retrieval[idx][nbr] *= decay_factor
                 if self._co_retrieval[idx][nbr] < 0.01:
                     del self._co_retrieval[idx][nbr]
-            # Clean up empty neighbor dicts
             if not self._co_retrieval[idx]:
                 del self._co_retrieval[idx]
 
-        # --- Apply structural changes ---
-
-        pruned_set = set(report.pruned_indices)
-        merged_originals: set[int] = set()
-        for group in report.merge_map.values():
-            merged_originals.update(group)
-
-        # Build new memory store
+        # --- Apply structural changes per pool, build new store ---
+        # old_global -> new_global remap for co-occurrence/co-retrieval graphs
+        remap: dict[int, int] = {}
         new_store: list[MemoryEntry] = []
 
-        # Pass 1: keep non-pruned, non-merged entries with updated embeddings
-        output_idx = 0
-        for orig_idx in range(N):
-            if orig_idx in pruned_set or orig_idx in merged_originals:
-                continue
-            entry = self.memory_store[orig_idx]
-            entry.embedding = report.patterns[output_idx]
-            new_store.append(entry)
-            output_idx += 1
+        def _apply_pool_report(pool_indices, report, new_store_offset):
+            """Apply a single pool's DreamReport to build new_store entries.
 
-        # Pass 2: add merged centroid entries
-        for out_idx, group in sorted(report.merge_map.items()):
-            best_orig = max(group, key=lambda i: self.memory_store[i].importance)
-            merged_entry = MemoryEntry(
-                text=self.memory_store[best_orig].text,
-                embedding=report.patterns[out_idx],
-                importance=min(
-                    max(importances[g] for g in group) + 0.1, 1.0,
-                ),
-                creation_time=min(
-                    self.memory_store[g].creation_time for g in group
-                ),
-                last_access_time=max(self.memory_store[g].last_access_time for g in group),
-                access_count=sum(
-                    self.memory_store[g].access_count for g in group
-                ),
-                recency=self.memory_store[best_orig].recency,
-                tagged=True,
-                layer=self.memory_store[best_orig].layer,
-                fact_type=self.memory_store[best_orig].fact_type,
-            )
-            new_store.append(merged_entry)
+            Returns (pool_new_entries, pool_remap, n_pool_after).
+            pool_remap maps old global index -> new global index.
+            """
+            n_pool = len(pool_indices)
+            pool_entries: list[MemoryEntry] = []
+            pool_remap: dict[int, int] = {}
+
+            if n_pool == 0:
+                return pool_entries, pool_remap
+
+            pruned_local = set(report.pruned_indices)
+            merged_local_members: set[int] = set()
+            for group in report.merge_map.values():
+                merged_local_members.update(group)
+
+            # Pass 1: survivors (not pruned, not merged)
+            output_idx = 0
+            for local_idx in range(n_pool):
+                if local_idx in pruned_local or local_idx in merged_local_members:
+                    continue
+                global_idx = pool_indices[local_idx]
+                entry = self.memory_store[global_idx]
+                entry.embedding = report.patterns[output_idx]
+                pool_entries.append(entry)
+                pool_remap[global_idx] = new_store_offset + len(pool_entries) - 1
+                output_idx += 1
+
+            # Pass 2: merged centroids
+            for out_idx, local_group in sorted(report.merge_map.items()):
+                global_group = [pool_indices[li] for li in local_group]
+                best_global = max(global_group,
+                                  key=lambda gi: self.memory_store[gi].importance)
+                merged_entry = MemoryEntry(
+                    text=self.memory_store[best_global].text,
+                    embedding=report.patterns[out_idx],
+                    importance=min(
+                        max(importances[gi] for gi in global_group) + 0.1, 1.0,
+                    ),
+                    creation_time=min(
+                        self.memory_store[gi].creation_time for gi in global_group
+                    ),
+                    last_access_time=max(
+                        self.memory_store[gi].last_access_time for gi in global_group
+                    ),
+                    access_count=sum(
+                        self.memory_store[gi].access_count for gi in global_group
+                    ),
+                    recency=self.memory_store[best_global].recency,
+                    tagged=True,
+                    layer=self.memory_store[best_global].layer,
+                    fact_type=self.memory_store[best_global].fact_type,
+                )
+                pool_entries.append(merged_entry)
+                new_idx = new_store_offset + len(pool_entries) - 1
+                # All merged members map to the centroid's new index
+                for gi in global_group:
+                    pool_remap[gi] = new_idx
+
+            return pool_entries, pool_remap
+
+        # Process user pool first, then agent pool (ordering convention)
+        user_entries, user_remap = _apply_pool_report(
+            user_indices, report_user, 0,
+        )
+        new_store.extend(user_entries)
+        remap.update(user_remap)
+
+        agent_entries, agent_remap = _apply_pool_report(
+            agent_indices, report_agent, len(user_entries),
+        )
+        new_store.extend(agent_entries)
+        remap.update(agent_remap)
 
         self.memory_store = new_store
         self._invalidate_cache()
@@ -2154,22 +2860,79 @@ class CoupledEngine:
                 )
                 self._faiss_index.add(all_embs)
 
+        # --- Remap co-retrieval graph indices ---
+        new_co_retrieval: dict[int, dict[int, float]] = {}
+        for old_idx, neighbors in self._co_retrieval.items():
+            new_idx = remap.get(old_idx)
+            if new_idx is None:
+                continue
+            new_neighbors: dict[int, float] = {}
+            for old_nbr, weight in neighbors.items():
+                new_nbr = remap.get(old_nbr)
+                if new_nbr is not None and new_nbr != new_idx:
+                    new_neighbors[new_nbr] = max(
+                        new_neighbors.get(new_nbr, 0.0), weight
+                    )
+            if new_neighbors:
+                new_co_retrieval[new_idx] = new_neighbors
+        self._co_retrieval = new_co_retrieval
+
+        # --- Remap co-occurrence graph indices ---
+        new_co_occurrence: dict[int, dict[int, float]] = {}
+        for old_idx, neighbors in self._co_occurrence.items():
+            new_idx = remap.get(old_idx)
+            if new_idx is None:
+                continue
+            new_neighbors: dict[int, float] = {}
+            for old_nbr, weight in neighbors.items():
+                new_nbr = remap.get(old_nbr)
+                if new_nbr is not None and new_nbr != new_idx:
+                    new_neighbors[new_nbr] = max(
+                        new_neighbors.get(new_nbr, 0.0), weight
+                    )
+            if new_neighbors:
+                new_co_occurrence[new_idx] = new_neighbors
+        self._co_occurrence = new_co_occurrence
+
         # --- Log dream associations into co-retrieval graph ---
-        if report.associations:
-            # Build X4-index -> new_store-index remap
-            # Pass 1 survivors: X4[0..k-1] -> new_store[0..k-1] (identity)
-            # Pass 2 centroids: X4[merge_key] -> new_store[k + position]
+        # Process associations from both pools, remapping pool-local
+        # X4 indices to new_store global indices.
+        def _log_pool_associations(pool_indices, report, pool_remap):
+            """Log associations from a pool's DreamReport into co-retrieval."""
+            if not report.associations:
+                return
+            n_pool = len(pool_indices)
+            if n_pool == 0:
+                return
+
+            pruned_local = set(report.pruned_indices)
+            merged_local_members: set[int] = set()
+            for group in report.merge_map.values():
+                merged_local_members.update(group)
+
+            # Build X4-index -> new_store-index mapping for this pool
             n_survivors = sum(
-                1 for i in range(N)
-                if i not in pruned_set and i not in merged_originals
+                1 for li in range(n_pool)
+                if li not in pruned_local and li not in merged_local_members
             )
+
+            # Survivor X4 indices map to pool entries in order
+            # We need to find which global indices the survivors correspond to
+            # and look up their new positions via pool_remap
+            survivor_globals = []
+            for li in range(n_pool):
+                if li not in pruned_local and li not in merged_local_members:
+                    survivor_globals.append(pool_indices[li])
+
             x4_to_new: dict[int, int] = {}
-            # Survivors are identity-mapped
-            for idx in range(n_survivors):
-                x4_to_new[idx] = idx
-            # Centroids follow survivors
-            for pos, merge_key in enumerate(sorted(report.merge_map.keys())):
-                x4_to_new[merge_key] = n_survivors + pos
+            for x4_idx, gi in enumerate(survivor_globals):
+                x4_to_new[x4_idx] = pool_remap[gi]
+
+            # Centroids: merge_map keys are X4 output indices
+            for merge_key, local_group in sorted(report.merge_map.items()):
+                # All members of this group share the same new index
+                any_member_global = pool_indices[local_group[0]]
+                x4_to_new[merge_key] = pool_remap[any_member_global]
 
             for ai, aj, sim in report.associations:
                 ni = x4_to_new.get(ai)
@@ -2177,19 +2940,37 @@ class CoupledEngine:
                 if ni is not None and nj is not None and ni != nj:
                     nbrs_ni = self._co_retrieval.setdefault(ni, {})
                     nbrs_nj = self._co_retrieval.setdefault(nj, {})
-                    # Use similarity as weight (not binary 1.0)
                     nbrs_ni[nj] = max(nbrs_ni.get(nj, 0.0), sim)
                     nbrs_nj[ni] = max(nbrs_nj.get(ni, 0.0), sim)
+
+        _log_pool_associations(user_indices, report_user, user_remap)
+        _log_pool_associations(agent_indices, report_agent, agent_remap)
+
+        # --- Build result dict (C2.6, C2.7) ---
+        all_associations = report_user.associations + report_agent.associations
+        user_pruned = len(report_user.pruned_indices)
+        agent_pruned = len(report_agent.pruned_indices)
+        user_merged = len(report_user.merge_map)
+        agent_merged = len(report_agent.merge_map)
 
         return {
             "modified": True,
             "n_tagged": len(tagged_indices),
-            "associations": report.associations,
-            "pruned": len(report.pruned_indices),
-            "merged": len(report.merge_map),
+            "associations": all_associations,
+            "pruned": user_pruned + agent_pruned,
+            "merged": user_merged + agent_merged,
             "n_before": N,
             "n_after": len(new_store),
             "capacity_ratio": capacity_ratio,
+            # Per-pool stats (C2.6)
+            "user_pool_size_before": len(user_indices),
+            "user_pool_size_after": len(user_entries),
+            "agent_pool_size_before": len(agent_indices),
+            "agent_pool_size_after": len(agent_entries),
+            "user_pruned": user_pruned,
+            "agent_pruned": agent_pruned,
+            "user_merged": user_merged,
+            "agent_merged": agent_merged,
         }
 
     # ------------------------------------------------------------------

@@ -10,6 +10,7 @@ Reuses MABench data loading and metrics, substitutes HermesMemoryAgent for Agent
 
 import hashlib
 import json
+import logging
 import os
 import pickle
 import time
@@ -34,7 +35,7 @@ sys.path.insert(0, str(_HERMES_ROOT / "proofs" / "hermes-memory" / "python"))
 sys.path.insert(0, str(_NLCDM_PYTHON))
 
 from conversation_creator import ConversationCreator
-from dream_ops import DreamParams
+from dream_ops import DreamParams, GraphDreamParams
 from mabench.hermes_agent import HermesMemoryAgent
 from utils.eval_other_utils import metrics_summarization
 from utils.templates import get_template
@@ -179,6 +180,42 @@ def parse_args():
         "--decompose_max_hops", type=int, default=3,
         help="Maximum sub-queries for decomposition (default: 3)",
     )
+    parser.add_argument("--decompose_coverage", action="store_true",
+                        help="Use decomposition as coverage audit (gap-fill, not hop-chain)")
+    parser.add_argument("--decompose_rrf", action="store_true",
+                        help="Use RRF merge for decompose (instead of priority merge)")
+    parser.add_argument(
+        "--bm25_weight", type=float, default=0.0,
+        help="BM25 lexical matching weight (0=disabled). Blends with cosine+cooc for entity discrimination.",
+    )
+    parser.add_argument(
+        "--dedup_threshold", type=float, default=0.0,
+        help="Ingestion-time dedup: skip storing when cosine > threshold (0=disabled, 0.98 recommended)",
+    )
+    parser.add_argument("--dream_after_ingest", action="store_true",
+                        help="Run ONE dream cycle after ingestion completes (before queries)")
+    parser.add_argument("--bridge_aware_dream", action="store_true",
+                        help="Protect bridge facts from dream drift via structural importance (Tononi protection rule)")
+    parser.add_argument("--dream_batch_mode", action="store_true",
+                        help="Batch dream: skip repulsion+unlearn, only run prune+merge (safe dedup, no drift)")
+    parser.add_argument("--graph_dream", action="store_true",
+                        help="Run graph-level dream after ingest (replay + transitive closure + edge prune)")
+    parser.add_argument(
+        "--dream_weight", type=float, default=0.0,
+        help="Dream boost weight for dual-graph retrieval (0=disabled, 0.3=recommended)",
+    )
+    parser.add_argument(
+        "--dream_top_k", type=int, default=5,
+        help="Top-k sparsification for dream edge discovery (default: 5)",
+    )
+    parser.add_argument("--temporal_context", action="store_true",
+                        help="Enable temporal ordering in outgestion context "
+                             "(sort by recency, annotate older/newer)")
+    parser.add_argument("--contradiction_context", action="store_true",
+                        help="Enable contradiction detection in outgestion "
+                             "(flag high-similarity chunks as SUPERSEDED/CURRENT)")
+    parser.add_argument("--contradiction_sim_threshold", type=float, default=0.85,
+                        help="Cosine similarity threshold for contradiction detection (default: 0.85)")
     parser.add_argument("--no_cache", action="store_true",
                         help="Disable ingest caching (always ingest fresh)")
     return parser.parse_args()
@@ -305,6 +342,8 @@ def _load_ingest_cache(
         if agent.orchestrator._memories:
             max_ct = max(m.creation_time for m in agent.orchestrator._memories)
             agent.orchestrator._next_time = max_ct + 1.0
+            # Rebuild memory_id -> index mapping (required for query lookups)
+            agent.orchestrator._full_rebuild_index()
 
     # Meta
     meta_path = ctx_dir / "meta.pkl"
@@ -318,6 +357,14 @@ def _load_ingest_cache(
 
 def main():
     args = parse_args()
+
+    # Configure logging so dream diagnostics are visible
+    # force=True to override any prior basicConfig from imported libraries
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+        force=True,
+    )
 
     # Load dataset config
     with open(args.dataset_config) as f:
@@ -350,6 +397,8 @@ def main():
         prefix = f"hermes_transfer{tk_str}"
     elif args.coretrieval:
         prefix = f"hermes_coretrieval_mc{args.coretrieval_min_count}"
+    elif args.cooc_boost and args.ppr:
+        prefix = "hermes_cooc_ppr"
     elif args.cooc_boost and args.cooc_gate > 0:
         prefix = f"hermes_cooc_g{args.cooc_gate}"
     elif args.cooc_boost:
@@ -358,6 +407,38 @@ def main():
         prefix = "hermes_ppr"
     else:
         prefix = "hermes"
+    # Append triadic/decompose suffixes so runs don't overwrite each other
+    if args.triadic:
+        prefix += "_triadic"
+    if args.decompose_query:
+        prefix += "_decompose"
+    if args.decompose_rrf:
+        prefix += "_rrf"
+    if args.decompose_coverage:
+        prefix += "_coverage"
+    if args.bm25_weight > 0:
+        prefix += "_bm25"
+    if args.dedup_threshold > 0:
+        prefix += f"_dedup{args.dedup_threshold}"
+    if getattr(args, 'dream_after_ingest', False):
+        if getattr(args, 'dream_batch_mode', False):
+            prefix += "_dream_batch"
+        elif getattr(args, 'bridge_aware_dream', False):
+            prefix += "_dream_bridge"
+        else:
+            prefix += "_dream"
+    if getattr(args, 'graph_dream', False):
+        prefix += "_graphdream"
+    if args.dream_weight > 0:
+        prefix += f"_dw{args.dream_weight}"
+    if args.dream_top_k != 5:
+        prefix += f"_dk{args.dream_top_k}"
+    if args.temporal_context and args.contradiction_context:
+        prefix += "_temporal_contradiction"
+    elif args.temporal_context:
+        prefix += "_temporal"
+    elif args.contradiction_context:
+        prefix += "_contradiction"
     output_file = output_dir / f"{prefix}_{dataset_config['sub_dataset']}_{safe_model}.json"
 
     print(f"Dataset: {dataset_config['dataset']} / {dataset_config['sub_dataset']}")
@@ -372,6 +453,8 @@ def main():
             print(f"Retrieval: Hopfield transfer (max(cosine, transfer){tk_str})")
         elif args.coretrieval:
             print(f"Retrieval: co-retrieval (bonus={args.coretrieval_bonus}, min_count={args.coretrieval_min_count})")
+        elif args.cooc_boost and args.ppr:
+            print(f"Retrieval: cooc+PPR (cooc_weight={args.cooc_weight}, ppr_weight={args.ppr_weight}, damping={args.ppr_damping})")
         elif args.cooc_boost:
             gate_str = f", gate={args.cooc_gate}" if args.cooc_gate > 0 else ""
             print(f"Retrieval: cooc_boost (weight={args.cooc_weight}{gate_str})")
@@ -383,6 +466,12 @@ def main():
             print(f"Triadic retrieval: True (n={args.triadic_n}, p={args.triadic_p}, expand_k={args.triadic_expand_k})")
         if args.decompose_query:
             print(f"Query decomposition: True (max_hops={args.decompose_max_hops})")
+        if args.decompose_coverage:
+            print(f"Coverage audit: True (decompose as gap-fill, not hop-chain)")
+        if getattr(args, 'graph_dream', False):
+            print(f"Graph dream: enabled (replay + transitive closure + edge prune, top_k={args.dream_top_k})")
+        if args.dream_weight > 0:
+            print(f"Dream boost: weight={args.dream_weight}")
     print()
 
     # Load data
@@ -436,6 +525,14 @@ def main():
             triadic_expand_k=args.triadic_expand_k,
             decompose_query=args.decompose_query,
             decompose_max_hops=args.decompose_max_hops,
+            decompose_coverage=args.decompose_coverage,
+            decompose_rrf=args.decompose_rrf,
+            bm25_weight=args.bm25_weight,
+            dedup_threshold=args.dedup_threshold,
+            dream_weight=args.dream_weight,
+            temporal_context=args.temporal_context,
+            contradiction_context=args.contradiction_context,
+            contradiction_sim_threshold=args.contradiction_sim_threshold,
         )
 
     # Ingest cache setup
@@ -483,10 +580,46 @@ def main():
                     agent.send_message(chunk, memorizing=True)
                 # Persist embedding cache after memorization
                 agent._scorer.save_disk_cache()
+                # Log dedup stats
+                if args.dedup_threshold > 0:
+                    skipped = agent.coupled_engine._dedup_skipped
+                    n_mem = len(agent.coupled_engine.memory_store)
+                    print(f"    Dedup: {skipped} skipped, {n_mem} stored (threshold={args.dedup_threshold})")
                 # Save ingest cache for future runs
                 if use_cache:
                     _save_ingest_cache(cache_path, context_idx, agent)
                     print(f"    Cached ingest to {cache_path / f'context_{context_idx}'}")
+
+        # Dream once after ingest (if requested)
+        if not args.fullpass and getattr(args, 'dream_after_ingest', False):
+            n_before = len(agent.coupled_engine.memory_store)
+            bridge_flag = getattr(args, 'bridge_aware_dream', False)
+            batch_flag = getattr(args, 'dream_batch_mode', False)
+            mode_parts = []
+            if bridge_flag:
+                mode_parts.append("bridge-aware")
+            if batch_flag:
+                mode_parts.append("batch(prune+merge only)")
+            mode = ", ".join(mode_parts) if mode_parts else "standard"
+            print(f"    Running post-ingest dream cycle ({n_before} memories, {mode})...")
+            agent.coupled_engine.dream(bridge_aware=bridge_flag, batch_mode=batch_flag)
+            n_after = len(agent.coupled_engine.memory_store)
+            print(f"    Dream complete: {n_before} -> {n_after} memories")
+
+        # Graph dream after ingest (if requested)
+        if not args.fullpass and getattr(args, 'graph_dream', False):
+            n_mem = len(agent.coupled_engine.memory_store)
+            edges_before = sum(len(n) for n in agent.coupled_engine._co_occurrence.values())
+            print(f"    Running graph dream ({n_mem} memories, {edges_before} edges, "
+                  f"top_k={args.dream_top_k})...")
+            gdp = GraphDreamParams(replay_top_k=args.dream_top_k)
+            result = agent.coupled_engine.dream(graph_mode=True, graph_dream_params=gdp)
+            edges_after = result.get("edges_after", 0)
+            dream_edge_count = sum(len(n) for n in agent.coupled_engine._dream_edges.values())
+            print(f"    Graph dream complete: {edges_before} cooc -> {dream_edge_count} dream edges "
+                  f"(replay={result.get('edges_discovered', 0)}, "
+                  f"tc={result.get('edges_from_tc', 0)}, "
+                  f"pruned={result.get('edges_pruned', 0)})")
 
         # Query
         print(f"    Querying {len(qa_pairs)} questions...")

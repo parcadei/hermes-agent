@@ -786,6 +786,7 @@ def rem_unlearn_xb(
     separation_rate: float = 0.02,
     rng: np.random.Generator | None = None,
     similarity_matrix: np.ndarray | None = None,
+    importances: np.ndarray | None = None,
 ) -> np.ndarray:
     """REM unlearn on {X, beta}: destabilize mixture states by pattern separation.
 
@@ -834,16 +835,31 @@ def rem_unlearn_xb(
         if max_sim <= 0.70:  # fast-path: no close pairs
             return X
         close_i, close_j = np.where(np.triu(S, k=1) > 0.70)
+
+        # Count close neighbors per fact to scale separation_rate and
+        # bound total drift per fact (same fix as nrem_repulsion_xb).
+        # Vectorized via np.bincount — O(N_pairs) but no Python loop.
+        neighbor_count = np.zeros(N, dtype=np.float64)
+        if len(close_i) > 0:
+            neighbor_count += np.bincount(close_i, minlength=N).astype(np.float64)
+            neighbor_count += np.bincount(close_j, minlength=N).astype(np.float64)
+        neighbor_count = np.maximum(neighbor_count, 1.0)
+
         for idx in range(len(close_i)):
             i, j = close_i[idx], close_j[idx]
+            # Skip high-importance pairs (bridge protection)
+            if importances is not None:
+                if importances[i] >= 0.7 or importances[j] >= 0.7:
+                    continue
             diff = X[i] - X[j]
             norm = np.linalg.norm(diff)
             if norm > 1e-8:
                 direction = diff / norm
                 intensity = min((S[i, j] - 0.70) / 0.30, 1.0)
-                step = separation_rate * intensity
-                X[i] += step * direction
-                X[j] -= step * direction
+                step_i = (separation_rate / neighbor_count[i]) * intensity
+                step_j = (separation_rate / neighbor_count[j]) * intensity
+                X[i] += step_i * direction
+                X[j] -= step_j * direction
                 X[i] /= np.linalg.norm(X[i])
                 X[j] /= np.linalg.norm(X[j])
         return X
@@ -891,6 +907,10 @@ def rem_unlearn_xb(
     for i in range(N):
         for j in range(i + 1, N):
             if pair_mixture_count[i, j] > threshold:
+                # Skip high-importance pairs (bridge protection)
+                if importances is not None:
+                    if importances[i] >= 0.7 or importances[j] >= 0.7:
+                        continue
                 diff = X[i] - X[j]
                 norm = np.linalg.norm(diff)
                 if norm > 1e-8:
@@ -1052,7 +1072,17 @@ def nrem_repulsion_xb(
     # Find all close pairs from pre-computed similarity matrix
     close_i, close_j = np.where(np.triu(S, k=1) > sim_threshold)
 
-    # Apply repulsion for each close pair
+    # Count close neighbors per fact so we can scale eta to bound total drift.
+    # Without scaling, a fact with 500 close neighbors accumulates 500*eta drift
+    # which destroys the embedding. With scaling, total drift ≈ eta regardless.
+    # Vectorized via np.bincount — O(N_pairs) but no Python loop.
+    neighbor_count = np.zeros(N, dtype=np.float64)
+    if len(close_i) > 0:
+        neighbor_count += np.bincount(close_i, minlength=N).astype(np.float64)
+        neighbor_count += np.bincount(close_j, minlength=N).astype(np.float64)
+    neighbor_count = np.maximum(neighbor_count, 1.0)
+
+    # Apply repulsion for each close pair with per-fact eta scaling
     for idx in range(len(close_i)):
         i, j = int(close_i[idx]), int(close_j[idx])
         diff = X[i] - X[j]
@@ -1062,9 +1092,9 @@ def nrem_repulsion_xb(
         direction = diff / diff_norm
 
         if movable[i]:
-            X[i] = X[i] + eta * direction
+            X[i] = X[i] + (eta / neighbor_count[i]) * direction
         if movable[j]:
-            X[j] = X[j] - eta * direction
+            X[j] = X[j] - (eta / neighbor_count[j]) * direction
 
     # Re-normalize all output vectors to unit norm
     norms = np.linalg.norm(X, axis=1, keepdims=True)
@@ -1311,7 +1341,11 @@ def nrem_merge_xb(
     # Find all above-threshold pairs from upper triangle
     close_i, close_j = np.where(np.triu(S, k=1) > threshold)
     for idx in range(len(close_i)):
-        union(int(close_i[idx]), int(close_j[idx]))
+        i, j = int(close_i[idx]), int(close_j[idx])
+        # Skip high-importance pairs (bridge protection)
+        if importances[i] >= 0.7 or importances[j] >= 0.7:
+            continue
+        union(i, j)
 
     # Collect connected components
     components: dict[int, list[int]] = {}
@@ -1882,6 +1916,7 @@ def dream_cycle_xb(
     labels: np.ndarray | None = None,
     seed: int | None = None,
     params: DreamParams | None = None,
+    batch_mode: bool = False,
 ) -> DreamReport:
     """Full dream cycle on {X, beta} — redesigned pipeline.
 
@@ -1941,9 +1976,23 @@ def dream_cycle_xb(
             )
 
     # ---------------------------------------------------------------
-    # Step 1: NREM repulsion (SHY)
+    # Step 1: NREM repulsion (SHY) — skipped in batch_mode
     # ---------------------------------------------------------------
-    X1 = nrem_repulsion_xb(patterns, importances, eta=params.eta, min_sep=params.min_sep)
+    if batch_mode:
+        X1 = patterns.copy()
+        logger.info("DREAM PHASE repulsion: SKIPPED (batch_mode=True)")
+    else:
+        X1 = nrem_repulsion_xb(patterns, importances, eta=params.eta, min_sep=params.min_sep)
+
+        # Per-phase drift diagnostics
+        _drifts = np.linalg.norm(X1 - patterns, axis=1)
+        _n_moved = int(np.sum(_drifts > 1e-6))
+        logger.info(
+            "DREAM PHASE repulsion: n_moved=%d/%d max_drift=%.6f mean_drift=%.6f "
+            "mean_drift_moved=%.6f",
+            _n_moved, N, float(_drifts.max()), float(_drifts.mean()),
+            float(_drifts[_drifts > 1e-6].mean()) if _n_moved > 0 else 0.0,
+        )
 
     # Phase 9: Count protected bridges before prune
     labels_for_bridge = labels if labels is not None else _assign_clusters(X1, threshold=0.5)
@@ -1988,6 +2037,12 @@ def dream_cycle_xb(
         min_group=params.merge_min_group,
     )
 
+    logger.info(
+        "DREAM PHASE prune+merge: N_in=%d pruned=%d merged_members=%d merge_groups=%d N_out=%d",
+        N, len(pruned_indices), sum(len(g) for g in merge_map_local.values()),
+        len(merge_map_local), X3.shape[0],
+    )
+
     # Precompute similarity matrix — shared across REM ops
     S = gpu_ops.similarity_matrix(X3)
 
@@ -1999,17 +2054,45 @@ def dream_cycle_xb(
         original_group = [kept_indices_after_prune[pp] for pp in post_prune_group]
         merge_map_original[out_idx] = original_group
 
+    # Compute importances after merge for REM unlearn gating.
+    # nrem_merge_xb output order: non-merged (original order), then centroids.
+    merged_pp_indices: set[int] = set()
+    for group in merge_map_local.values():
+        merged_pp_indices.update(group)
+    non_merged_pp = [i for i in range(len(importances_after_prune)) if i not in merged_pp_indices]
+
+    importances_after_merge = np.empty(X3.shape[0])
+    for out_idx, pp_idx in enumerate(non_merged_pp):
+        importances_after_merge[out_idx] = importances_after_prune[pp_idx]
+    for out_idx, group in merge_map_local.items():
+        group_imps = [importances_after_prune[pp] for pp in group]
+        importances_after_merge[out_idx] = min(max(group_imps) + 0.1, 1.0)
+
     # ---------------------------------------------------------------
-    # Step 4: REM unlearn (Crick & Mitchison) — S-based fast path
+    # Step 4: REM unlearn (Crick & Mitchison) — skipped in batch_mode
     # ---------------------------------------------------------------
-    X4 = rem_unlearn_xb(
-        X3,
-        beta,
-        n_probes=params.n_probes,
-        separation_rate=params.separation_rate,
-        rng=rng,
-        similarity_matrix=S,
-    )
+    if batch_mode:
+        X4 = X3.copy()
+        logger.info("DREAM PHASE unlearn: SKIPPED (batch_mode=True)")
+    else:
+        X4 = rem_unlearn_xb(
+            X3,
+            beta,
+            n_probes=params.n_probes,
+            separation_rate=params.separation_rate,
+            rng=rng,
+            similarity_matrix=S,
+            importances=importances_after_merge,
+        )
+
+        # Per-phase drift: REM unlearn
+        _drifts_unlearn = np.linalg.norm(X4 - X3, axis=1)
+        _n_moved_unlearn = int(np.sum(_drifts_unlearn > 1e-6))
+        logger.info(
+            "DREAM PHASE unlearn: n_moved=%d/%d max_drift=%.6f mean_drift=%.6f",
+            _n_moved_unlearn, X3.shape[0],
+            float(_drifts_unlearn.max()), float(_drifts_unlearn.mean()),
+        )
 
     # ---------------------------------------------------------------
     # Step 5: REM explore cross-domain associations
@@ -2064,4 +2147,327 @@ def dream_cycle_xb(
         associations=associations,
         pruned_indices=pruned_indices,
         merge_map=merge_map_original,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Graph-level Dream Cycle
+# ---------------------------------------------------------------------------
+# Graph-dream operates on the co-occurrence GRAPH (adding/strengthening edges
+# between facts) instead of the embedding-level dream (which destroys multi-hop
+# retrieval via centroid merge).
+#
+# Three phases:
+#   1. REPLAY: discover cross-session edges via embedding similarity
+#   2. TRANSITIVE CLOSURE: bridge extension (A->B, B->C => A->C)
+#   3. EDGE PRUNE: decay weak edges (safe analog of nrem_prune)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GraphDreamParams:
+    """Parameters for graph-level dream cycle.
+
+    Graph-dream operates on a SEPARATE dream graph (_dream_edges), never
+    mutating the co-occurrence graph. Three phases: replay (discover
+    cross-session edges), transitive closure (bridge extension), edge prune.
+    """
+
+    replay_threshold: float = 0.80  # cosine threshold for cross-session edge discovery (calibrated for Qwen3 1024-dim: p99=0.84, median=0.55)
+    replay_top_k: int = 5  # keep only top-k cross-session neighbors per node (sparsification)
+    tc_discount: float = 0.5  # transitive closure weight discount
+    tc_passes: int = 0  # 0 = skip TC (replay-only); TC OOMs on dense graphs (3.5M edges → O(deg²) per node)
+    tc_min_weight: float = 0.01  # minimum weight for TC edges
+    decay_factor: float = 0.8  # edge weight decay for pruning
+    prune_min_weight: float = 0.05  # edges below this after decay are removed
+
+
+@dataclass
+class GraphDreamReport:
+    """Results from a graph-dream cycle."""
+
+    edges_discovered: int  # new edges from replay phase
+    edges_from_tc: int  # new edges from transitive closure
+    edges_pruned: int  # edges removed by prune phase
+    total_edges_before: int  # edge count before dream
+    total_edges_after: int  # edge count after dream
+
+
+def replay_discover_edges(
+    embeddings: np.ndarray,
+    cooc: dict[int, dict[int, float]],
+    threshold: float = 0.20,
+    dream_edges: dict[int, dict[int, float]] | None = None,
+    top_k: int = 0,
+    session_indices: list[int] | None = None,
+) -> int:
+    """Discover cross-session edges via embedding cosine similarity.
+
+    Quadrant 2 targeting: only adds edges for pairs that are semantically
+    similar (cosine > threshold) AND not in co-occurrence (different sessions).
+
+    When dream_edges is provided, writes to that dict instead of cooc.
+    This is the dual-graph path: cooc stays immutable, dream_edges gets
+    the cross-session bridges.
+
+    When top_k > 0, keeps only the top-k highest-cosine cross-session
+    neighbors per node (sparsification). This concentrates the signal:
+    5 best bridges per fact instead of 422 acquaintances.
+
+    Returns the number of new edges added.
+    """
+    N = embeddings.shape[0]
+    if N == 0:
+        return 0
+
+    target = dream_edges if dream_edges is not None else cooc
+
+    # Normalize embeddings for cosine similarity via dot product
+    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+    norms = np.maximum(norms, 1e-12)
+    normed = embeddings / norms
+
+    # Full similarity matrix (N x N)
+    sim_matrix = normed @ normed.T
+
+    # Recency boost: newer facts get higher edge weights (asymmetric)
+    recency_boost = None
+    if session_indices is not None and len(session_indices) == N:
+        max_sess = max(session_indices) if session_indices else 1
+        if max_sess > 0:
+            recency_boost = np.array(
+                [s / max_sess for s in session_indices], dtype=np.float64
+            )
+
+    if top_k > 0:
+        # Top-k sparsification: for each node, keep only the k best
+        # cross-session neighbors (above threshold, not in cooc).
+        #
+        # Two passes:
+        #   Pass 1: each node selects its top-k candidates
+        #   Pass 2: enforce top-k cap per node (symmetric edges from
+        #           other nodes' selections may push a node over k)
+
+        # Pass 1: collect top-k candidates per node
+        selections: dict[int, list[tuple[int, float]]] = {}
+        for i in range(N):
+            candidates = []
+            for j in range(N):
+                if j == i:
+                    continue
+                if sim_matrix[i, j] <= threshold:
+                    continue
+                if j in cooc.get(i, {}):
+                    continue
+                # Edge i→j: weight includes recency of TARGET j
+                w = float(sim_matrix[i, j])
+                if recency_boost is not None:
+                    w *= recency_boost[j]
+                candidates.append((j, w))
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            selections[i] = candidates[:top_k]
+
+        # Build graph from selections
+        added = 0
+        if recency_boost is not None:
+            # Asymmetric: each node keeps its own top-k outgoing edges only
+            for i, picks in selections.items():
+                for j, w in picks:
+                    target.setdefault(i, {})[j] = max(target.get(i, {}).get(j, 0.0), w)
+                    added += 1
+        else:
+            # Symmetric (backward compat): build symmetric graph, then re-trim
+            raw: dict[int, dict[int, float]] = {}
+            for i, picks in selections.items():
+                for j, w in picks:
+                    raw.setdefault(i, {})[j] = max(raw.get(i, {}).get(j, 0.0), w)
+                    raw.setdefault(j, {})[i] = max(raw.get(j, {}).get(i, 0.0), w)
+            for i, neighbors in raw.items():
+                sorted_n = sorted(neighbors.items(), key=lambda x: x[1], reverse=True)
+                for j, w in sorted_n[:top_k]:
+                    target.setdefault(i, {})[j] = w
+                    added += 1
+            # Final symmetrize pass
+            for i in list(target.keys()):
+                for j, w in list(target[i].items()):
+                    target.setdefault(j, {})[i] = max(target.get(j, {}).get(i, 0.0), w)
+                    if len(target[j]) > top_k:
+                        sorted_j = sorted(target[j].items(), key=lambda x: x[1], reverse=True)
+                        target[j] = dict(sorted_j[:top_k])
+
+        logger.info(
+            "GRAPH DREAM replay (top-k=%d): %d edges in dream graph "
+            "(threshold=%.3f, N=%d)",
+            top_k, sum(len(n) for n in target.values()), threshold, N,
+        )
+        return sum(len(n) for n in target.values()) // 2  # symmetric pairs
+
+    # Legacy path: add ALL pairs above threshold (no sparsification)
+    added = 0
+    for i in range(N):
+        for j in range(i + 1, N):
+            if sim_matrix[i, j] > threshold:
+                if j not in cooc.get(i, {}):
+                    target.setdefault(i, {})[j] = float(sim_matrix[i, j])
+                    target.setdefault(j, {})[i] = float(sim_matrix[i, j])
+                    added += 1
+
+    logger.info(
+        "GRAPH DREAM replay: %d new edges discovered (threshold=%.3f, N=%d)",
+        added, threshold, N,
+    )
+    return added
+
+
+def add_transitive_closure(
+    cooc: dict[int, dict[int, float]],
+    discount: float = 0.5,
+    min_weight: float = 0.01,
+) -> int:
+    """Add 2-hop transitive edges to co-occurrence graph.
+
+    For each path i->j->k where no direct i->k edge exists,
+    adds edge (i,k) with weight = min(w_ij, w_jk) * discount.
+
+    This is the core operation of "graph-level dream".
+    Returns the number of new edges added.
+    """
+    new_edges: list[tuple[int, int, float]] = []
+    for j, neighbors_j in cooc.items():
+        for i, w_ij in list(neighbors_j.items()):
+            # i is connected to j. Look at j's OTHER neighbors.
+            for k, w_jk in list(cooc.get(j, {}).items()):
+                if k == i:
+                    continue
+                # Check if i->k already exists
+                existing = cooc.get(i, {}).get(k, 0.0)
+                bridge_weight = min(w_ij, w_jk) * discount
+                if bridge_weight > min_weight and bridge_weight > existing:
+                    new_edges.append((i, k, bridge_weight))
+
+    added = 0
+    for i, k, w in new_edges:
+        cooc.setdefault(i, {})[k] = max(cooc.get(i, {}).get(k, 0.0), w)
+        cooc.setdefault(k, {})[i] = max(cooc.get(k, {}).get(i, 0.0), w)
+        added += 1
+    return added
+
+
+def edge_prune(
+    cooc: dict[int, dict[int, float]],
+    decay_factor: float = 0.8,
+    min_weight: float = 0.05,
+) -> int:
+    """Decay all edge weights and remove edges below threshold.
+
+    Applies decay_factor to every edge weight, then removes edges
+    whose weight falls below min_weight. Cleans up empty neighbor dicts.
+
+    This is the safe analog of nrem_prune: instead of removing FACTS,
+    we remove weak EDGES. Facts remain, only their weakest connections
+    are trimmed.
+
+    Returns the count of edges pruned (removed).
+    """
+    pruned = 0
+    for i in list(cooc.keys()):
+        for j in list(cooc[i].keys()):
+            cooc[i][j] *= decay_factor
+            if cooc[i][j] < min_weight:
+                del cooc[i][j]
+                pruned += 1
+        # Clean up empty neighbor dicts
+        if not cooc[i]:
+            del cooc[i]
+
+    logger.info(
+        "GRAPH DREAM prune: %d edges removed (decay=%.2f, min_weight=%.3f)",
+        pruned,
+        decay_factor,
+        min_weight,
+    )
+    return pruned
+
+
+def graph_dream_cycle(
+    embeddings: np.ndarray,
+    cooc: dict[int, dict[int, float]],
+    params: GraphDreamParams | None = None,
+    dream_edges: dict[int, dict[int, float]] | None = None,
+    session_indices: list[int] | None = None,
+) -> GraphDreamReport:
+    """Run a full graph-level dream cycle.
+
+    Three phases:
+      1. REPLAY: discover cross-session edges via embedding similarity
+      2. TRANSITIVE CLOSURE: bridge extension (multiple passes)
+      3. EDGE PRUNE: decay weak edges
+
+    DUAL-GRAPH MODE (dream_edges is not None):
+      Replay writes to dream_edges instead of cooc. The co-occurrence
+      graph stays immutable. TC and prune operate on dream_edges.
+      This separates episodic (cooc) from consolidated (dream) signals.
+
+    LEGACY MODE (dream_edges is None):
+      All operations mutate cooc directly (original behavior).
+
+    Args:
+        embeddings: (N, d) embedding matrix for all facts.
+        cooc: co-occurrence dict. Read-only in dual-graph mode.
+        params: optional parameters (defaults to GraphDreamParams()).
+        dream_edges: separate dream graph dict. When provided, replay
+            writes here instead of cooc (dual-graph architecture).
+
+    Returns:
+        GraphDreamReport with edge counts before/after and per-phase stats.
+    """
+    if params is None:
+        params = GraphDreamParams()
+
+    # In dual-graph mode, target is dream_edges; in legacy mode, target is cooc
+    target = dream_edges if dream_edges is not None else cooc
+
+    # Count total edges before (in target graph)
+    total_edges_before = sum(len(n) for n in target.values())
+
+    # Phase 1: REPLAY -- discover cross-session edges
+    # In dual-graph mode: reads cooc to know same-session pairs (skip them),
+    # writes new edges to dream_edges with top-k sparsification.
+    edges_discovered = replay_discover_edges(
+        embeddings, cooc, params.replay_threshold,
+        dream_edges=dream_edges,
+        top_k=params.replay_top_k if dream_edges is not None else 0,
+        session_indices=session_indices,
+    )
+
+    # Phase 2: TRANSITIVE CLOSURE -- bridge extension (multiple passes)
+    edges_from_tc = 0
+    for _pass in range(params.tc_passes):
+        tc_added = add_transitive_closure(
+            target, params.tc_discount, params.tc_min_weight
+        )
+        edges_from_tc += tc_added
+
+    # Phase 3: EDGE PRUNE -- decay weak edges (only on target graph)
+    edges_pruned = edge_prune(target, params.decay_factor, params.prune_min_weight)
+
+    # Count total edges after (in target graph)
+    total_edges_after = sum(len(n) for n in target.values())
+
+    logger.info(
+        "GRAPH DREAM cycle complete: %d->%d edges (replay=%d, tc=%d, pruned=%d, dual=%s)",
+        total_edges_before,
+        total_edges_after,
+        edges_discovered,
+        edges_from_tc,
+        edges_pruned,
+        dream_edges is not None,
+    )
+
+    return GraphDreamReport(
+        edges_discovered=edges_discovered,
+        edges_from_tc=edges_from_tc,
+        edges_pruned=edges_pruned,
+        total_edges_before=total_edges_before,
+        total_edges_after=total_edges_after,
     )
