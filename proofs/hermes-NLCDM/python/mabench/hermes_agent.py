@@ -766,18 +766,20 @@ class HermesMemoryAgent:
                     seen.add(key)
                     merged_chunks.append(line)
 
-        # Fact currency filtering (both layers stack):
-        # 1. Supersession (binary): hard-exclude facts in _superseded_texts
-        # 2. Belief (soft): exclude facts below hard_floor P(current)
-        if self.supersession and self._superseded_texts:
-            merged_chunks = [
-                c for c in merged_chunks
-                if c not in self._superseded_texts
-            ]
+        # Fact currency filtering:
+        # - Belief (soft): preferred — demotes stale facts via P(current),
+        #   excludes only below hard_floor. Stacking with supersession
+        #   hurts (SubEM=22 vs 23) because hard exclusion over-kills.
+        # - Supersession (binary): fallback when belief is not enabled.
         if self._belief_index is not None:
             merged_chunks = [
                 c for c in merged_chunks
                 if not self._belief_index.is_excluded(c)
+            ]
+        elif self.supersession and self._superseded_texts:
+            merged_chunks = [
+                c for c in merged_chunks
+                if c not in self._superseded_texts
             ]
 
         # Build context for LLM via outgestion formatter
@@ -1106,16 +1108,16 @@ class HermesMemoryAgent:
             if k not in metadata_by_key:
                 metadata_by_key[k] = r
 
-        # Fact currency filtering (both layers stack)
-        if self.supersession and self._superseded_texts:
-            all_chunks = [
-                c for c in all_chunks
-                if c not in self._superseded_texts
-            ]
+        # Fact currency filtering
         if self._belief_index is not None:
             all_chunks = [
                 c for c in all_chunks
                 if not self._belief_index.is_excluded(c)
+            ]
+        elif self.supersession and self._superseded_texts:
+            all_chunks = [
+                c for c in all_chunks
+                if c not in self._superseded_texts
             ]
 
         # Trim to retrieve_num and format via outgestion
