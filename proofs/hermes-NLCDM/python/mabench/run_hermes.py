@@ -221,6 +221,23 @@ def parse_args():
                              "termination (retrieve → judge → re-query loop)")
     parser.add_argument("--iterative_max_hops", type=int, default=3,
                         help="Maximum hops for iterative retrieval (default: 3)")
+    parser.add_argument("--supersession", action="store_true",
+                        help="Enable triple-based supersession filtering: when a new fact "
+                             "has the same subject+predicate as an old fact but different "
+                             "object, the old fact is excluded from retrieval results")
+    parser.add_argument("--belief", action="store_true",
+                        help="Enable Bayesian belief scoring: soft fact currency via "
+                             "Beta-Bernoulli per fact + entity-graph propagation")
+    parser.add_argument("--belief_prior_alpha", type=float, default=2.0,
+                        help="Belief prior alpha (confirming evidence pseudo-count, default: 2.0)")
+    parser.add_argument("--belief_prior_beta", type=float, default=1.0,
+                        help="Belief prior beta (contradicting evidence pseudo-count, default: 1.0)")
+    parser.add_argument("--belief_propagation_damping", type=float, default=0.3,
+                        help="Belief propagation damping factor (default: 0.3)")
+    parser.add_argument("--belief_hard_floor", type=float, default=0.05,
+                        help="Belief hard floor: facts below this P(current) are excluded (default: 0.05)")
+    parser.add_argument("--belief_overfetch", type=int, default=3,
+                        help="Belief over-fetch multiplier for retrieval (default: 3)")
     parser.add_argument("--no_cache", action="store_true",
                         help="Disable ingest caching (always ingest fresh)")
     return parser.parse_args()
@@ -278,6 +295,21 @@ def _save_ingest_cache(
     # V1 orchestrator memories
     with open(ctx_dir / "orchestrator.pkl", "wb") as f:
         pickle.dump(agent.orchestrator._memories, f)
+
+    # Supersession state
+    if getattr(agent, 'supersession', False):
+        with open(ctx_dir / "supersession.pkl", "wb") as f:
+            pickle.dump({
+                "triple_index": dict(agent._triple_index),
+                "superseded_texts": agent._superseded_texts,
+                "fact_entities": agent._fact_entities,
+            }, f)
+
+    # Belief state
+    belief_index = getattr(agent, '_belief_index', None)
+    if belief_index is not None:
+        with open(ctx_dir / "belief.pkl", "wb") as f:
+            pickle.dump(belief_index.state_dict(), f)
 
     # Store count
     with open(ctx_dir / "meta.pkl", "wb") as f:
@@ -349,6 +381,23 @@ def _load_ingest_cache(
             agent.orchestrator._next_time = max_ct + 1.0
             # Rebuild memory_id -> index mapping (required for query lookups)
             agent.orchestrator._full_rebuild_index()
+
+    # Supersession state
+    sup_path = ctx_dir / "supersession.pkl"
+    if getattr(agent, 'supersession', False) and sup_path.exists():
+        with open(sup_path, "rb") as f:
+            sup_data = pickle.load(f)
+        from collections import defaultdict
+        agent._triple_index = defaultdict(list, sup_data["triple_index"])
+        agent._superseded_texts = sup_data["superseded_texts"]
+        agent._fact_entities = sup_data.get("fact_entities", {})
+
+    # Belief state
+    belief_path = ctx_dir / "belief.pkl"
+    if getattr(agent, '_belief_index', None) is not None and belief_path.exists():
+        with open(belief_path, "rb") as f:
+            from mabench.belief import BeliefIndex
+            agent._belief_index = BeliefIndex.from_state_dict(pickle.load(f))
 
     # Meta
     meta_path = ctx_dir / "meta.pkl"
@@ -440,6 +489,10 @@ def main():
         prefix += f"_dw{args.dream_weight}"
     if args.dream_top_k != 5:
         prefix += f"_dk{args.dream_top_k}"
+    if args.supersession:
+        prefix += "_supersession"
+    if args.belief:
+        prefix += "_belief"
     if args.temporal_context and args.contradiction_context:
         prefix += "_temporal_contradiction"
     elif args.temporal_context:
@@ -477,6 +530,12 @@ def main():
             print(f"Iterative retrieval: True (max_hops={args.iterative_max_hops}, LLM-in-the-loop)")
         if args.decompose_coverage:
             print(f"Coverage audit: True (decompose as gap-fill, not hop-chain)")
+        if args.supersession:
+            print(f"Supersession: enabled (triple-based conflict filtering)")
+        if args.belief:
+            print(f"Belief: enabled (α={args.belief_prior_alpha}, β={args.belief_prior_beta}, "
+                  f"damping={args.belief_propagation_damping}, floor={args.belief_hard_floor}, "
+                  f"overfetch={args.belief_overfetch})")
         if getattr(args, 'graph_dream', False):
             print(f"Graph dream: enabled (replay + transitive closure + edge prune, top_k={args.dream_top_k})")
         if args.dream_weight > 0:
@@ -544,6 +603,13 @@ def main():
             temporal_context=args.temporal_context,
             contradiction_context=args.contradiction_context,
             contradiction_sim_threshold=args.contradiction_sim_threshold,
+            supersession=args.supersession,
+            belief=args.belief,
+            belief_prior_alpha=args.belief_prior_alpha,
+            belief_prior_beta=args.belief_prior_beta,
+            belief_propagation_damping=args.belief_propagation_damping,
+            belief_hard_floor=args.belief_hard_floor,
+            belief_overfetch=args.belief_overfetch,
         )
 
     # Ingest cache setup

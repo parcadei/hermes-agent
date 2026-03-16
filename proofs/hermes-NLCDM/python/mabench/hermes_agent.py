@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -47,6 +48,7 @@ from nlcdm_core import cosine_sim
 from mabench.ingestion import (
     IngestionPipeline, IngestionConfig, IngestionResult, _MutableEntityGraph,
 )
+from mabench.belief import BeliefIndex
 from mabench.triadic_memory import TriadicMemory
 
 
@@ -212,6 +214,13 @@ class HermesMemoryAgent:
         temporal_context: bool = False,
         contradiction_context: bool = False,
         contradiction_sim_threshold: float = 0.85,
+        supersession: bool = False,
+        belief: bool = False,
+        belief_prior_alpha: float = 2.0,
+        belief_prior_beta: float = 1.0,
+        belief_propagation_damping: float = 0.3,
+        belief_hard_floor: float = 0.05,
+        belief_overfetch: int = 3,
     ):
         self.model = model
         self.dedup_threshold = dedup_threshold
@@ -249,6 +258,27 @@ class HermesMemoryAgent:
         self.temporal_context = temporal_context
         self.contradiction_context = contradiction_context
         self.contradiction_sim_threshold = contradiction_sim_threshold
+        self.supersession = supersession
+        self._belief_overfetch = belief_overfetch
+
+        # Bayesian belief scoring: soft fact currency
+        if belief:
+            self._belief_index = BeliefIndex(
+                prior_alpha=belief_prior_alpha,
+                prior_beta=belief_prior_beta,
+                propagation_damping=belief_propagation_damping,
+                hard_floor=belief_hard_floor,
+            )
+        else:
+            self._belief_index = None
+
+        # Supersession: entity-gated triple-based conflict detection
+        # Maps (normalized_subject, normalized_predicate) → [(normalized_object, fact_text)]
+        # When a new triple has same S+P but different O AND the facts share at
+        # least one named entity, the old fact is superseded.
+        self._triple_index: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
+        self._superseded_texts: set[str] = set()
+        self._fact_entities: dict[str, tuple[str, ...]] = {}  # fact_text → entities
 
         # V1: Text-based orchestrator (validated baseline from test_engine.py)
         params = ParameterSet(
@@ -379,6 +409,55 @@ class HermesMemoryAgent:
             if getattr(self, '_triadic', None) is not None:
                 self._triadic.store_fact(fact.text, list(fact.triples))
 
+            # Register fact in belief index (before conflict detection)
+            if self._belief_index is not None:
+                self._belief_index.register_fact(fact.text)
+
+            # Supersession / belief: entity-gated triple-based conflict detection.
+            # Same subject+predicate, different object → potential conflict,
+            # but only act if the old and new facts share a named entity.
+            # This prevents "The author of X" from superseding "The author of Y"
+            # when spaCy extracts the truncated subject "The author" for both.
+            #
+            # When belief is active, conflict detection runs even without
+            # --supersession, updating soft P(current) scores instead of
+            # binary exclusion.
+            if (self.supersession or self._belief_index) and fact.triples:
+                new_entities = set(e.lower() for e in fact.entities) if fact.entities else set()
+                self._fact_entities[fact.text] = fact.entities
+                for (subj, pred, obj) in fact.triples:
+                    key = (subj.lower().strip(), pred.lower().strip())
+                    new_obj = obj.lower().strip()
+                    if not key[0] or not key[1]:
+                        continue  # skip degenerate triples
+                    for existing_obj, existing_text in self._triple_index[key]:
+                        if existing_obj != new_obj:
+                            # Entity gate: require shared named entity
+                            old_entities = set(
+                                e.lower() for e in self._fact_entities.get(existing_text, ())
+                            )
+                            if not (old_entities & new_entities):
+                                continue  # no shared entity → not a real conflict
+
+                            # Binary supersession (when enabled)
+                            if self.supersession:
+                                self._superseded_texts.add(existing_text)
+                                if len(self._superseded_texts) <= 20:
+                                    import logging
+                                    logging.getLogger("supersession").info(
+                                        "SUPERSEDED: (%s, %s, %s) replaced by (%s, %s, %s) | shared=%s | old=%s | new=%s",
+                                        subj, pred, existing_obj, subj, pred, obj,
+                                        old_entities & new_entities,
+                                        existing_text[:80], fact.text[:80],
+                                    )
+
+                            # Bayesian belief update (when enabled)
+                            if self._belief_index is not None:
+                                self._belief_index.on_conflict(
+                                    existing_text, fact.text,
+                                )
+                    self._triple_index[key].append((new_obj, fact.text))
+
             self._store_count += 1
 
         # Synonym dict: feed coref clusters and verb mappings to triadic
@@ -393,10 +472,27 @@ class HermesMemoryAgent:
             offset = self._store_count - len(result.facts)
             self._entity_accumulator.merge(result.entity_graph, offset)
 
+        # Belief propagation: penalize facts connected to degraded facts
+        if self._belief_index is not None and hasattr(self, '_entity_accumulator'):
+            self._belief_index.propagate(
+                self._entity_accumulator,
+                self.coupled_engine.memory_store,
+            )
+
         # Flush session buffer per chunk if Hebbian enabled (D8)
         if hasattr(self.coupled_engine, '_session_buffer') and \
            len(getattr(self.coupled_engine, '_session_buffer', [])) > 0:
             self.coupled_engine.flush_session()
+
+        # Supersession diagnostics: log every 50 stores
+        if self.supersession and self._store_count % 50 == 0 and self._store_count > 0:
+            import logging
+            logging.getLogger("supersession").info(
+                "STATS after %d stores: %d unique (S,P) keys, %d superseded texts, %d total triples",
+                self._store_count, len(self._triple_index),
+                len(self._superseded_texts),
+                sum(len(v) for v in self._triple_index.values()),
+            )
 
         # Dream cycle -- unchanged logic
         if self.dream_interval > 0 and self._store_count % self.dream_interval == 0:
@@ -518,9 +614,6 @@ class HermesMemoryAgent:
                         )
                         jt = (judge_resp.choices[0].message.content
                               or "").strip()
-                        import sys
-                        print(f"  [sq {i+1} retry {retry}] {jt[:120]}",
-                              file=sys.stderr)
                     except Exception:
                         break  # LLM error → use what we have
 
@@ -672,6 +765,20 @@ class HermesMemoryAgent:
                 if line and key not in seen:
                     seen.add(key)
                     merged_chunks.append(line)
+
+        # Fact currency filtering:
+        # - Belief (soft): exclude facts below hard_floor P(current)
+        # - Supersession (binary): exclude facts in _superseded_texts
+        if self._belief_index is not None:
+            merged_chunks = [
+                c for c in merged_chunks
+                if not self._belief_index.is_excluded(c)
+            ]
+        elif self.supersession and self._superseded_texts:
+            merged_chunks = [
+                c for c in merged_chunks
+                if c not in self._superseded_texts
+            ]
 
         # Build context for LLM via outgestion formatter
         final_chunks = merged_chunks[:self.retrieve_num]
@@ -953,9 +1060,6 @@ class HermesMemoryAgent:
                 })
                 break  # LLM failure → use what we have
 
-            import sys
-            print(f"  [hop {hop+1}] judge: {repr(judge_text[:300])}", file=sys.stderr)
-
             if judge_text.startswith("ANSWER_READY"):
                 evidence_chain.append({
                     "query": current_query,
@@ -1002,6 +1106,18 @@ class HermesMemoryAgent:
             if k not in metadata_by_key:
                 metadata_by_key[k] = r
 
+        # Fact currency filtering
+        if self._belief_index is not None:
+            all_chunks = [
+                c for c in all_chunks
+                if not self._belief_index.is_excluded(c)
+            ]
+        elif self.supersession and self._superseded_texts:
+            all_chunks = [
+                c for c in all_chunks
+                if c not in self._superseded_texts
+            ]
+
         # Trim to retrieve_num and format via outgestion
         final_chunks = all_chunks[:self.retrieve_num]
         memory_context, outgestion_instructions = self._format_outgestion(
@@ -1026,62 +1142,97 @@ class HermesMemoryAgent:
         }
 
     def _retrieve_v2(self, query_text: str) -> list[dict]:
-        """Run V2 embedding retrieval for a single query string."""
+        """Run V2 embedding retrieval for a single query string.
+
+        When belief scoring is active, over-fetches by belief_overfetch
+        multiplier and then applies belief reranking to compensate for
+        excluded/demoted facts.
+        """
         q_emb = self._scorer.embed(query_text)
 
+        # Over-fetch when belief is active to compensate for exclusions
+        effective_k = self.retrieve_num
+        if self._belief_index is not None:
+            effective_k = self.retrieve_num * self._belief_overfetch
+
         if self.transfer_retrieval:
-            return self.coupled_engine.query_transfer(
-                embedding=q_emb, top_k=self.retrieve_num,
+            results = self.coupled_engine.query_transfer(
+                embedding=q_emb, top_k=effective_k,
                 transfer_k=self.transfer_k,
             )
         elif self.coretrieval_retrieval:
-            return self.coupled_engine.query_coretrieval(
-                embedding=q_emb, top_k=self.retrieve_num,
+            results = self.coupled_engine.query_coretrieval(
+                embedding=q_emb, top_k=effective_k,
                 coretrieval_bonus=self.coretrieval_bonus,
                 min_coretrieval_count=self.coretrieval_min_count,
             )
         elif self.cooc_boost_retrieval and self.ppr_retrieval:
-            return self.coupled_engine.query_cooc_ppr(
-                embedding=q_emb, top_k=self.retrieve_num,
+            results = self.coupled_engine.query_cooc_ppr(
+                embedding=q_emb, top_k=effective_k,
                 cooc_weight=self.cooc_weight,
                 gate_threshold=self.cooc_gate_threshold,
                 ppr_weight=self.ppr_weight,
                 damping=self.ppr_damping,
             )
         elif self.cooc_boost_retrieval and self.bm25_weight > 0:
-            return self.coupled_engine.query_cooc_bm25(
+            results = self.coupled_engine.query_cooc_bm25(
                 embedding=q_emb, query_text=query_text,
-                top_k=self.retrieve_num,
+                top_k=effective_k,
                 cooc_weight=self.cooc_weight,
                 bm25_weight=self.bm25_weight,
                 gate_threshold=self.cooc_gate_threshold,
             )
         elif self.cooc_boost_retrieval:
-            return self.coupled_engine.query_cooc_boost(
-                embedding=q_emb, top_k=self.retrieve_num,
+            results = self.coupled_engine.query_cooc_boost(
+                embedding=q_emb, top_k=effective_k,
                 cooc_weight=self.cooc_weight,
                 dream_weight=self.dream_weight,
                 gate_threshold=self.cooc_gate_threshold,
             )
         elif self.ppr_retrieval:
-            return self.coupled_engine.query_ppr(
-                embedding=q_emb, top_k=self.retrieve_num,
+            results = self.coupled_engine.query_ppr(
+                embedding=q_emb, top_k=effective_k,
                 ppr_weight=self.ppr_weight,
                 damping=self.ppr_damping,
             )
         elif self.hybrid_retrieval:
-            return self.coupled_engine.query_hybrid(
-                embedding=q_emb, top_k=self.retrieve_num,
+            results = self.coupled_engine.query_hybrid(
+                embedding=q_emb, top_k=effective_k,
             )
         elif self.associative_retrieval or self.sparse_retrieval:
-            return self.coupled_engine.query_associative(
-                embedding=q_emb, top_k=self.retrieve_num,
+            results = self.coupled_engine.query_associative(
+                embedding=q_emb, top_k=effective_k,
                 sparse=self.sparse_retrieval,
             )
         else:
-            return self.coupled_engine.query(
-                embedding=q_emb, top_k=self.retrieve_num,
+            results = self.coupled_engine.query(
+                embedding=q_emb, top_k=effective_k,
             )
+
+        # Apply belief reranking when active
+        if self._belief_index is not None:
+            results = self._apply_belief_rerank(results)[:self.retrieve_num]
+
+        return results
+
+    def _apply_belief_rerank(self, results: list[dict]) -> list[dict]:
+        """Rerank retrieval results using Bayesian belief scores.
+
+        1. Exclude facts below hard_floor (P(current) too low).
+        2. Multiply each result's score by P(current).
+        3. Re-sort by adjusted score descending.
+        """
+        reranked = []
+        for r in results:
+            text = r.get("text", "")
+            if self._belief_index.is_excluded(text):
+                continue
+            p = self._belief_index.score(text)
+            adjusted = dict(r)
+            adjusted["score"] = r.get("score", 0.0) * p
+            reranked.append(adjusted)
+        reranked.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        return reranked
 
     def _coverage_audit(
         self, bare_question: str, v2_texts: list[str],
@@ -1166,7 +1317,6 @@ class HermesMemoryAgent:
         # recency values. Cross-reference BOTH with [CONFLICT] tags —
         # surface the conflict, never remove content.
         contradiction_threshold = getattr(self, "contradiction_sim_threshold", 0.85)
-        from collections import defaultdict
         conflict_pairs: dict[int, list[int]] = defaultdict(list)
 
         if getattr(self, "contradiction_context", False):
@@ -1296,3 +1446,17 @@ class HermesMemoryAgent:
         # Reset entity accumulator
         if hasattr(self, '_entity_accumulator'):
             self._entity_accumulator = _MutableEntityGraph()
+
+        # Reset supersession state
+        self._triple_index = defaultdict(list)
+        self._superseded_texts = set()
+        self._fact_entities = {}
+
+        # Reset belief index (preserve params, clear beliefs)
+        if self._belief_index is not None:
+            self._belief_index = BeliefIndex(
+                prior_alpha=self._belief_index._prior_alpha,
+                prior_beta=self._belief_index._prior_beta,
+                propagation_damping=self._belief_index._propagation_damping,
+                hard_floor=self._belief_index._hard_floor,
+            )
