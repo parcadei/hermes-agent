@@ -238,6 +238,9 @@ def parse_args():
                         help="Belief hard floor: facts below this P(current) are excluded (default: 0.05)")
     parser.add_argument("--belief_overfetch", type=int, default=3,
                         help="Belief over-fetch multiplier for retrieval (default: 3)")
+    parser.add_argument("--conflict_resolution", action="store_true",
+                        help="Enable three-layer outgestion conflict resolution: "
+                             "supersession graph + read-time dedup + newest-first sort")
     parser.add_argument("--no_cache", action="store_true",
                         help="Disable ingest caching (always ingest fresh)")
     return parser.parse_args()
@@ -297,12 +300,14 @@ def _save_ingest_cache(
         pickle.dump(agent.orchestrator._memories, f)
 
     # Supersession state
-    if getattr(agent, 'supersession', False):
+    if getattr(agent, 'supersession', False) or getattr(agent, 'conflict_resolution', False):
         with open(ctx_dir / "supersession.pkl", "wb") as f:
             pickle.dump({
                 "triple_index": dict(agent._triple_index),
                 "superseded_texts": agent._superseded_texts,
                 "fact_entities": agent._fact_entities,
+                "supersession_graph": getattr(agent, '_supersession_graph', {}),
+                "supersedes": {k: v for k, v in getattr(agent, '_supersedes', {}).items()},
             }, f)
 
     # Belief state
@@ -384,13 +389,16 @@ def _load_ingest_cache(
 
     # Supersession state
     sup_path = ctx_dir / "supersession.pkl"
-    if getattr(agent, 'supersession', False) and sup_path.exists():
+    if (getattr(agent, 'supersession', False) or getattr(agent, 'conflict_resolution', False)) and sup_path.exists():
         with open(sup_path, "rb") as f:
             sup_data = pickle.load(f)
         from collections import defaultdict
         agent._triple_index = defaultdict(list, sup_data["triple_index"])
         agent._superseded_texts = sup_data["superseded_texts"]
         agent._fact_entities = sup_data.get("fact_entities", {})
+        agent._supersession_graph = sup_data.get("supersession_graph", {})
+        raw_supersedes = sup_data.get("supersedes", {})
+        agent._supersedes = defaultdict(set, {k: set(v) for k, v in raw_supersedes.items()})
 
     # Belief state — load cached alpha/beta values, but override runtime
     # params (hard_floor, damping) from the agent's current config so
@@ -494,6 +502,8 @@ def main():
         prefix += f"_dw{args.dream_weight}"
     if args.dream_top_k != 5:
         prefix += f"_dk{args.dream_top_k}"
+    if args.conflict_resolution:
+        prefix += "_conflictres"
     if args.supersession:
         prefix += "_supersession"
     if args.belief:
@@ -535,6 +545,8 @@ def main():
             print(f"Iterative retrieval: True (max_hops={args.iterative_max_hops}, LLM-in-the-loop)")
         if args.decompose_coverage:
             print(f"Coverage audit: True (decompose as gap-fill, not hop-chain)")
+        if args.conflict_resolution:
+            print(f"Conflict resolution: enabled (three-layer: supersession graph + read-time dedup + newest-first)")
         if args.supersession:
             print(f"Supersession: enabled (triple-based conflict filtering)")
         if args.belief:
@@ -615,6 +627,7 @@ def main():
             belief_propagation_damping=args.belief_propagation_damping,
             belief_hard_floor=args.belief_hard_floor,
             belief_overfetch=args.belief_overfetch,
+            conflict_resolution=args.conflict_resolution,
         )
 
     # Ingest cache setup

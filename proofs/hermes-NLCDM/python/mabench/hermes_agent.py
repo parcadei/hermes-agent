@@ -221,6 +221,7 @@ class HermesMemoryAgent:
         belief_propagation_damping: float = 0.3,
         belief_hard_floor: float = 0.05,
         belief_overfetch: int = 3,
+        conflict_resolution: bool = False,
     ):
         self.model = model
         self.dedup_threshold = dedup_threshold
@@ -259,6 +260,7 @@ class HermesMemoryAgent:
         self.contradiction_context = contradiction_context
         self.contradiction_sim_threshold = contradiction_sim_threshold
         self.supersession = supersession
+        self.conflict_resolution = conflict_resolution
         self._belief_overfetch = belief_overfetch
         self._belief_hard_floor = belief_hard_floor
         self._belief_propagation_damping = belief_propagation_damping
@@ -281,6 +283,11 @@ class HermesMemoryAgent:
         self._triple_index: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
         self._superseded_texts: set[str] = set()
         self._fact_entities: dict[str, tuple[str, ...]] = {}  # fact_text → entities
+        # Conflict resolution: directed supersession graph
+        # old_text → new_text (the text that supersedes it)
+        self._supersession_graph: dict[str, str] = {}
+        # new_text → {old_text_1, old_text_2, ...}
+        self._supersedes: dict[str, set[str]] = defaultdict(set)
 
         # V1: Text-based orchestrator (validated baseline from test_engine.py)
         params = ParameterSet(
@@ -424,7 +431,7 @@ class HermesMemoryAgent:
             # When belief is active, conflict detection runs even without
             # --supersession, updating soft P(current) scores instead of
             # binary exclusion.
-            if (self.supersession or self._belief_index) and fact.triples:
+            if (self.supersession or self._belief_index or self.conflict_resolution) and fact.triples:
                 new_entities = set(e.lower() for e in fact.entities) if fact.entities else set()
                 self._fact_entities[fact.text] = fact.entities
                 for (subj, pred, obj) in fact.triples:
@@ -452,6 +459,11 @@ class HermesMemoryAgent:
                                         old_entities & new_entities,
                                         existing_text[:80], fact.text[:80],
                                     )
+
+                            # Conflict resolution: directed supersession edges
+                            if self.conflict_resolution:
+                                self._supersession_graph[existing_text] = fact.text
+                                self._supersedes[fact.text].add(existing_text)
 
                             # Bayesian belief update (when enabled)
                             if self._belief_index is not None:
@@ -630,17 +642,25 @@ class HermesMemoryAgent:
                     else:
                         break  # unparseable → use what we have
 
-                # Belief filter + dedup per hop: remove stale facts
+                # Per-hop conflict resolution: remove stale facts
                 # BEFORE the LLM extracts an intermediate answer.
                 # Without this, the LLM sees all versions of a fact
                 # (e.g., 4 different sports for Abbiati) and picks wrong,
                 # poisoning all downstream hops.
-                if self._belief_index is not None:
+                if self.conflict_resolution:
+                    # Build per-hop metadata for _resolve_conflicts
+                    _hop_meta: dict[str, dict] = {}
+                    for r in sq_all_results:
+                        k = r["text"].strip()[:200]
+                        if k not in _hop_meta:
+                            _hop_meta[k] = r
+                    sq_all_texts = self._resolve_conflicts(sq_all_texts, _hop_meta)
+                elif self._belief_index is not None:
                     sq_all_texts = [
                         t for t in sq_all_texts
                         if not self._belief_index.is_excluded(t)
                     ]
-                sq_all_texts = self._belief_dedup(sq_all_texts)
+                    sq_all_texts = self._belief_dedup(sq_all_texts)
 
                 sq_chunks.append(sq_all_texts)
                 sq_chunks_raw.append(sq_all_results)
@@ -781,25 +801,23 @@ class HermesMemoryAgent:
                     merged_chunks.append(line)
 
         # Fact currency filtering:
-        # - Belief (soft): preferred — demotes stale facts via P(current),
-        #   excludes only below hard_floor. Stacking with supersession
-        #   hurts (SubEM=22 vs 23) because hard exclusion over-kills.
-        # - Supersession (binary): fallback when belief is not enabled.
-        if self._belief_index is not None:
+        # - Conflict resolution (three-layer): preferred — uses supersession
+        #   graph to resolve only when both old+new are in retrieved set.
+        # - Belief (soft): demotes stale facts via P(current).
+        # - Supersession (binary): fallback when neither is enabled.
+        if self.conflict_resolution:
+            merged_chunks = self._resolve_conflicts(merged_chunks, _metadata_by_key)
+        elif self._belief_index is not None:
             merged_chunks = [
                 c for c in merged_chunks
                 if not self._belief_index.is_excluded(c)
             ]
+            merged_chunks = self._belief_dedup(merged_chunks)
         elif self.supersession and self._superseded_texts:
             merged_chunks = [
                 c for c in merged_chunks
                 if c not in self._superseded_texts
             ]
-
-        # Belief-based dedup: when conflicting facts (same S+P, different O)
-        # both appear in retrieval, keep only the highest-P(current) version.
-        # This prevents the LLM from seeing both sides of a resolved conflict.
-        merged_chunks = self._belief_dedup(merged_chunks)
 
         # Build context for LLM via outgestion formatter
         final_chunks = merged_chunks[:self.retrieve_num]
@@ -1128,19 +1146,19 @@ class HermesMemoryAgent:
                 metadata_by_key[k] = r
 
         # Fact currency filtering
-        if self._belief_index is not None:
+        if self.conflict_resolution:
+            all_chunks = self._resolve_conflicts(all_chunks, metadata_by_key)
+        elif self._belief_index is not None:
             all_chunks = [
                 c for c in all_chunks
                 if not self._belief_index.is_excluded(c)
             ]
+            all_chunks = self._belief_dedup(all_chunks)
         elif self.supersession and self._superseded_texts:
             all_chunks = [
                 c for c in all_chunks
                 if c not in self._superseded_texts
             ]
-
-        # Belief-based dedup (same as _query path)
-        all_chunks = self._belief_dedup(all_chunks)
 
         # Trim to retrieve_num and format via outgestion
         final_chunks = all_chunks[:self.retrieve_num]
@@ -1335,6 +1353,75 @@ class HermesMemoryAgent:
             return [c for c in chunks if c not in to_remove]
         return chunks
 
+    def _resolve_conflicts(
+        self, chunks: list[str], metadata_by_key: dict[str, dict],
+    ) -> list[str]:
+        """Three-layer conflict resolution (Layer 2a + 2b).
+
+        Layer 2a (triple-based, high precision):
+        For each chunk, check the supersession graph. If this chunk is
+        superseded by another chunk that is ALSO in the retrieved set,
+        drop it. Only removes old facts when the newer version is present.
+
+        Layer 2b (embedding-based, fallback):
+        For chunks not resolved by 2a, do pairwise embedding similarity.
+        If two chunks have cosine > 0.85 AND share a named entity, drop
+        the older one (lower store_count / recency).
+        """
+        if not self._supersession_graph and not self._supersedes:
+            return chunks
+
+        retrieved_set = set(chunks)
+        to_remove: set[str] = set()
+
+        # 2a: Triple-based — use supersession graph
+        for chunk in chunks:
+            # Is this chunk superseded by something also in the retrieved set?
+            newer = self._supersession_graph.get(chunk)
+            if newer and newer in retrieved_set:
+                to_remove.add(chunk)
+            # Does this chunk supersede something in the set?
+            for older in self._supersedes.get(chunk, ()):
+                if older in retrieved_set:
+                    to_remove.add(older)
+
+        # 2b: Embedding fallback for chunks without triple coverage
+        surviving = [c for c in chunks if c not in to_remove]
+        for i in range(len(surviving)):
+            for j in range(i + 1, len(surviving)):
+                if surviving[i] in to_remove or surviving[j] in to_remove:
+                    continue
+                meta_i = metadata_by_key.get(surviving[i].strip()[:200])
+                meta_j = metadata_by_key.get(surviving[j].strip()[:200])
+                if not meta_i or not meta_j:
+                    continue
+                emb_i = meta_i.get("embedding")
+                emb_j = meta_j.get("embedding")
+                if emb_i is None or emb_j is None:
+                    continue
+
+                sim = float(np.dot(emb_i, emb_j))
+                if sim < 0.85:
+                    continue
+
+                # High similarity — check for shared entity
+                ents_i = set(e.lower() for e in self._fact_entities.get(surviving[i], ()))
+                ents_j = set(e.lower() for e in self._fact_entities.get(surviving[j], ()))
+                if not (ents_i & ents_j):
+                    continue
+
+                # Conflict detected. Remove the older one (lower recency).
+                rec_i = meta_i.get("recency", 0)
+                rec_j = meta_j.get("recency", 0)
+                if rec_i < rec_j:
+                    to_remove.add(surviving[i])
+                elif rec_j < rec_i:
+                    to_remove.add(surviving[j])
+
+        if to_remove:
+            return [c for c in chunks if c not in to_remove]
+        return chunks
+
     def _format_outgestion(
         self,
         chunks: list[str],
@@ -1352,6 +1439,21 @@ class HermesMemoryAgent:
            [SUPERSEDED]/[CURRENT] when they likely represent conflicting
            versions of the same fact
         """
+        # Conflict resolution mode (Layer 3): sort newest-first, no tags.
+        # Conflicts are already resolved by _resolve_conflicts (Layer 2).
+        # Remaining chunks are all "current" facts. Newest-first exploits
+        # gpt-4o-mini's primacy bias (always picks first item).
+        if getattr(self, "conflict_resolution", False):
+            annotated: list[tuple[float, str]] = []
+            for text in chunks:
+                key = text.strip()[:200]
+                meta = metadata_by_key.get(key)
+                recency = meta["recency"] if meta else 0.0
+                annotated.append((recency, text))
+            annotated.sort(key=lambda x: x[0], reverse=True)  # newest first
+            lines = [text for (_recency, text) in annotated]
+            return "\n\n".join(lines), "Answer using the provided facts."
+
         if not getattr(self, "temporal_context", False):
             # Baseline: flat text, no metadata
             return "\n\n".join(chunks), ""
@@ -1359,16 +1461,16 @@ class HermesMemoryAgent:
         # Build (recency, text, embedding) tuples for sorting + contradiction.
         # Chunks without metadata (e.g. from V1 or triadic expansion)
         # get recency=0 so they sort as oldest.
-        annotated: list[tuple[float, str, "np.ndarray | None"]] = []
+        annotated_full: list[tuple[float, str, "np.ndarray | None"]] = []
         for text in chunks:
             key = text.strip()[:200]
             meta = metadata_by_key.get(key)
             recency = meta["recency"] if meta else 0.0
             embedding = meta.get("embedding") if meta else None
-            annotated.append((recency, text, embedding))
+            annotated_full.append((recency, text, embedding))
 
         # Sort oldest → newest (ascending recency)
-        annotated.sort(key=lambda x: x[0])
+        annotated_full.sort(key=lambda x: x[0])
 
         # Soft contradiction surfacing: find pairs of chunks that are
         # semantically similar (cosine > threshold) but have different
@@ -1379,25 +1481,25 @@ class HermesMemoryAgent:
 
         if getattr(self, "contradiction_context", False):
             import numpy as np
-            n_ann = len(annotated)
+            n_ann = len(annotated_full)
             for i in range(n_ann):
                 for j in range(i + 1, n_ann):
-                    emb_i = annotated[i][2]
-                    emb_j = annotated[j][2]
+                    emb_i = annotated_full[i][2]
+                    emb_j = annotated_full[j][2]
                     if emb_i is None or emb_j is None:
                         continue
                     sim = float(np.dot(emb_i, emb_j))
                     if sim >= contradiction_threshold:
-                        rec_i = annotated[i][0]
-                        rec_j = annotated[j][0]
+                        rec_i = annotated_full[i][0]
+                        rec_j = annotated_full[j][0]
                         if rec_i != rec_j:
                             conflict_pairs[i].append(j)
                             conflict_pairs[j].append(i)
 
         # Format with fact numbering + temporal + soft contradiction
         lines = []
-        n = len(annotated)
-        for i, (recency, text, _emb) in enumerate(annotated):
+        n = len(annotated_full)
+        for i, (recency, text, _emb) in enumerate(annotated_full):
             fact_num = i + 1  # 1-indexed for LLM readability
 
             if i in conflict_pairs:
