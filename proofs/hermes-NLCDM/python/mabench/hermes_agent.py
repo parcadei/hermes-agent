@@ -260,6 +260,8 @@ class HermesMemoryAgent:
         self.contradiction_sim_threshold = contradiction_sim_threshold
         self.supersession = supersession
         self._belief_overfetch = belief_overfetch
+        self._belief_hard_floor = belief_hard_floor
+        self._belief_propagation_damping = belief_propagation_damping
 
         # Bayesian belief scoring: soft fact currency
         if belief:
@@ -628,6 +630,18 @@ class HermesMemoryAgent:
                     else:
                         break  # unparseable → use what we have
 
+                # Belief filter + dedup per hop: remove stale facts
+                # BEFORE the LLM extracts an intermediate answer.
+                # Without this, the LLM sees all versions of a fact
+                # (e.g., 4 different sports for Abbiati) and picks wrong,
+                # poisoning all downstream hops.
+                if self._belief_index is not None:
+                    sq_all_texts = [
+                        t for t in sq_all_texts
+                        if not self._belief_index.is_excluded(t)
+                    ]
+                sq_all_texts = self._belief_dedup(sq_all_texts)
+
                 sq_chunks.append(sq_all_texts)
                 sq_chunks_raw.append(sq_all_results)
 
@@ -781,6 +795,11 @@ class HermesMemoryAgent:
                 c for c in merged_chunks
                 if c not in self._superseded_texts
             ]
+
+        # Belief-based dedup: when conflicting facts (same S+P, different O)
+        # both appear in retrieval, keep only the highest-P(current) version.
+        # This prevents the LLM from seeing both sides of a resolved conflict.
+        merged_chunks = self._belief_dedup(merged_chunks)
 
         # Build context for LLM via outgestion formatter
         final_chunks = merged_chunks[:self.retrieve_num]
@@ -1120,6 +1139,9 @@ class HermesMemoryAgent:
                 if c not in self._superseded_texts
             ]
 
+        # Belief-based dedup (same as _query path)
+        all_chunks = self._belief_dedup(all_chunks)
+
         # Trim to retrieve_num and format via outgestion
         final_chunks = all_chunks[:self.retrieve_num]
         memory_context, outgestion_instructions = self._format_outgestion(
@@ -1278,6 +1300,40 @@ class HermesMemoryAgent:
                     gap_texts.append(r["text"])
 
         return gap_texts
+
+    def _belief_dedup(self, chunks: list[str]) -> list[str]:
+        """Deduplicate conflicting facts by belief score.
+
+        When multiple retrieved chunks share a (subject, predicate) triple key
+        but have different objects, keep only the highest-P(current) version.
+        This prevents the LLM from seeing both sides of a resolved conflict
+        (the #1 cause of wrong answers — 94% of failures are outgestion).
+        """
+        if self._belief_index is None or not self._triple_index:
+            return chunks
+
+        retrieved_set = set(chunks)
+        to_remove: set[str] = set()
+
+        for (_subj, _pred), entries in self._triple_index.items():
+            # Which entries from this triple key are in our retrieval set?
+            group = [(obj, text) for (obj, text) in entries
+                     if text in retrieved_set]
+            if len(group) <= 1:
+                continue
+            # Only dedup when there are genuinely different objects (real conflict)
+            if len(set(obj for obj, _text in group)) <= 1:
+                continue
+            # Keep the fact with highest P(current)
+            best_text = max(group,
+                            key=lambda x: self._belief_index.score(x[1]))[1]
+            for (_obj, text) in group:
+                if text != best_text:
+                    to_remove.add(text)
+
+        if to_remove:
+            return [c for c in chunks if c not in to_remove]
+        return chunks
 
     def _format_outgestion(
         self,

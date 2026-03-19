@@ -392,12 +392,17 @@ def _load_ingest_cache(
         agent._superseded_texts = sup_data["superseded_texts"]
         agent._fact_entities = sup_data.get("fact_entities", {})
 
-    # Belief state
+    # Belief state — load cached alpha/beta values, but override runtime
+    # params (hard_floor, damping) from the agent's current config so
+    # query-time tuning doesn't require re-ingestion.
     belief_path = ctx_dir / "belief.pkl"
     if getattr(agent, '_belief_index', None) is not None and belief_path.exists():
         with open(belief_path, "rb") as f:
             from mabench.belief import BeliefIndex
             agent._belief_index = BeliefIndex.from_state_dict(pickle.load(f))
+        # Override runtime params from CLI (not baked pickle values)
+        agent._belief_index._hard_floor = agent._belief_hard_floor
+        agent._belief_index._propagation_damping = agent._belief_propagation_damping
 
     # Meta
     meta_path = ctx_dir / "meta.pkl"
@@ -615,7 +620,7 @@ def main():
     # Ingest cache setup
     chunk_size = dataset_config.get("chunk_size", 0)
     cache_path = _cache_dir(dataset_config, chunk_size)
-    use_cache = not args.fullpass and not args.no_cache
+    use_cache = not args.fullpass and not args.no_cache and not args.force
 
     if use_cache:
         print(f"Ingest cache: {cache_path}")
