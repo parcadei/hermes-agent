@@ -324,9 +324,12 @@ class TestBeliefStore:
             with patch("mabench.hermes_agent.EmbeddingRelevanceScorer"):
                 agent = HermesMemoryAgent.__new__(HermesMemoryAgent)
                 agent.supersession = supersession
+                agent.conflict_resolution = False
                 agent._triple_index = defaultdict(list)
                 agent._superseded_texts = set()
                 agent._fact_entities = {}
+                agent._supersession_graph = {}
+                agent._supersedes = defaultdict(set)
                 agent._ingestion = mock_pipeline
                 agent._scorer = mock_scorer
                 agent._store_count = 0
@@ -566,9 +569,12 @@ class TestBeliefBackwardCompat:
             with patch("mabench.hermes_agent.EmbeddingRelevanceScorer"):
                 agent = HermesMemoryAgent.__new__(HermesMemoryAgent)
                 agent.supersession = False
+                agent.conflict_resolution = False
                 agent._triple_index = defaultdict(list)
                 agent._superseded_texts = set()
                 agent._fact_entities = {}
+                agent._supersession_graph = {}
+                agent._supersedes = defaultdict(set)
                 agent._ingestion = mock_pipeline
                 agent._scorer = mock_scorer
                 agent._store_count = 0
@@ -607,9 +613,12 @@ class TestBeliefBackwardCompat:
             with patch("mabench.hermes_agent.EmbeddingRelevanceScorer"):
                 agent = HermesMemoryAgent.__new__(HermesMemoryAgent)
                 agent.supersession = True
+                agent.conflict_resolution = False
                 agent._triple_index = defaultdict(list)
                 agent._superseded_texts = set()
                 agent._fact_entities = {}
+                agent._supersession_graph = {}
+                agent._supersedes = defaultdict(set)
                 agent._ingestion = mock_pipeline
                 agent._scorer = mock_scorer
                 agent._store_count = 0
