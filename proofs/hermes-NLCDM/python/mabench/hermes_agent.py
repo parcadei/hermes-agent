@@ -1429,9 +1429,6 @@ class HermesMemoryAgent:
         If two chunks have cosine > 0.85 AND share a named entity, drop
         the older one (lower store_count / recency).
         """
-        if not self._supersession_graph and not self._supersedes:
-            return chunks
-
         import logging
         _cr_log = logging.getLogger("conflict_res")
         _cr_log.info("_resolve_conflicts: %d chunks, graph=%d edges", len(chunks), len(self._supersession_graph))
@@ -1451,8 +1448,48 @@ class HermesMemoryAgent:
                     to_remove.add(older)
 
         if to_remove:
-            _cr_log.info("_resolve_conflicts: removing %d chunks: %s",
+            _cr_log.info("_resolve_conflicts 2a: removing %d chunks: %s",
                          len(to_remove), [t[:60] for t in to_remove])
+
+        # 2b: Embedding-based fallback for chunks not resolved by 2a
+        surviving = [c for c in chunks if c not in to_remove]
+        import numpy as np
+        for i in range(len(surviving)):
+            if surviving[i] in to_remove:
+                continue
+            for j in range(i + 1, len(surviving)):
+                if surviving[j] in to_remove:
+                    continue
+                key_i = surviving[i].strip()[:200]
+                key_j = surviving[j].strip()[:200]
+                meta_i = metadata_by_key.get(key_i)
+                meta_j = metadata_by_key.get(key_j)
+                if not meta_i or not meta_j:
+                    continue
+                emb_i = meta_i.get("embedding")
+                emb_j = meta_j.get("embedding")
+                if emb_i is None or emb_j is None:
+                    continue
+                sim = float(np.dot(emb_i, emb_j))
+                if sim < 0.85:
+                    continue
+                # High similarity — check for shared entity
+                ents_i = {e.lower() for e in self._fact_entities.get(surviving[i], ())}
+                ents_j = {e.lower() for e in self._fact_entities.get(surviving[j], ())}
+                if not (ents_i & ents_j):
+                    continue
+                # Conflict detected. Remove the older one (lower recency).
+                rec_i = meta_i.get("recency", 0)
+                rec_j = meta_j.get("recency", 0)
+                if rec_i < rec_j:
+                    to_remove.add(surviving[i])
+                    _cr_log.info("_resolve_conflicts 2b: removing older %s (sim=%.3f)",
+                                 surviving[i][:60], sim)
+                elif rec_j < rec_i:
+                    to_remove.add(surviving[j])
+                    _cr_log.info("_resolve_conflicts 2b: removing older %s (sim=%.3f)",
+                                 surviving[j][:60], sim)
+
         if to_remove:
             return [c for c in chunks if c not in to_remove]
         return chunks
@@ -1475,10 +1512,16 @@ class HermesMemoryAgent:
            versions of the same fact
         """
         # Conflict resolution mode: conflicts already resolved by Layer 2.
-        # Return flat text in retrieval order (preserves relevance ranking).
-        # Layer 3 (newest-first sort) disabled — disrupts relevance ordering.
+        # Layer 3: sort newest-first to exploit gpt-4o-mini primacy bias.
         if getattr(self, "conflict_resolution", False):
-            return "\n\n".join(chunks), ""
+            annotated = []
+            for text in chunks:
+                key = text.strip()[:200]
+                meta = metadata_by_key.get(key)
+                recency = meta["recency"] if meta else 0.0
+                annotated.append((recency, text))
+            annotated.sort(key=lambda x: x[0], reverse=True)  # newest first
+            return "\n\n".join(t for _, t in annotated), ""
 
         if not getattr(self, "temporal_context", False):
             # Baseline: flat text, no metadata
