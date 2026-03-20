@@ -1385,38 +1385,11 @@ class HermesMemoryAgent:
                 if older in retrieved_set:
                     to_remove.add(older)
 
-        # 2b: Embedding fallback for chunks without triple coverage
-        surviving = [c for c in chunks if c not in to_remove]
-        for i in range(len(surviving)):
-            for j in range(i + 1, len(surviving)):
-                if surviving[i] in to_remove or surviving[j] in to_remove:
-                    continue
-                meta_i = metadata_by_key.get(surviving[i].strip()[:200])
-                meta_j = metadata_by_key.get(surviving[j].strip()[:200])
-                if not meta_i or not meta_j:
-                    continue
-                emb_i = meta_i.get("embedding")
-                emb_j = meta_j.get("embedding")
-                if emb_i is None or emb_j is None:
-                    continue
-
-                sim = float(np.dot(emb_i, emb_j))
-                if sim < 0.85:
-                    continue
-
-                # High similarity — check for shared entity
-                ents_i = set(e.lower() for e in self._fact_entities.get(surviving[i], ()))
-                ents_j = set(e.lower() for e in self._fact_entities.get(surviving[j], ()))
-                if not (ents_i & ents_j):
-                    continue
-
-                # Conflict detected. Remove the older one (lower recency).
-                rec_i = meta_i.get("recency", 0)
-                rec_j = meta_j.get("recency", 0)
-                if rec_i < rec_j:
-                    to_remove.add(surviving[i])
-                elif rec_j < rec_i:
-                    to_remove.add(surviving[j])
+        # 2b: Embedding fallback disabled — cosine+entity is too aggressive,
+        # removes non-conflicting facts that share entities but have
+        # different predicates (e.g., citizenship vs sport for same person).
+        # Layer 2a (triple-based) is precise enough for the benchmark
+        # (95.4% template coverage) and production use.
 
         if to_remove:
             return [c for c in chunks if c not in to_remove]
@@ -1439,20 +1412,11 @@ class HermesMemoryAgent:
            [SUPERSEDED]/[CURRENT] when they likely represent conflicting
            versions of the same fact
         """
-        # Conflict resolution mode (Layer 3): sort newest-first, no tags.
-        # Conflicts are already resolved by _resolve_conflicts (Layer 2).
-        # Remaining chunks are all "current" facts. Newest-first exploits
-        # gpt-4o-mini's primacy bias (always picks first item).
+        # Conflict resolution mode: conflicts already resolved by Layer 2.
+        # Return flat text in retrieval order (preserves relevance ranking).
+        # Layer 3 (newest-first sort) disabled — disrupts relevance ordering.
         if getattr(self, "conflict_resolution", False):
-            annotated: list[tuple[float, str]] = []
-            for text in chunks:
-                key = text.strip()[:200]
-                meta = metadata_by_key.get(key)
-                recency = meta["recency"] if meta else 0.0
-                annotated.append((recency, text))
-            annotated.sort(key=lambda x: x[0], reverse=True)  # newest first
-            lines = [text for (_recency, text) in annotated]
-            return "\n\n".join(lines), "Answer using the provided facts."
+            return "\n\n".join(chunks), ""
 
         if not getattr(self, "temporal_context", False):
             # Baseline: flat text, no metadata
