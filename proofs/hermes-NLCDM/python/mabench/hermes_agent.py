@@ -464,6 +464,13 @@ class HermesMemoryAgent:
                             if self.conflict_resolution:
                                 self._supersession_graph[existing_text] = fact.text
                                 self._supersedes[fact.text].add(existing_text)
+                                if len(self._supersession_graph) <= 20:
+                                    import logging
+                                    logging.getLogger("conflict_res").info(
+                                        "EDGE: (%s, %s) old_obj=%s → new_obj=%s | old=%s | new=%s",
+                                        subj, pred, existing_obj, obj,
+                                        existing_text[:60], fact.text[:60],
+                                    )
 
                             # Bayesian belief update (when enabled)
                             if self._belief_index is not None:
@@ -498,13 +505,14 @@ class HermesMemoryAgent:
            len(getattr(self.coupled_engine, '_session_buffer', [])) > 0:
             self.coupled_engine.flush_session()
 
-        # Supersession diagnostics: log every 50 stores
-        if self.supersession and self._store_count % 50 == 0 and self._store_count > 0:
+        # Supersession / conflict resolution diagnostics: log every 50 stores
+        if (self.supersession or self.conflict_resolution) and self._store_count % 50 == 0 and self._store_count > 0:
             import logging
             logging.getLogger("supersession").info(
-                "STATS after %d stores: %d unique (S,P) keys, %d superseded texts, %d total triples",
+                "STATS after %d stores: %d unique (S,P) keys, %d superseded texts, %d graph edges, %d total triples",
                 self._store_count, len(self._triple_index),
                 len(self._superseded_texts),
+                len(self._supersession_graph),
                 sum(len(v) for v in self._triple_index.values()),
             )
 
@@ -1371,6 +1379,10 @@ class HermesMemoryAgent:
         if not self._supersession_graph and not self._supersedes:
             return chunks
 
+        import logging
+        _cr_log = logging.getLogger("conflict_res")
+        _cr_log.info("_resolve_conflicts: %d chunks, graph=%d edges", len(chunks), len(self._supersession_graph))
+
         retrieved_set = set(chunks)
         to_remove: set[str] = set()
 
@@ -1385,12 +1397,9 @@ class HermesMemoryAgent:
                 if older in retrieved_set:
                     to_remove.add(older)
 
-        # 2b: Embedding fallback disabled — cosine+entity is too aggressive,
-        # removes non-conflicting facts that share entities but have
-        # different predicates (e.g., citizenship vs sport for same person).
-        # Layer 2a (triple-based) is precise enough for the benchmark
-        # (95.4% template coverage) and production use.
-
+        if to_remove:
+            _cr_log.info("_resolve_conflicts: removing %d chunks: %s",
+                         len(to_remove), [t[:60] for t in to_remove])
         if to_remove:
             return [c for c in chunks if c not in to_remove]
         return chunks
