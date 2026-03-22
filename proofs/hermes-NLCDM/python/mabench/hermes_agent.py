@@ -46,10 +46,110 @@ from coupled_engine import CoupledEngine
 from dream_ops import DreamParams
 from nlcdm_core import cosine_sim
 from mabench.ingestion import (
-    IngestionPipeline, IngestionConfig, IngestionResult, _MutableEntityGraph,
+    IngestionPipeline,
+    IngestionConfig,
+    IngestionResult,
+    _MutableEntityGraph,
 )
 from mabench.belief import BeliefIndex
 from mabench.triadic_memory import TriadicMemory
+
+
+# ---------------------------------------------------------------------------
+# Query-time conflict resolution helpers
+# ---------------------------------------------------------------------------
+
+def _get_subtree_text(token) -> str:
+    """Get the full text of a token's subtree (e.g., 'association football')."""
+    return " ".join(t.text for t in token.subtree)
+
+
+def _extract_acl_triples(doc) -> list[tuple[str, str, str]]:
+    """Extract (subject, predicate, object) triples using acl-aware copular parsing.
+
+    Handles two sentence patterns:
+
+    1. Copular with acl modifier (most common in MABench):
+       "The sport played by Abbiati is association football"
+       Parse tree: ROOT=is(AUX), nsubj=sport→acl=played→agent=by→pobj=Abbiati, attr=football
+       Triple: (Abbiati, sport_played_by, association football)
+
+    2. Non-copular verbs:
+       "Abbiati played basketball"
+       Parse tree: ROOT=played(VERB), nsubj=Abbiati, dobj=basketball
+       Triple: (Abbiati, play, basketball)
+
+    3. Simple copular (no acl):
+       "Abbiati is Italian"
+       Triple: (Abbiati, be, Italian)
+    """
+    triples = []
+    for sent in doc.sents:
+        root = sent.root
+
+        if root.pos_ == "AUX" and root.lemma_ == "be":
+            # Copular sentence
+            nsubj = None
+            obj_token = None
+            for child in root.children:
+                if child.dep_ == "nsubj":
+                    nsubj = child
+                elif child.dep_ in ("attr", "acomp"):
+                    obj_token = child
+
+            if nsubj is None or obj_token is None:
+                continue
+
+            obj_text = _get_subtree_text(obj_token)
+
+            # Check for acl modifier on nsubj (real predicate)
+            acl_child = None
+            for child in nsubj.children:
+                if child.dep_ == "acl":
+                    acl_child = child
+                    break
+
+            if acl_child is not None:
+                # acl-aware: "The sport played by Abbiati is football"
+                # Descend acl→agent/prep→pobj for real subject
+                real_subject = None
+                prep_text = ""
+                for child in acl_child.children:
+                    if child.dep_ in ("agent", "prep"):
+                        prep_text = child.text.lower()
+                        for gchild in child.children:
+                            if gchild.dep_ == "pobj":
+                                real_subject = _get_subtree_text(gchild)
+                                break
+                        break
+
+                if real_subject:
+                    canonical_pred = f"{nsubj.text}_{acl_child.lemma_}_{prep_text}"
+                    triples.append((real_subject, canonical_pred, obj_text))
+                else:
+                    # acl without agent/prep → fallback to nsubj as subject
+                    triples.append((_get_subtree_text(nsubj), nsubj.text, obj_text))
+            else:
+                # Simple copular: "Abbiati is Italian"
+                triples.append((_get_subtree_text(nsubj), "be", obj_text))
+
+        elif root.pos_ == "VERB":
+            # Non-copular: nsubj→VERB→dobj/attr/pobj
+            nsubj = None
+            for child in root.children:
+                if child.dep_ == "nsubj":
+                    nsubj = child
+                    break
+            if nsubj is None:
+                continue
+
+            pred = root.lemma_
+            for child in root.children:
+                if child.dep_ in ("dobj", "attr", "pobj"):
+                    obj_text = _get_subtree_text(child)
+                    triples.append((_get_subtree_text(nsubj), pred, obj_text))
+
+    return triples
 
 
 class EmbeddingRelevanceScorer(RelevanceScorer):
@@ -73,11 +173,10 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
             return
         import torch
         from transformers import AutoTokenizer, AutoModel
+
         self._tokenizer = AutoTokenizer.from_pretrained(self._model_name)
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
-        self._model = AutoModel.from_pretrained(
-            self._model_name, torch_dtype=torch.float32
-        ).to(self._device)
+        self._model = AutoModel.from_pretrained(self._model_name, torch_dtype=torch.float32).to(self._device)
         self._model.eval()
 
     def embed(self, text: str) -> np.ndarray:
@@ -107,12 +206,16 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
         if uncached_texts:
             self._ensure_model()
             import torch
+
             # Process in batches to avoid OOM on very large chunks
             for start in range(0, len(uncached_texts), batch_size):
-                batch_texts = uncached_texts[start:start + batch_size]
+                batch_texts = uncached_texts[start : start + batch_size]
                 inputs = self._tokenizer(
-                    batch_texts, return_tensors="pt", padding=True,
-                    truncation=True, max_length=512,
+                    batch_texts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=512,
                 )
                 inputs = {k: v.to(self._device) for k, v in inputs.items()}
                 with torch.no_grad():
@@ -222,6 +325,8 @@ class HermesMemoryAgent:
         belief_hard_floor: float = 0.05,
         belief_overfetch: int = 3,
         conflict_resolution: bool = False,
+        cr_per_hop: bool = True,
+        cr_entity_gate: bool = False,
     ):
         self.model = model
         self.dedup_threshold = dedup_threshold
@@ -261,6 +366,8 @@ class HermesMemoryAgent:
         self.contradiction_sim_threshold = contradiction_sim_threshold
         self.supersession = supersession
         self.conflict_resolution = conflict_resolution
+        self._cr_per_hop = cr_per_hop
+        self._cr_entity_gate = cr_entity_gate
         self._belief_overfetch = belief_overfetch
         self._belief_hard_floor = belief_hard_floor
         self._belief_propagation_damping = belief_propagation_damping
@@ -336,15 +443,18 @@ class HermesMemoryAgent:
         # Ingestion pipeline (replaces regex _parse_facts)
         try:
             import torch
+
             _coref_device = "cuda" if torch.cuda.is_available() else "cpu"
         except ImportError:
             _coref_device = "cpu"
-        self._ingestion = IngestionPipeline(IngestionConfig(
-            coref_device=_coref_device,
-            coref_enabled=True,
-            boundary_threshold=0.2,
-            strip_numbered_prefix=False,
-        ))
+        self._ingestion = IngestionPipeline(
+            IngestionConfig(
+                coref_device=_coref_device,
+                coref_enabled=True,
+                boundary_threshold=0.2,
+                strip_numbered_prefix=False,
+            )
+        )
         self._entity_accumulator = _MutableEntityGraph()
 
         # Triadic memory: structural recall via Overmann sparse 3D tensor
@@ -360,6 +470,7 @@ class HermesMemoryAgent:
         if self._llm_client is not None:
             return
         from openai import OpenAI
+
         self._llm_client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=os.environ["OPENROUTER_API_KEY"],
@@ -410,45 +521,47 @@ class HermesMemoryAgent:
 
             # V2: Coupled engine store (no serial number prefix -- D3)
             self.coupled_engine.store(
-                text=fact.text, embedding=emb,
+                text=fact.text,
+                embedding=emb,
                 recency=float(self._store_count),
             )
 
             # Triadic: store fact's triples in the 3D tensor
-            if getattr(self, '_triadic', None) is not None:
+            if getattr(self, "_triadic", None) is not None:
                 self._triadic.store_fact(fact.text, list(fact.triples))
 
             # Register fact in belief index (before conflict detection)
             if self._belief_index is not None:
                 self._belief_index.register_fact(fact.text)
 
-            # --- Conflict detection: spaCy triple-based with entity gating ---
+            # --- Conflict detection: triple-based with entity gating ---
             # Same subject+predicate, different object → potential conflict,
             # but only act if the old and new facts share a named entity.
-            # When conflict_resolution=True: populate supersession graph.
             # When supersession=True: populate flat _superseded_texts set.
             # When belief is active: update belief scores.
-            if (self.conflict_resolution or self.supersession or self._belief_index) and fact.triples:
+            # NOTE: conflict_resolution now uses query-time CR (_query_time_cr),
+            # so it no longer needs ingestion-time triple index building.
+            if (self.supersession or self._belief_index) and fact.triples:
                 new_entities = set(e.lower() for e in fact.entities) if fact.entities else set()
                 self._fact_entities[fact.text] = fact.entities
-                for (subj, pred, obj) in fact.triples:
+                for subj, pred, obj in fact.triples:
                     key = (subj.lower().strip(), pred.lower().strip())
                     new_obj = obj.lower().strip()
                     if not key[0] or not key[1]:
                         continue  # skip degenerate triples
                     for existing_obj, existing_text in self._triple_index[key]:
                         if existing_obj != new_obj:
-                            # Entity gate: require shared named entity
-                            old_entities = set(
-                                e.lower() for e in self._fact_entities.get(existing_text, ())
+                            # Entity gate: require shared named entity via substring matching.
+                            # spaCy NER set intersection misses entities when it extracts
+                            # different spans from near-identical sentences.
+                            old_entities = [e.lower() for e in self._fact_entities.get(existing_text, ())]
+                            existing_lower = existing_text.lower()
+                            fact_lower = fact.text.lower()
+                            shared = any(e in existing_lower for e in new_entities if len(e) > 2) or any(
+                                e in fact_lower for e in old_entities if len(e) > 2
                             )
-                            if not (old_entities & new_entities):
+                            if not shared:
                                 continue  # no shared entity → not a real conflict
-
-                            # Directed supersession graph (conflict_resolution)
-                            if self.conflict_resolution:
-                                self._supersession_graph[existing_text] = fact.text
-                                self._supersedes[fact.text].add(existing_text)
 
                             # Binary supersession (when enabled)
                             if self.supersession:
@@ -457,42 +570,47 @@ class HermesMemoryAgent:
                             # Bayesian belief update (when enabled)
                             if self._belief_index is not None:
                                 self._belief_index.on_conflict(
-                                    existing_text, fact.text,
+                                    existing_text,
+                                    fact.text,
                                 )
                     self._triple_index[key].append((new_obj, fact.text))
 
             self._store_count += 1
 
         # Synonym dict: feed coref clusters and verb mappings to triadic
-        if getattr(self, '_triadic', None) is not None:
-            if result.coref_clusters:
+        if getattr(self, "_triadic", None) is not None:
+            if getattr(result, "coref_clusters", None):
                 self._triadic.add_coref_clusters(result.coref_clusters)
-            if result.verb_mappings:
+            if getattr(result, "verb_mappings", None):
                 self._triadic.add_verb_mappings(result.verb_mappings)
 
         # Accumulate entity graph with global offset
-        if hasattr(self, '_entity_accumulator'):
+        if hasattr(self, "_entity_accumulator"):
             offset = self._store_count - len(result.facts)
             self._entity_accumulator.merge(result.entity_graph, offset)
 
         # Belief propagation: penalize facts connected to degraded facts
-        if self._belief_index is not None and hasattr(self, '_entity_accumulator'):
+        if self._belief_index is not None and hasattr(self, "_entity_accumulator"):
             self._belief_index.propagate(
                 self._entity_accumulator,
                 self.coupled_engine.memory_store,
             )
 
         # Flush session buffer per chunk if Hebbian enabled (D8)
-        if hasattr(self.coupled_engine, '_session_buffer') and \
-           len(getattr(self.coupled_engine, '_session_buffer', [])) > 0:
+        if (
+            hasattr(self.coupled_engine, "_session_buffer")
+            and len(getattr(self.coupled_engine, "_session_buffer", [])) > 0
+        ):
             self.coupled_engine.flush_session()
 
-        # Supersession / conflict resolution diagnostics: log every 50 stores
-        if (self.supersession or self.conflict_resolution) and self._store_count % 50 == 0 and self._store_count > 0:
+        # Supersession diagnostics: log every 50 stores
+        if self.supersession and self._store_count % 50 == 0 and self._store_count > 0:
             import logging
+
             logging.getLogger("supersession").info(
                 "STATS after %d stores: %d unique (S,P) keys, %d superseded texts, %d graph edges, %d total triples",
-                self._store_count, len(self._triple_index),
+                self._store_count,
+                len(self._triple_index),
                 len(self._superseded_texts),
                 len(self._supersession_graph),
                 sum(len(v) for v in self._triple_index.values()),
@@ -518,7 +636,7 @@ class HermesMemoryAgent:
         if q_start >= 0:
             q_end = prompt.rfind("\nAnswer:")
             if q_end > q_start:
-                return prompt[q_start + len("Question:"):q_end].strip()
+                return prompt[q_start + len("Question:") : q_end].strip()
         return prompt
 
     def _query(self, question: str) -> dict:
@@ -579,11 +697,12 @@ class HermesMemoryAgent:
                             sq_all_results.append(r)
 
                     # Triadic expansion on this sub-query's results
-                    if getattr(self, '_triadic', None) is not None:
+                    if getattr(self, "_triadic", None) is not None:
                         hop_texts = [r["text"] for r in sq_results]
                         if hop_texts:
                             for t in self._triadic.expand(
-                                hop_texts, top_k=self._triadic_expand_k,
+                                hop_texts,
+                                top_k=self._triadic_expand_k,
                             ):
                                 tkey = t.strip()[:200]
                                 if tkey not in sq_seen:
@@ -599,32 +718,35 @@ class HermesMemoryAgent:
                         judge_resp = self._llm_client.chat.completions.create(
                             model=self.model,
                             messages=[
-                                {"role": "system", "content": (
-                                    "Given retrieved facts, can you answer "
-                                    "this specific sub-question?\n"
-                                    "If YES: respond ANSWER_READY\n"
-                                    "If NO: respond NEED: <3-6 word search "
-                                    "using concrete entity names>"
-                                )},
-                                {"role": "user", "content": (
-                                    f"Sub-question: {current_sq}\n\n"
-                                    f"Facts:\n"
-                                    + "\n".join(sq_all_texts[:10])
-                                    + "\n\nCan you answer?"
-                                )},
+                                {
+                                    "role": "system",
+                                    "content": (
+                                        "Given retrieved facts, can you answer "
+                                        "this specific sub-question?\n"
+                                        "If YES: respond ANSWER_READY\n"
+                                        "If NO: respond NEED: <3-6 word search "
+                                        "using concrete entity names>"
+                                    ),
+                                },
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        f"Sub-question: {current_sq}\n\n"
+                                        f"Facts:\n" + "\n".join(sq_all_texts[:10]) + "\n\nCan you answer?"
+                                    ),
+                                },
                             ],
                             temperature=0.0,
                             max_tokens=64,
                         )
-                        jt = (judge_resp.choices[0].message.content
-                              or "").strip()
+                        jt = (judge_resp.choices[0].message.content or "").strip()
                     except Exception:
                         break  # LLM error → use what we have
 
                     if jt.startswith("ANSWER_READY"):
                         break
                     elif "NEED:" in jt:
-                        need = jt[jt.index("NEED:") + 5:].strip().strip("'\"")
+                        need = jt[jt.index("NEED:") + 5 :].strip().strip("'\"")
                         if need and need != current_sq:
                             current_sq = need
                         else:
@@ -637,19 +759,10 @@ class HermesMemoryAgent:
                 # Without this, the LLM sees all versions of a fact
                 # (e.g., 4 different sports for Abbiati) and picks wrong,
                 # poisoning all downstream hops.
-                if self.conflict_resolution:
-                    # Build per-hop metadata for _resolve_conflicts
-                    _hop_meta: dict[str, dict] = {}
-                    for r in sq_all_results:
-                        k = r["text"].strip()[:200]
-                        if k not in _hop_meta:
-                            _hop_meta[k] = r
-                    sq_all_texts = self._resolve_conflicts(sq_all_texts, _hop_meta)
+                if self.conflict_resolution and self._cr_per_hop:
+                    sq_all_texts = self._query_time_cr(sq_all_texts)
                 elif self._belief_index is not None:
-                    sq_all_texts = [
-                        t for t in sq_all_texts
-                        if not self._belief_index.is_excluded(t)
-                    ]
+                    sq_all_texts = [t for t in sq_all_texts if not self._belief_index.is_excluded(t)]
 
                 sq_chunks.append(sq_all_texts)
                 sq_chunks_raw.append(sq_all_results)
@@ -657,15 +770,19 @@ class HermesMemoryAgent:
                 # Extract intermediate answer for chaining to next hop
                 if i < len(subqueries) - 1 and sq_all_texts:
                     short_ans = self._extract_short_answer(
-                        sq, sq_all_texts, evidence_chain,
+                        sq,
+                        sq_all_texts,
+                        evidence_chain,
                     )
                     if short_ans:
                         answers[f"{{answer_{i + 1}}}"] = short_ans
-                        evidence_chain.append({
-                            "q": sq,
-                            "a": short_ans,
-                            "evidence": sq_all_texts[:2],
-                        })
+                        evidence_chain.append(
+                            {
+                                "q": sq,
+                                "a": short_ans,
+                                "evidence": sq_all_texts[:2],
+                            }
+                        )
 
             # Merge sub-query and original results
             orig_results = self._retrieve_v2(bare_question)
@@ -698,9 +815,7 @@ class HermesMemoryAgent:
                     key=lambda k: rrf_scores[k],
                     reverse=True,
                 )
-                v2_texts = [
-                    key_to_text[k] for k in sorted_keys[:self.retrieve_num]
-                ]
+                v2_texts = [key_to_text[k] for k in sorted_keys[: self.retrieve_num]]
             else:
                 # Priority merge: orig top-5, then sub-queries top-3 each
                 v2_texts = []
@@ -760,10 +875,8 @@ class HermesMemoryAgent:
                 seen.add(key)
                 merged_chunks.append(text)
         # Triadic expansion: structural recall from retrieved facts' triples
-        if getattr(self, '_triadic', None) is not None and v2_texts:
-            triadic_texts = self._triadic.expand(
-                v2_texts, top_k=self._triadic_expand_k
-            )
+        if getattr(self, "_triadic", None) is not None and v2_texts:
+            triadic_texts = self._triadic.expand(v2_texts, top_k=self._triadic_expand_k)
             for text in triadic_texts:
                 key = text.strip()[:200]
                 if key not in seen:
@@ -790,33 +903,26 @@ class HermesMemoryAgent:
                     merged_chunks.append(line)
 
         # Fact currency filtering:
-        # - Conflict resolution (three-layer): preferred — uses supersession
-        #   graph to resolve only when both old+new are in retrieved set.
+        # - Conflict resolution (query-time): parse retrieved facts with spaCy,
+        #   extract acl-aware copular triples, keep newest per (S,P) group.
         # - Belief (soft): demotes stale facts via P(current).
         # - Supersession (binary): fallback when neither is enabled.
         if self.conflict_resolution:
-            merged_chunks = self._resolve_conflicts(merged_chunks, _metadata_by_key)
+            merged_chunks = self._query_time_cr(merged_chunks)
         elif self._belief_index is not None:
-            merged_chunks = [
-                c for c in merged_chunks
-                if not self._belief_index.is_excluded(c)
-            ]
+            merged_chunks = [c for c in merged_chunks if not self._belief_index.is_excluded(c)]
         elif self.supersession and self._superseded_texts:
-            merged_chunks = [
-                c for c in merged_chunks
-                if c not in self._superseded_texts
-            ]
+            merged_chunks = [c for c in merged_chunks if c not in self._superseded_texts]
 
         # Build context for LLM via outgestion formatter
-        final_chunks = merged_chunks[:self.retrieve_num]
-        memory_context, outgestion_instructions = self._format_outgestion(
-            final_chunks, _metadata_by_key
-        )
+        final_chunks = merged_chunks[: self.retrieve_num]
+        memory_context, outgestion_instructions = self._format_outgestion(final_chunks, _metadata_by_key)
         memory_time = time.time() - query_start
 
         # Generate answer via LLM
         answer, input_tokens, output_tokens, gen_time = self._generate_answer(
-            question, memory_context,
+            question,
+            memory_context,
             extra_system_instructions=outgestion_instructions,
         )
         query_time = time.time() - query_start
@@ -864,11 +970,14 @@ class HermesMemoryAgent:
             response = self._llm_client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": (
-                        "You decompose multi-hop questions into chained "
-                        "sub-questions. Use {answer_N} placeholders. "
-                        "Be concise."
-                    )},
+                    {
+                        "role": "system",
+                        "content": (
+                            "You decompose multi-hop questions into chained "
+                            "sub-questions. Use {answer_N} placeholders. "
+                            "Be concise."
+                        ),
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.0,
@@ -885,20 +994,21 @@ class HermesMemoryAgent:
             if not line:
                 continue
             # Strip numbering: "1. ...", "1) ...", "- ..."
-            for prefix in ("1.", "2.", "3.", "4.", "5.",
-                           "1)", "2)", "3)", "4)", "5)", "-"):
+            for prefix in ("1.", "2.", "3.", "4.", "5.", "1)", "2)", "3)", "4)", "5)", "-"):
                 if line.startswith(prefix):
-                    line = line[len(prefix):].strip()
+                    line = line[len(prefix) :].strip()
                     break
             if line:
                 subqs.append(line)
 
         # Cap at max_hops
-        subqs = subqs[:self.decompose_max_hops]
+        subqs = subqs[: self.decompose_max_hops]
         return subqs if subqs else [question]
 
     def _extract_short_answer(
-        self, question: str, facts: list[str],
+        self,
+        question: str,
+        facts: list[str],
         evidence_chain: list[dict] | None = None,
     ) -> str:
         """Extract a short factual answer from retrieved facts.
@@ -923,10 +1033,9 @@ class HermesMemoryAgent:
             lines = []
             for i, hop in enumerate(evidence_chain, 1):
                 lines.append(
-                    f"Hop {i}: \"{hop['q']}\" → \"{hop['a']}\""
-                    f" (from: \"{hop['evidence'][0][:120]}...\")"
-                    if hop['evidence'] else
-                    f"Hop {i}: \"{hop['q']}\" → \"{hop['a']}\""
+                    f'Hop {i}: "{hop["q"]}" → "{hop["a"]}" (from: "{hop["evidence"][0][:120]}...")'
+                    if hop["evidence"]
+                    else f'Hop {i}: "{hop["q"]}" → "{hop["a"]}"'
                 )
             history = "Previous reasoning:\n" + "\n".join(lines) + "\n\n"
 
@@ -934,16 +1043,15 @@ class HermesMemoryAgent:
             response = self._llm_client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": (
-                        "Answer the question using ONLY the provided facts. "
-                        "Use the previous reasoning chain for context. "
-                        "Give just the entity name, nothing else."
-                    )},
-                    {"role": "user", "content": (
-                        f"{history}"
-                        f"Facts:\n{context}\n\n"
-                        f"Question: {question}\nAnswer:"
-                    )},
+                    {
+                        "role": "system",
+                        "content": (
+                            "Answer the question using ONLY the provided facts. "
+                            "Use the previous reasoning chain for context. "
+                            "Give just the entity name, nothing else."
+                        ),
+                    },
+                    {"role": "user", "content": (f"{history}Facts:\n{context}\n\nQuestion: {question}\nAnswer:")},
                 ],
                 temperature=0.0,
                 max_tokens=32,
@@ -991,9 +1099,10 @@ class HermesMemoryAgent:
 
             # Triadic expansion on this hop's results
             hop_texts = [r["text"] for r in results]
-            if getattr(self, '_triadic', None) is not None and hop_texts:
+            if getattr(self, "_triadic", None) is not None and hop_texts:
                 triadic_texts = self._triadic.expand(
-                    hop_texts, top_k=self._triadic_expand_k,
+                    hop_texts,
+                    top_k=self._triadic_expand_k,
                 )
                 for t in triadic_texts:
                     key = t.strip()[:200]
@@ -1015,11 +1124,13 @@ class HermesMemoryAgent:
 
             # Don't judge on last possible hop — just use what we have
             if hop >= self.iterative_max_hops - 1:
-                evidence_chain.append({
-                    "query": current_query,
-                    "found": hop_new_chunks[:3],
-                    "entity": None,
-                })
+                evidence_chain.append(
+                    {
+                        "query": current_query,
+                        "found": hop_new_chunks[:3],
+                        "entity": None,
+                    }
+                )
                 break
 
             # Build chain summary for the judge so it has full hop context
@@ -1029,16 +1140,11 @@ class HermesMemoryAgent:
                 for i, step in enumerate(evidence_chain, 1):
                     found_preview = step["found"][0][:100] if step["found"] else "nothing relevant"
                     learned_str = f" → learned: {step['learned']}" if step.get("learned") else ""
-                    entity_str = f" → next search: \"{step['entity']}\"" if step.get("entity") else ""
+                    entity_str = f' → next search: "{step["entity"]}"' if step.get("entity") else ""
                     lines.append(
-                        f"  Hop {i}: searched \"{step['query']}\" "
-                        f"→ found \"{found_preview}...\"{learned_str}{entity_str}"
+                        f'  Hop {i}: searched "{step["query"]}" → found "{found_preview}..."{learned_str}{entity_str}'
                     )
-                chain_summary = (
-                    "Reasoning chain so far:\n"
-                    + "\n".join(lines)
-                    + "\n\n"
-                )
+                chain_summary = "Reasoning chain so far:\n" + "\n".join(lines) + "\n\n"
 
             # LLM judge sees ALL accumulated chunks (not capped at retrieve_num).
             # Each hop adds new deduped chunks; the judge needs the full
@@ -1048,51 +1154,59 @@ class HermesMemoryAgent:
                 judge_response = self._llm_client.chat.completions.create(
                     model=self.model,
                     messages=[
-                        {"role": "system", "content": (
-                            "You evaluate whether retrieved facts can answer "
-                            "a question, and extract intermediate answers.\n\n"
-                            "If the facts contain enough to answer, respond:\n"
-                            "ANSWER_READY\n\n"
-                            "If not, extract what you DID learn and state "
-                            "what simple fact to search next. Format:\n"
-                            "LEARNED: <what you found, e.g. 'Abbiati plays "
-                            "association football'>\n"
-                            "NEED: <simple search, e.g. 'association football "
-                            "country of origin'>\n\n"
-                            "The NEED query will be used for embedding search. "
-                            "Use CONCRETE entities from what you learned, "
-                            "NOT abstract references like 'the sport' or "
-                            "'the person'. Keep NEED to 3-8 words.\n"
-                            "Do NOT repeat a previous search."
-                        )},
-                        {"role": "user", "content": (
-                            f"Question: {bare_question}\n\n"
-                            f"{chain_summary}"
-                            f"Retrieved facts:\n{context_for_judge}\n\n"
-                            f"Can you answer? If not, what did you learn "
-                            f"and what concrete fact is still missing?"
-                        )},
+                        {
+                            "role": "system",
+                            "content": (
+                                "You evaluate whether retrieved facts can answer "
+                                "a question, and extract intermediate answers.\n\n"
+                                "If the facts contain enough to answer, respond:\n"
+                                "ANSWER_READY\n\n"
+                                "If not, extract what you DID learn and state "
+                                "what simple fact to search next. Format:\n"
+                                "LEARNED: <what you found, e.g. 'Abbiati plays "
+                                "association football'>\n"
+                                "NEED: <simple search, e.g. 'association football "
+                                "country of origin'>\n\n"
+                                "The NEED query will be used for embedding search. "
+                                "Use CONCRETE entities from what you learned, "
+                                "NOT abstract references like 'the sport' or "
+                                "'the person'. Keep NEED to 3-8 words.\n"
+                                "Do NOT repeat a previous search."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Question: {bare_question}\n\n"
+                                f"{chain_summary}"
+                                f"Retrieved facts:\n{context_for_judge}\n\n"
+                                f"Can you answer? If not, what did you learn "
+                                f"and what concrete fact is still missing?"
+                            ),
+                        },
                     ],
                     temperature=0.0,
                     max_tokens=64,
                 )
-                judge_text = (
-                    judge_response.choices[0].message.content or ""
-                ).strip()
+                judge_text = (judge_response.choices[0].message.content or "").strip()
             except Exception:
-                evidence_chain.append({
-                    "query": current_query,
-                    "found": hop_new_chunks[:3],
-                    "entity": None,
-                })
+                evidence_chain.append(
+                    {
+                        "query": current_query,
+                        "found": hop_new_chunks[:3],
+                        "entity": None,
+                    }
+                )
                 break  # LLM failure → use what we have
 
             if judge_text.startswith("ANSWER_READY"):
-                evidence_chain.append({
-                    "query": current_query,
-                    "found": hop_new_chunks[:3],
-                    "entity": None,
-                })
+                evidence_chain.append(
+                    {
+                        "query": current_query,
+                        "found": hop_new_chunks[:3],
+                        "entity": None,
+                    }
+                )
                 break
 
             # Parse LEARNED/NEED format
@@ -1101,29 +1215,33 @@ class HermesMemoryAgent:
             for line in judge_text.split("\n"):
                 line = line.strip()
                 if line.startswith("LEARNED:"):
-                    learned = line[len("LEARNED:"):].strip()
+                    learned = line[len("LEARNED:") :].strip()
                 elif line.startswith("NEED:"):
-                    next_entity = line[len("NEED:"):].strip()
+                    next_entity = line[len("NEED:") :].strip()
 
             # Fallback: old format (just "NEED: ...")
             if not next_entity and judge_text.startswith("NEED:"):
-                next_entity = judge_text[len("NEED:"):].strip()
+                next_entity = judge_text[len("NEED:") :].strip()
 
             if next_entity:
-                evidence_chain.append({
-                    "query": current_query,
-                    "found": hop_new_chunks[:3],
-                    "entity": next_entity,
-                    "learned": learned,
-                })
+                evidence_chain.append(
+                    {
+                        "query": current_query,
+                        "found": hop_new_chunks[:3],
+                        "entity": next_entity,
+                        "learned": learned,
+                    }
+                )
                 current_query = next_entity
             else:
                 # Unparseable response → treat as ready
-                evidence_chain.append({
-                    "query": current_query,
-                    "found": hop_new_chunks[:3],
-                    "entity": None,
-                })
+                evidence_chain.append(
+                    {
+                        "query": current_query,
+                        "found": hop_new_chunks[:3],
+                        "entity": None,
+                    }
+                )
                 break
 
         # Build metadata lookup
@@ -1137,26 +1255,22 @@ class HermesMemoryAgent:
         if self.conflict_resolution:
             all_chunks = self._resolve_conflicts(all_chunks, metadata_by_key)
         elif self._belief_index is not None:
-            all_chunks = [
-                c for c in all_chunks
-                if not self._belief_index.is_excluded(c)
-            ]
+            all_chunks = [c for c in all_chunks if not self._belief_index.is_excluded(c)]
         elif self.supersession and self._superseded_texts:
-            all_chunks = [
-                c for c in all_chunks
-                if c not in self._superseded_texts
-            ]
+            all_chunks = [c for c in all_chunks if c not in self._superseded_texts]
 
         # Trim to retrieve_num and format via outgestion
-        final_chunks = all_chunks[:self.retrieve_num]
+        final_chunks = all_chunks[: self.retrieve_num]
         memory_context, outgestion_instructions = self._format_outgestion(
-            final_chunks, metadata_by_key,
+            final_chunks,
+            metadata_by_key,
         )
         memory_time = time.time() - query_start
 
         # Generate answer
         answer, input_tokens, output_tokens, gen_time = self._generate_answer(
-            question, memory_context,
+            question,
+            memory_context,
             extra_system_instructions=outgestion_instructions,
         )
         query_time = time.time() - query_start
@@ -1186,18 +1300,21 @@ class HermesMemoryAgent:
 
         if self.transfer_retrieval:
             results = self.coupled_engine.query_transfer(
-                embedding=q_emb, top_k=effective_k,
+                embedding=q_emb,
+                top_k=effective_k,
                 transfer_k=self.transfer_k,
             )
         elif self.coretrieval_retrieval:
             results = self.coupled_engine.query_coretrieval(
-                embedding=q_emb, top_k=effective_k,
+                embedding=q_emb,
+                top_k=effective_k,
                 coretrieval_bonus=self.coretrieval_bonus,
                 min_coretrieval_count=self.coretrieval_min_count,
             )
         elif self.cooc_boost_retrieval and self.ppr_retrieval:
             results = self.coupled_engine.query_cooc_ppr(
-                embedding=q_emb, top_k=effective_k,
+                embedding=q_emb,
+                top_k=effective_k,
                 cooc_weight=self.cooc_weight,
                 gate_threshold=self.cooc_gate_threshold,
                 ppr_weight=self.ppr_weight,
@@ -1205,7 +1322,8 @@ class HermesMemoryAgent:
             )
         elif self.cooc_boost_retrieval and self.bm25_weight > 0:
             results = self.coupled_engine.query_cooc_bm25(
-                embedding=q_emb, query_text=query_text,
+                embedding=q_emb,
+                query_text=query_text,
                 top_k=effective_k,
                 cooc_weight=self.cooc_weight,
                 bm25_weight=self.bm25_weight,
@@ -1213,34 +1331,39 @@ class HermesMemoryAgent:
             )
         elif self.cooc_boost_retrieval:
             results = self.coupled_engine.query_cooc_boost(
-                embedding=q_emb, top_k=effective_k,
+                embedding=q_emb,
+                top_k=effective_k,
                 cooc_weight=self.cooc_weight,
                 dream_weight=self.dream_weight,
                 gate_threshold=self.cooc_gate_threshold,
             )
         elif self.ppr_retrieval:
             results = self.coupled_engine.query_ppr(
-                embedding=q_emb, top_k=effective_k,
+                embedding=q_emb,
+                top_k=effective_k,
                 ppr_weight=self.ppr_weight,
                 damping=self.ppr_damping,
             )
         elif self.hybrid_retrieval:
             results = self.coupled_engine.query_hybrid(
-                embedding=q_emb, top_k=effective_k,
+                embedding=q_emb,
+                top_k=effective_k,
             )
         elif self.associative_retrieval or self.sparse_retrieval:
             results = self.coupled_engine.query_associative(
-                embedding=q_emb, top_k=effective_k,
+                embedding=q_emb,
+                top_k=effective_k,
                 sparse=self.sparse_retrieval,
             )
         else:
             results = self.coupled_engine.query(
-                embedding=q_emb, top_k=effective_k,
+                embedding=q_emb,
+                top_k=effective_k,
             )
 
         # Apply belief reranking when active
         if self._belief_index is not None:
-            results = self._apply_belief_rerank(results)[:self.retrieve_num]
+            results = self._apply_belief_rerank(results)[: self.retrieve_num]
 
         return results
 
@@ -1264,7 +1387,9 @@ class HermesMemoryAgent:
         return reranked
 
     def _coverage_audit(
-        self, bare_question: str, v2_texts: list[str],
+        self,
+        bare_question: str,
+        v2_texts: list[str],
     ) -> list[str]:
         """Use decomposition as a coverage check, not a retrieval strategy.
 
@@ -1306,8 +1431,90 @@ class HermesMemoryAgent:
 
         return gap_texts
 
+    def _query_time_cr(self, chunks: list[str]) -> list[str]:
+        """Query-time conflict resolution on retrieved facts.
+
+        Instead of building a global supersession graph from all 18k facts
+        at ingestion (unsolvable edge-count problem), extract triples from
+        only the 10-20 retrieved facts. Conflicting facts share sentence
+        templates → spaCy consistency is high locally → no tuning needed.
+
+        Algorithm:
+          1. Parse each chunk with spaCy (via ingestion pipeline's nlp)
+          2. Extract triples (acl-aware copular + basic verb patterns)
+          3. Group by (subject_lower, predicate_lower)
+          4. For groups with different objects, keep only the newest chunk
+        """
+        if len(chunks) <= 1:
+            return chunks
+
+        import logging
+        _cr_log = logging.getLogger("conflict_res")
+
+        nlp = self._ingestion._nlp
+
+        # Parse all chunks in one pass
+        docs = list(nlp.pipe(chunks))
+
+        # Build text→recency lookup from memory store
+        text_to_recency: dict[str, float] = {}
+        for m in self.coupled_engine.memory_store:
+            text_to_recency[m.text] = m.recency
+
+        # Extract triples and NER for each chunk
+        chunk_triples: list[list[tuple[str, str, str]]] = []
+        chunk_ents: list[set[str]] = []
+        for doc in docs:
+            chunk_triples.append(_extract_acl_triples(doc))
+            chunk_ents.append({e.text.lower() for e in doc.ents if len(e.text) > 2})
+
+        # Group by (subject, predicate) → list of (chunk_idx, object, recency)
+        sp_groups: dict[tuple[str, str], list[tuple[int, str, float]]] = defaultdict(list)
+        for idx, triples in enumerate(chunk_triples):
+            recency = text_to_recency.get(chunks[idx], 0.0)
+            for subj, pred, obj in triples:
+                key = (subj.lower().strip(), pred.lower().strip())
+                if key[0] and key[1]:
+                    sp_groups[key].append((idx, obj.lower().strip(), recency))
+
+        # Resolve conflicts: for each SP group with different objects,
+        # keep only the newest chunk
+        to_remove: set[int] = set()
+        for (subj, pred), members in sp_groups.items():
+            objects = set(obj for _, obj, _ in members)
+            if len(objects) <= 1:
+                continue  # same object across all members → no conflict
+
+            # Sort by recency descending (newest first)
+            members.sort(key=lambda x: x[2], reverse=True)
+            winner_idx, winner_obj, _ = members[0]
+
+            for idx, obj, _ in members[1:]:
+                if obj != winner_obj:
+                    # Entity gate: require NER overlap when enabled
+                    if self._cr_entity_gate:
+                        if not (chunk_ents[winner_idx] & chunk_ents[idx]):
+                            continue
+                    to_remove.add(idx)
+
+        if to_remove:
+            _cr_log.info(
+                "query_time_cr: removing %d/%d chunks",
+                len(to_remove), len(chunks),
+            )
+            for idx in sorted(to_remove):
+                _cr_log.info(
+                    "  REMOVED [rec=%.0f]: %s",
+                    text_to_recency.get(chunks[idx], 0),
+                    chunks[idx][:80],
+                )
+            return [c for i, c in enumerate(chunks) if i not in to_remove]
+        return chunks
+
     def _resolve_conflicts(
-        self, chunks: list[str], metadata_by_key: dict[str, dict],
+        self,
+        chunks: list[str],
+        metadata_by_key: dict[str, dict],
     ) -> list[str]:
         """Three-layer conflict resolution (Layer 2a + 2b).
 
@@ -1322,6 +1529,7 @@ class HermesMemoryAgent:
         the older one (lower store_count / recency).
         """
         import logging
+
         _cr_log = logging.getLogger("conflict_res")
         _cr_log.info("_resolve_conflicts: %d chunks, graph=%d edges", len(chunks), len(self._supersession_graph))
 
@@ -1340,47 +1548,12 @@ class HermesMemoryAgent:
                     to_remove.add(older)
 
         if to_remove:
-            _cr_log.info("_resolve_conflicts 2a: removing %d chunks: %s",
-                         len(to_remove), [t[:60] for t in to_remove])
+            _cr_log.info("_resolve_conflicts 2a: removing %d chunks: %s", len(to_remove), [t[:60] for t in to_remove])
 
-        # 2b: Embedding-based fallback for chunks not resolved by 2a
-        surviving = [c for c in chunks if c not in to_remove]
-        import numpy as np
-        for i in range(len(surviving)):
-            if surviving[i] in to_remove:
-                continue
-            for j in range(i + 1, len(surviving)):
-                if surviving[j] in to_remove:
-                    continue
-                key_i = surviving[i].strip()[:200]
-                key_j = surviving[j].strip()[:200]
-                meta_i = metadata_by_key.get(key_i)
-                meta_j = metadata_by_key.get(key_j)
-                if not meta_i or not meta_j:
-                    continue
-                emb_i = meta_i.get("embedding")
-                emb_j = meta_j.get("embedding")
-                if emb_i is None or emb_j is None:
-                    continue
-                sim = float(np.dot(emb_i, emb_j))
-                if sim < 0.85:
-                    continue
-                # High similarity — check for shared entity
-                ents_i = {e.lower() for e in self._fact_entities.get(surviving[i], ())}
-                ents_j = {e.lower() for e in self._fact_entities.get(surviving[j], ())}
-                if not (ents_i & ents_j):
-                    continue
-                # Conflict detected. Remove the older one (lower recency).
-                rec_i = meta_i.get("recency", 0)
-                rec_j = meta_j.get("recency", 0)
-                if rec_i < rec_j:
-                    to_remove.add(surviving[i])
-                    _cr_log.info("_resolve_conflicts 2b: removing older %s (sim=%.3f)",
-                                 surviving[i][:60], sim)
-                elif rec_j < rec_i:
-                    to_remove.add(surviving[j])
-                    _cr_log.info("_resolve_conflicts 2b: removing older %s (sim=%.3f)",
-                                 surviving[j][:60], sim)
+        # 2b: DISABLED — embedding similarity + entity gating produces false
+        # positives. Same-template, different-entity sentences have cosine > 0.85
+        # and share template words (e.g. "association football"), causing correct
+        # facts to be removed. Eval showed 9 false positive removals, SubEM drop.
 
         if to_remove:
             return [c for c in chunks if c not in to_remove]
@@ -1404,16 +1577,11 @@ class HermesMemoryAgent:
            versions of the same fact
         """
         # Conflict resolution mode: conflicts already resolved by Layer 2.
-        # Layer 3: sort newest-first to exploit gpt-4o-mini primacy bias.
+        # Layer 3 (newest-first sort) DISABLED — eval showed it disrupts the
+        # relevance ranking built by cosine+cooc+triadic, causing ~5 regressions.
+        # Just return flat text preserving retrieval order.
         if getattr(self, "conflict_resolution", False):
-            annotated = []
-            for text in chunks:
-                key = text.strip()[:200]
-                meta = metadata_by_key.get(key)
-                recency = meta["recency"] if meta else 0.0
-                annotated.append((recency, text))
-            annotated.sort(key=lambda x: x[0], reverse=True)  # newest first
-            return "\n\n".join(t for _, t in annotated), ""
+            return "\n\n".join(chunks), ""
 
         if not getattr(self, "temporal_context", False):
             # Baseline: flat text, no metadata
@@ -1442,6 +1610,7 @@ class HermesMemoryAgent:
 
         if getattr(self, "contradiction_context", False):
             import numpy as np
+
             n_ann = len(annotated_full)
             for i in range(n_ann):
                 for j in range(i + 1, n_ann):
@@ -1490,24 +1659,22 @@ class HermesMemoryAgent:
         return "\n\n".join(lines), instructions
 
     def _generate_answer(
-        self, question: str, context: str,
+        self,
+        question: str,
+        context: str,
         extra_system_instructions: str = "",
     ) -> tuple[str, int, int, float]:
         """Call LLM to generate an answer from retrieved context."""
         self._ensure_llm_client()
 
         system_msg = (
-            "You are a helpful assistant that answers questions from a "
-            "knowledge pool. Give a very concise answer."
+            "You are a helpful assistant that answers questions from a knowledge pool. Give a very concise answer."
         )
         if extra_system_instructions:
             system_msg = system_msg + " " + extra_system_instructions
         # The MABench query already contains full instructions about serial
         # numbers and recency. Prepend retrieved memories as the knowledge pool.
-        user_msg = (
-            f"[Knowledge Pool]\n{context}\n\n"
-            f"{question}\nAnswer:"
-        )
+        user_msg = f"[Knowledge Pool]\n{context}\n\n{question}\nAnswer:"
 
         start = time.time()
         response = self._llm_client.chat.completions.create(
@@ -1559,13 +1726,14 @@ class HermesMemoryAgent:
         self._scorer._cache.clear()
 
         # Reset triadic memory (fresh tensor, codebook, mappings)
-        if getattr(self, '_triadic', None) is not None:
+        if getattr(self, "_triadic", None) is not None:
             self._triadic = TriadicMemory(
-                n=self._triadic.n, p=self._triadic.p,
+                n=self._triadic.n,
+                p=self._triadic.p,
             )
 
         # Reset entity accumulator
-        if hasattr(self, '_entity_accumulator'):
+        if hasattr(self, "_entity_accumulator"):
             self._entity_accumulator = _MutableEntityGraph()
 
         # Reset supersession state

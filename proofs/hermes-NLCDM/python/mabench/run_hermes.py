@@ -8,11 +8,8 @@ Usage (from hermes-agent root):
 Reuses MABench data loading and metrics, substitutes HermesMemoryAgent for AgentWrapper.
 """
 
-import hashlib
 import json
-import logging
 import os
-import pickle
 import time
 from argparse import ArgumentParser
 from collections import defaultdict
@@ -35,7 +32,7 @@ sys.path.insert(0, str(_HERMES_ROOT / "proofs" / "hermes-memory" / "python"))
 sys.path.insert(0, str(_NLCDM_PYTHON))
 
 from conversation_creator import ConversationCreator
-from dream_ops import DreamParams, GraphDreamParams
+from dream_ops import DreamParams
 from mabench.hermes_agent import HermesMemoryAgent
 from utils.eval_other_utils import metrics_summarization
 from utils.templates import get_template
@@ -159,279 +156,20 @@ def parse_args():
         help="Number of cross-domain probes per firing session (default: 3)",
     )
     parser.add_argument("--triadic", action="store_true",
-                        help="Enable triadic memory for structural recall via Overmann 3D tensor")
-    parser.add_argument(
-        "--triadic_n", type=int, default=1000,
-        help="Triadic memory dimension n (default: 1000)",
-    )
-    parser.add_argument(
-        "--triadic_p", type=int, default=10,
-        help="Triadic memory sparsity p (default: 10)",
-    )
-    parser.add_argument(
-        "--triadic_expand_k", type=int, default=5,
-        help="Triadic expansion top-k (default: 5)",
-    )
-    parser.add_argument(
-        "--decompose_query", action="store_true",
-        help="Enable multi-hop query decomposition via LLM",
-    )
-    parser.add_argument(
-        "--decompose_max_hops", type=int, default=3,
-        help="Maximum sub-queries for decomposition (default: 3)",
-    )
-    parser.add_argument("--decompose_coverage", action="store_true",
-                        help="Use decomposition as coverage audit (gap-fill, not hop-chain)")
-    parser.add_argument("--decompose_rrf", action="store_true",
-                        help="Use RRF merge for decompose (instead of priority merge)")
-    parser.add_argument(
-        "--bm25_weight", type=float, default=0.0,
-        help="BM25 lexical matching weight (0=disabled). Blends with cosine+cooc for entity discrimination.",
-    )
-    parser.add_argument(
-        "--dedup_threshold", type=float, default=0.0,
-        help="Ingestion-time dedup: skip storing when cosine > threshold (0=disabled, 0.98 recommended)",
-    )
-    parser.add_argument("--dream_after_ingest", action="store_true",
-                        help="Run ONE dream cycle after ingestion completes (before queries)")
-    parser.add_argument("--bridge_aware_dream", action="store_true",
-                        help="Protect bridge facts from dream drift via structural importance (Tononi protection rule)")
-    parser.add_argument("--dream_batch_mode", action="store_true",
-                        help="Batch dream: skip repulsion+unlearn, only run prune+merge (safe dedup, no drift)")
-    parser.add_argument("--graph_dream", action="store_true",
-                        help="Run graph-level dream after ingest (replay + transitive closure + edge prune)")
-    parser.add_argument(
-        "--dream_weight", type=float, default=0.0,
-        help="Dream boost weight for dual-graph retrieval (0=disabled, 0.3=recommended)",
-    )
-    parser.add_argument(
-        "--dream_top_k", type=int, default=5,
-        help="Top-k sparsification for dream edge discovery (default: 5)",
-    )
-    parser.add_argument("--temporal_context", action="store_true",
-                        help="Enable temporal ordering in outgestion context "
-                             "(sort by recency, annotate older/newer)")
-    parser.add_argument("--contradiction_context", action="store_true",
-                        help="Enable contradiction detection in outgestion "
-                             "(flag high-similarity chunks as SUPERSEDED/CURRENT)")
-    parser.add_argument("--contradiction_sim_threshold", type=float, default=0.85,
-                        help="Cosine similarity threshold for contradiction detection (default: 0.85)")
-    parser.add_argument("--iterative_query", action="store_true",
-                        help="Enable iterative multi-hop retrieval with LLM-in-the-loop "
-                             "termination (retrieve → judge → re-query loop)")
-    parser.add_argument("--iterative_max_hops", type=int, default=3,
-                        help="Maximum hops for iterative retrieval (default: 3)")
-    parser.add_argument("--supersession", action="store_true",
-                        help="Enable triple-based supersession filtering: when a new fact "
-                             "has the same subject+predicate as an old fact but different "
-                             "object, the old fact is excluded from retrieval results")
-    parser.add_argument("--belief", action="store_true",
-                        help="Enable Bayesian belief scoring: soft fact currency via "
-                             "Beta-Bernoulli per fact + entity-graph propagation")
-    parser.add_argument("--belief_prior_alpha", type=float, default=2.0,
-                        help="Belief prior alpha (confirming evidence pseudo-count, default: 2.0)")
-    parser.add_argument("--belief_prior_beta", type=float, default=1.0,
-                        help="Belief prior beta (contradicting evidence pseudo-count, default: 1.0)")
-    parser.add_argument("--belief_propagation_damping", type=float, default=0.3,
-                        help="Belief propagation damping factor (default: 0.3)")
-    parser.add_argument("--belief_hard_floor", type=float, default=0.05,
-                        help="Belief hard floor: facts below this P(current) are excluded (default: 0.05)")
-    parser.add_argument("--belief_overfetch", type=int, default=3,
-                        help="Belief over-fetch multiplier for retrieval (default: 3)")
+                        help="Use triadic memory (Overmann 3D tensor) for structural expansion")
+    parser.add_argument("--decompose_query", action="store_true",
+                        help="Decompose multi-hop questions into chained sub-queries")
     parser.add_argument("--conflict_resolution", action="store_true",
-                        help="Enable three-layer outgestion conflict resolution: "
-                             "supersession graph + read-time dedup + newest-first sort")
-    parser.add_argument("--no_cache", action="store_true",
-                        help="Disable ingest caching (always ingest fresh)")
+                        help="Query-time conflict resolution (acl-aware copular extraction)")
+    parser.add_argument("--cr_per_hop", action="store_true",
+                        help="Apply CR before each intermediate answer in decompose loop")
+    parser.add_argument("--cr_entity_gate", action="store_true",
+                        help="Require NER entity overlap for conflict resolution")
     return parser.parse_args()
-
-
-def _cache_key(dataset_config: dict, chunk_size: int) -> str:
-    """Deterministic cache key from dataset config + chunk size."""
-    key_data = json.dumps({
-        "dataset": dataset_config.get("dataset"),
-        "sub_dataset": dataset_config.get("sub_dataset"),
-        "chunk_size": chunk_size,
-        "data_path": dataset_config.get("data_path"),
-    }, sort_keys=True)
-    return hashlib.sha256(key_data.encode()).hexdigest()[:16]
-
-
-def _cache_dir(dataset_config: dict, chunk_size: int) -> Path:
-    """Return the cache directory for a given dataset config."""
-    key = _cache_key(dataset_config, chunk_size)
-    sub = dataset_config.get("sub_dataset", "unknown")
-    return _NLCDM_PYTHON / "output" / "ingest_cache" / f"{sub}_{key}"
-
-
-def _save_ingest_cache(
-    cache_path: Path,
-    context_idx: int,
-    agent,
-) -> None:
-    """Save agent state after ingestion for a single context."""
-    ctx_dir = cache_path / f"context_{context_idx}"
-    ctx_dir.mkdir(parents=True, exist_ok=True)
-
-    # Coupled engine: memory_store + graph structures
-    ce = agent.coupled_engine
-    with open(ctx_dir / "coupled_engine.pkl", "wb") as f:
-        pickle.dump({
-            "memory_store": ce.memory_store,
-            "co_occurrence": getattr(ce, "_co_occurrence", None),
-            "co_retrieval": getattr(ce, "_co_retrieval", None),
-            "W_temporal": getattr(ce, "_W_temporal", None),
-            "session_buffer": getattr(ce, "_session_buffer", []),
-            "session_indices": getattr(ce, "_session_indices", []),
-        }, f)
-
-    # Triadic: save text_to_triples for reconstruction (NOT the tensor)
-    triadic = getattr(agent, "_triadic", None)
-    if triadic is not None:
-        with open(ctx_dir / "triadic.pkl", "wb") as f:
-            pickle.dump({
-                "text_to_triples": triadic._text_to_triples,
-                "n": triadic.n,
-                "p": triadic.p,
-            }, f)
-
-    # V1 orchestrator memories
-    with open(ctx_dir / "orchestrator.pkl", "wb") as f:
-        pickle.dump(agent.orchestrator._memories, f)
-
-    # Supersession state
-    if getattr(agent, 'supersession', False) or getattr(agent, 'conflict_resolution', False):
-        with open(ctx_dir / "supersession.pkl", "wb") as f:
-            pickle.dump({
-                "triple_index": dict(agent._triple_index),
-                "superseded_texts": agent._superseded_texts,
-                "fact_entities": agent._fact_entities,
-                "supersession_graph": getattr(agent, '_supersession_graph', {}),
-                "supersedes": {k: v for k, v in getattr(agent, '_supersedes', {}).items()},
-            }, f)
-
-    # Belief state
-    belief_index = getattr(agent, '_belief_index', None)
-    if belief_index is not None:
-        with open(ctx_dir / "belief.pkl", "wb") as f:
-            pickle.dump(belief_index.state_dict(), f)
-
-    # Store count
-    with open(ctx_dir / "meta.pkl", "wb") as f:
-        pickle.dump({"store_count": agent._store_count}, f)
-
-
-def _load_ingest_cache(
-    cache_path: Path,
-    context_idx: int,
-    agent,
-    enable_triadic: bool,
-) -> bool:
-    """Load cached ingest state into agent. Returns True if successful."""
-    ctx_dir = cache_path / f"context_{context_idx}"
-    ce_path = ctx_dir / "coupled_engine.pkl"
-    if not ce_path.exists():
-        return False
-
-    # Coupled engine
-    with open(ce_path, "rb") as f:
-        ce_data = pickle.load(f)
-    agent.coupled_engine.memory_store = ce_data["memory_store"]
-    if ce_data.get("co_occurrence") is not None:
-        agent.coupled_engine._co_occurrence = ce_data["co_occurrence"]
-    if ce_data.get("co_retrieval") is not None:
-        agent.coupled_engine._co_retrieval = ce_data["co_retrieval"]
-    if ce_data.get("W_temporal") is not None:
-        agent.coupled_engine._W_temporal = ce_data["W_temporal"]
-    if ce_data.get("session_buffer"):
-        agent.coupled_engine._session_buffer = ce_data["session_buffer"]
-    if ce_data.get("session_indices"):
-        agent.coupled_engine._session_indices = ce_data["session_indices"]
-    if hasattr(agent.coupled_engine, "_invalidate_cache"):
-        agent.coupled_engine._invalidate_cache()
-
-    # Rebuild FAISS index from loaded embeddings
-    entries = agent.coupled_engine.memory_store
-    if entries:
-        import faiss
-        dim = len(entries[0].embedding)
-        index = faiss.IndexFlatIP(dim)
-        embs = np.array([e.embedding for e in entries], dtype=np.float32)
-        norms = np.linalg.norm(embs, axis=1, keepdims=True)
-        norms[norms == 0] = 1.0
-        embs = embs / norms
-        index.add(embs)
-        agent.coupled_engine._faiss_index = index
-
-    # Triadic: rebuild from text_to_triples (not raw tensor)
-    tri_path = ctx_dir / "triadic.pkl"
-    if enable_triadic and tri_path.exists():
-        with open(tri_path, "rb") as f:
-            tri_data = pickle.load(f)
-        from mabench.triadic_memory import TriadicMemory
-        triadic = TriadicMemory(
-            n=tri_data.get("n", 1000), p=tri_data.get("p", 10),
-        )
-        for text, triples in tri_data["text_to_triples"].items():
-            triadic.store_fact(text, [tuple(t) for t in triples])
-        agent._triadic = triadic
-
-    # V1 orchestrator
-    orch_path = ctx_dir / "orchestrator.pkl"
-    if orch_path.exists():
-        with open(orch_path, "rb") as f:
-            agent.orchestrator._memories = pickle.load(f)
-        if agent.orchestrator._memories:
-            max_ct = max(m.creation_time for m in agent.orchestrator._memories)
-            agent.orchestrator._next_time = max_ct + 1.0
-            # Rebuild memory_id -> index mapping (required for query lookups)
-            agent.orchestrator._full_rebuild_index()
-
-    # Supersession state
-    sup_path = ctx_dir / "supersession.pkl"
-    if (getattr(agent, 'supersession', False) or getattr(agent, 'conflict_resolution', False)) and sup_path.exists():
-        with open(sup_path, "rb") as f:
-            sup_data = pickle.load(f)
-        from collections import defaultdict
-        agent._triple_index = defaultdict(list, sup_data["triple_index"])
-        agent._superseded_texts = sup_data["superseded_texts"]
-        agent._fact_entities = sup_data.get("fact_entities", {})
-        agent._supersession_graph = sup_data.get("supersession_graph", {})
-        raw_supersedes = sup_data.get("supersedes", {})
-        agent._supersedes = defaultdict(set, {k: set(v) for k, v in raw_supersedes.items()})
-
-    # Belief state — load cached alpha/beta values, but override runtime
-    # params (hard_floor, damping) from the agent's current config so
-    # query-time tuning doesn't require re-ingestion.
-    belief_path = ctx_dir / "belief.pkl"
-    if getattr(agent, '_belief_index', None) is not None and belief_path.exists():
-        with open(belief_path, "rb") as f:
-            from mabench.belief import BeliefIndex
-            agent._belief_index = BeliefIndex.from_state_dict(pickle.load(f))
-        # Override runtime params from CLI (not baked pickle values)
-        agent._belief_index._hard_floor = agent._belief_hard_floor
-        agent._belief_index._propagation_damping = agent._belief_propagation_damping
-
-    # Meta
-    meta_path = ctx_dir / "meta.pkl"
-    if meta_path.exists():
-        with open(meta_path, "rb") as f:
-            meta = pickle.load(f)
-        agent._store_count = meta["store_count"]
-
-    return True
 
 
 def main():
     args = parse_args()
-
-    # Configure logging so dream diagnostics are visible
-    # force=True to override any prior basicConfig from imported libraries
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        force=True,
-    )
 
     # Load dataset config
     with open(args.dataset_config) as f:
@@ -464,8 +202,6 @@ def main():
         prefix = f"hermes_transfer{tk_str}"
     elif args.coretrieval:
         prefix = f"hermes_coretrieval_mc{args.coretrieval_min_count}"
-    elif args.cooc_boost and args.ppr:
-        prefix = "hermes_cooc_ppr"
     elif args.cooc_boost and args.cooc_gate > 0:
         prefix = f"hermes_cooc_g{args.cooc_gate}"
     elif args.cooc_boost:
@@ -474,46 +210,6 @@ def main():
         prefix = "hermes_ppr"
     else:
         prefix = "hermes"
-    # Append triadic/decompose suffixes so runs don't overwrite each other
-    if args.triadic:
-        prefix += "_triadic"
-    if args.decompose_query:
-        prefix += "_decompose"
-    if args.decompose_rrf:
-        prefix += "_rrf"
-    if args.iterative_query:
-        prefix += "_iterative"
-    if args.decompose_coverage:
-        prefix += "_coverage"
-    if args.bm25_weight > 0:
-        prefix += "_bm25"
-    if args.dedup_threshold > 0:
-        prefix += f"_dedup{args.dedup_threshold}"
-    if getattr(args, 'dream_after_ingest', False):
-        if getattr(args, 'dream_batch_mode', False):
-            prefix += "_dream_batch"
-        elif getattr(args, 'bridge_aware_dream', False):
-            prefix += "_dream_bridge"
-        else:
-            prefix += "_dream"
-    if getattr(args, 'graph_dream', False):
-        prefix += "_graphdream"
-    if args.dream_weight > 0:
-        prefix += f"_dw{args.dream_weight}"
-    if args.dream_top_k != 5:
-        prefix += f"_dk{args.dream_top_k}"
-    if args.conflict_resolution:
-        prefix += "_conflictres"
-    if args.supersession:
-        prefix += "_supersession"
-    if args.belief:
-        prefix += "_belief"
-    if args.temporal_context and args.contradiction_context:
-        prefix += "_temporal_contradiction"
-    elif args.temporal_context:
-        prefix += "_temporal"
-    elif args.contradiction_context:
-        prefix += "_contradiction"
     output_file = output_dir / f"{prefix}_{dataset_config['sub_dataset']}_{safe_model}.json"
 
     print(f"Dataset: {dataset_config['dataset']} / {dataset_config['sub_dataset']}")
@@ -528,8 +224,6 @@ def main():
             print(f"Retrieval: Hopfield transfer (max(cosine, transfer){tk_str})")
         elif args.coretrieval:
             print(f"Retrieval: co-retrieval (bonus={args.coretrieval_bonus}, min_count={args.coretrieval_min_count})")
-        elif args.cooc_boost and args.ppr:
-            print(f"Retrieval: cooc+PPR (cooc_weight={args.cooc_weight}, ppr_weight={args.ppr_weight}, damping={args.ppr_damping})")
         elif args.cooc_boost:
             gate_str = f", gate={args.cooc_gate}" if args.cooc_gate > 0 else ""
             print(f"Retrieval: cooc_boost (weight={args.cooc_weight}{gate_str})")
@@ -537,26 +231,6 @@ def main():
             print(f"Retrieval: PPR (weight={args.ppr_weight}, damping={args.ppr_damping})")
         else:
             print(f"Retrieval: cosine (baseline)")
-        if args.triadic:
-            print(f"Triadic retrieval: True (n={args.triadic_n}, p={args.triadic_p}, expand_k={args.triadic_expand_k})")
-        if args.decompose_query:
-            print(f"Query decomposition: True (max_hops={args.decompose_max_hops})")
-        if args.iterative_query:
-            print(f"Iterative retrieval: True (max_hops={args.iterative_max_hops}, LLM-in-the-loop)")
-        if args.decompose_coverage:
-            print(f"Coverage audit: True (decompose as gap-fill, not hop-chain)")
-        if args.conflict_resolution:
-            print(f"Conflict resolution: enabled (three-layer: supersession graph + read-time dedup + newest-first)")
-        if args.supersession:
-            print(f"Supersession: enabled (triple-based conflict filtering)")
-        if args.belief:
-            print(f"Belief: enabled (α={args.belief_prior_alpha}, β={args.belief_prior_beta}, "
-                  f"damping={args.belief_propagation_damping}, floor={args.belief_hard_floor}, "
-                  f"overfetch={args.belief_overfetch})")
-        if getattr(args, 'graph_dream', False):
-            print(f"Graph dream: enabled (replay + transitive closure + edge prune, top_k={args.dream_top_k})")
-        if args.dream_weight > 0:
-            print(f"Dream boost: weight={args.dream_weight}")
     print()
 
     # Load data
@@ -605,38 +279,11 @@ def main():
             transfer_retrieval=args.transfer,
             transfer_k=args.transfer_k if args.transfer_k > 0 else None,
             triadic_retrieval=args.triadic,
-            triadic_n=args.triadic_n,
-            triadic_p=args.triadic_p,
-            triadic_expand_k=args.triadic_expand_k,
             decompose_query=args.decompose_query,
-            decompose_max_hops=args.decompose_max_hops,
-            decompose_coverage=args.decompose_coverage,
-            decompose_rrf=args.decompose_rrf,
-            iterative_query=args.iterative_query,
-            iterative_max_hops=args.iterative_max_hops,
-            bm25_weight=args.bm25_weight,
-            dedup_threshold=args.dedup_threshold,
-            dream_weight=args.dream_weight,
-            temporal_context=args.temporal_context,
-            contradiction_context=args.contradiction_context,
-            contradiction_sim_threshold=args.contradiction_sim_threshold,
-            supersession=args.supersession,
-            belief=args.belief,
-            belief_prior_alpha=args.belief_prior_alpha,
-            belief_prior_beta=args.belief_prior_beta,
-            belief_propagation_damping=args.belief_propagation_damping,
-            belief_hard_floor=args.belief_hard_floor,
-            belief_overfetch=args.belief_overfetch,
             conflict_resolution=args.conflict_resolution,
+            cr_per_hop=args.cr_per_hop,
+            cr_entity_gate=args.cr_entity_gate,
         )
-
-    # Ingest cache setup
-    chunk_size = dataset_config.get("chunk_size", 0)
-    cache_path = _cache_dir(dataset_config, chunk_size)
-    use_cache = not args.fullpass and not args.no_cache and not args.force
-
-    if use_cache:
-        print(f"Ingest cache: {cache_path}")
 
     # Run evaluation
     metrics: dict[str, list] = defaultdict(list)
@@ -658,63 +305,12 @@ def main():
         else:
             # Reset agent for each new context
             agent.reset()
-
-            # Try loading from cache first
-            if use_cache and _load_ingest_cache(
-                cache_path, context_idx, agent, args.triadic,
-            ):
-                n_mem = len(agent.coupled_engine.memory_store)
-                tri_info = ""
-                if getattr(agent, "_triadic", None) is not None:
-                    tri_info = f", triadic={agent._triadic._n_facts_with_triples} facts"
-                print(f"\n--- Context {context_idx}: loaded from cache ({n_mem} memories{tri_info}) ---")
-            else:
-                # Fresh ingest
-                print(f"\n--- Context {context_idx}: memorizing {len(chunks)} chunks ---")
-                for chunk_idx, chunk in enumerate(tqdm(chunks, desc="Memorizing", leave=False)):
-                    agent.send_message(chunk, memorizing=True)
-                # Persist embedding cache after memorization
-                agent._scorer.save_disk_cache()
-                # Log dedup stats
-                if args.dedup_threshold > 0:
-                    skipped = agent.coupled_engine._dedup_skipped
-                    n_mem = len(agent.coupled_engine.memory_store)
-                    print(f"    Dedup: {skipped} skipped, {n_mem} stored (threshold={args.dedup_threshold})")
-                # Save ingest cache for future runs
-                if use_cache:
-                    _save_ingest_cache(cache_path, context_idx, agent)
-                    print(f"    Cached ingest to {cache_path / f'context_{context_idx}'}")
-
-        # Dream once after ingest (if requested)
-        if not args.fullpass and getattr(args, 'dream_after_ingest', False):
-            n_before = len(agent.coupled_engine.memory_store)
-            bridge_flag = getattr(args, 'bridge_aware_dream', False)
-            batch_flag = getattr(args, 'dream_batch_mode', False)
-            mode_parts = []
-            if bridge_flag:
-                mode_parts.append("bridge-aware")
-            if batch_flag:
-                mode_parts.append("batch(prune+merge only)")
-            mode = ", ".join(mode_parts) if mode_parts else "standard"
-            print(f"    Running post-ingest dream cycle ({n_before} memories, {mode})...")
-            agent.coupled_engine.dream(bridge_aware=bridge_flag, batch_mode=batch_flag)
-            n_after = len(agent.coupled_engine.memory_store)
-            print(f"    Dream complete: {n_before} -> {n_after} memories")
-
-        # Graph dream after ingest (if requested)
-        if not args.fullpass and getattr(args, 'graph_dream', False):
-            n_mem = len(agent.coupled_engine.memory_store)
-            edges_before = sum(len(n) for n in agent.coupled_engine._co_occurrence.values())
-            print(f"    Running graph dream ({n_mem} memories, {edges_before} edges, "
-                  f"top_k={args.dream_top_k})...")
-            gdp = GraphDreamParams(replay_top_k=args.dream_top_k)
-            result = agent.coupled_engine.dream(graph_mode=True, graph_dream_params=gdp)
-            edges_after = result.get("edges_after", 0)
-            dream_edge_count = sum(len(n) for n in agent.coupled_engine._dream_edges.values())
-            print(f"    Graph dream complete: {edges_before} cooc -> {dream_edge_count} dream edges "
-                  f"(replay={result.get('edges_discovered', 0)}, "
-                  f"tc={result.get('edges_from_tc', 0)}, "
-                  f"pruned={result.get('edges_pruned', 0)})")
+            # Memorize all chunks for this context
+            print(f"\n--- Context {context_idx}: memorizing {len(chunks)} chunks ---")
+            for chunk_idx, chunk in enumerate(tqdm(chunks, desc="Memorizing", leave=False)):
+                agent.send_message(chunk, memorizing=True)
+            # Persist embedding cache after memorization
+            agent._scorer.save_disk_cache()
 
         # Query
         print(f"    Querying {len(qa_pairs)} questions...")
