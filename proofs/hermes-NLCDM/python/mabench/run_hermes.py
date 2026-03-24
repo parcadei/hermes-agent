@@ -34,6 +34,7 @@ sys.path.insert(0, str(_NLCDM_PYTHON))
 from conversation_creator import ConversationCreator
 from dream_ops import DreamParams
 from mabench.hermes_agent import HermesMemoryAgent
+from mabench.eval_cache import cache_dir, save_context, load_context, list_caches
 from utils.eval_other_utils import metrics_summarization
 from utils.templates import get_template
 
@@ -165,11 +166,42 @@ def parse_args():
                         help="Apply CR before each intermediate answer in decompose loop")
     parser.add_argument("--cr_entity_gate", action="store_true",
                         help="Require NER entity overlap for conflict resolution")
+    parser.add_argument("--cr_overfetch", type=int, default=3,
+                        help="Over-fetch multiplier for CR (retrieve N*k, CR filters to k)")
+    parser.add_argument("--cosine_dedup", action="store_true",
+                        help="Pairwise cosine dedup: near-duplicate facts → keep newest")
+    parser.add_argument("--cosine_dedup_threshold", type=float, default=0.95,
+                        help="Cosine similarity threshold for pairwise dedup (default: 0.95)")
+    parser.add_argument("--entity_retrieval", action="store_true",
+                        help="Add entity name text search to decompose hops")
+    parser.add_argument("--bm25_hops", action="store_true",
+                        help="Use BM25 lexical retrieval for sub-query hops (entity discrimination)")
+    parser.add_argument("--chain_cache", action="store_true",
+                        help="Cache completed decompose chains for identical queries")
+    parser.add_argument("--dream_explore_only", action="store_true",
+                        help="Dream with only cross-domain exploration (skip repulsion/prune/merge/unlearn)")
+    parser.add_argument("--no_cache", action="store_true",
+                        help="Disable ingestion cache (always re-ingest)")
+    parser.add_argument("--refresh_cache", action="store_true",
+                        help="Re-ingest and overwrite cached state")
+    parser.add_argument("--cache_label", type=str, default=None,
+                        help="Custom label for ingestion cache directory")
+    parser.add_argument("--list_caches", action="store_true",
+                        help="List available ingestion caches and exit")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+
+    # Handle --list_caches
+    if args.list_caches:
+        for c in list_caches():
+            print(f"  {c['name']}:")
+            for ctx in c["contexts"]:
+                print(f"    {ctx['context']}: {ctx['n_memories']} memories, "
+                      f"{ctx['size_mb']} MB, saved {ctx['saved_at']}")
+        return
 
     # Load dataset config
     with open(args.dataset_config) as f:
@@ -241,6 +273,18 @@ def main():
     print(f"Contexts: {len(all_chunks)}")
     total_queries = sum(len(qa) for qa in all_qa_pairs)
     print(f"Total queries: {total_queries}")
+
+    # Ingestion cache setup
+    use_cache = not args.no_cache and not args.fullpass
+    cache_path = None
+    if use_cache:
+        effective_cs = dataset_config.get("chunk_size", 0)
+        cache_path = cache_dir(dataset_config["sub_dataset"], effective_cs, args.cache_label)
+        print(f"Ingestion cache: {cache_path}")
+        if args.refresh_cache:
+            print("  (refresh mode: will re-ingest and overwrite)")
+    elif not args.fullpass:
+        print("Ingestion cache: disabled")
     print()
 
     # Initialize agent or LLM client
@@ -258,6 +302,7 @@ def main():
             min_sep=args.dream_min_sep,
             prune_threshold=args.dream_prune_threshold,
             merge_threshold=args.dream_merge_threshold,
+            explore_only=args.dream_explore_only,
         )
         agent = HermesMemoryAgent(
             model=args.model,
@@ -283,6 +328,12 @@ def main():
             conflict_resolution=args.conflict_resolution,
             cr_per_hop=args.cr_per_hop,
             cr_entity_gate=args.cr_entity_gate,
+            cr_overfetch=args.cr_overfetch,
+            cosine_dedup=args.cosine_dedup,
+            cosine_dedup_threshold=args.cosine_dedup_threshold,
+            entity_retrieval=args.entity_retrieval,
+            bm25_hops=args.bm25_hops,
+            chain_cache=args.chain_cache,
         )
 
     # Run evaluation
@@ -305,12 +356,22 @@ def main():
         else:
             # Reset agent for each new context
             agent.reset()
-            # Memorize all chunks for this context
-            print(f"\n--- Context {context_idx}: memorizing {len(chunks)} chunks ---")
-            for chunk_idx, chunk in enumerate(tqdm(chunks, desc="Memorizing", leave=False)):
-                agent.send_message(chunk, memorizing=True)
-            # Persist embedding cache after memorization
-            agent._scorer.save_disk_cache()
+
+            # Try loading from ingestion cache
+            cached = False
+            if use_cache and not args.refresh_cache:
+                cached = load_context(agent, cache_path, context_idx)
+
+            if not cached:
+                # Full ingestion
+                print(f"\n--- Context {context_idx}: memorizing {len(chunks)} chunks ---")
+                for chunk_idx, chunk in enumerate(tqdm(chunks, desc="Memorizing", leave=False)):
+                    agent.send_message(chunk, memorizing=True)
+                # Persist embedding cache after memorization
+                agent._scorer.save_disk_cache()
+
+                if use_cache:
+                    save_context(agent, cache_path, context_idx)
 
         # Query
         print(f"    Querying {len(qa_pairs)} questions...")

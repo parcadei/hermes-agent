@@ -22,6 +22,8 @@ Two contradiction layers:
 from __future__ import annotations
 
 import os
+import logging
+import os
 import sys
 import time
 from collections import defaultdict
@@ -52,16 +54,180 @@ from mabench.ingestion import (
     _MutableEntityGraph,
 )
 from mabench.belief import BeliefIndex
+from mabench.bm25_index import BM25Index
+from mabench.chain_cache import ChainCache, CachedChain
 from mabench.triadic_memory import TriadicMemory
 
 
 # ---------------------------------------------------------------------------
 # Query-time conflict resolution helpers
 # ---------------------------------------------------------------------------
+_cr_log = logging.getLogger("conflict_res")
 
 def _get_subtree_text(token) -> str:
     """Get the full text of a token's subtree (e.g., 'association football')."""
     return " ".join(t.text for t in token.subtree)
+
+
+# ---------------------------------------------------------------------------
+# Tier 1: Rule-based predicate cardinality classification
+# ---------------------------------------------------------------------------
+# Verbs/predicates where same (S,P) with different O is NOT a conflict
+_ADDITIVE_LEMMAS = frozenset({
+    'support', 'use', 'contain', 'include', 'feature', 'have', 'has',
+    'produce', 'export', 'import', 'teach', 'study', 'offer', 'provide',
+    'involve', 'receive', 'attend', 'visit', 'speak', 'know',
+    'start', 'begin',
+})
+
+# Predicates where same (S,P) with different O IS a conflict
+_EXCLUSIVE_LEMMAS = frozenset({
+    'capital', 'ceo', 'president', 'founder', 'creator', 'spouse',
+    'father', 'mother', 'birthplace', 'deathplace', 'headquarters',
+    'nationality', 'gender', 'sex',
+    'live', 'reside', 'born', 'die', 'locate', 'headquarter',
+    'manage', 'lead', 'head',
+    'field', 'sport',
+    'schedule', 'deadline', 'due',
+    'population', 'release', 'version', 'latest', 'default',
+    'port', 'endpoint', 'limit', 'rate',
+})
+
+# For copular "be", check subject for these exclusivity signals
+_EXCLUSIVE_SUBJECT_NOUNS = frozenset({
+    'capital', 'ceo', 'president', 'founder', 'headquarters', 'birthplace',
+    'population', 'release', 'deadline', 'port', 'endpoint', 'limit',
+    'branch', 'default', 'latest', 'location', 'address', 'spouse',
+    'father', 'mother', 'nationality', 'gender',
+    'meeting', 'schedule', 'sport', 'field',
+})
+
+
+# ---------------------------------------------------------------------------
+# Tier 2: Fine-tuned DeBERTa NLI predicate cardinality (lazy-loaded, cached)
+# ---------------------------------------------------------------------------
+_CARDINALITY_CACHE: dict[str, str] = {}
+_TIER2_MODEL = None
+_TIER2_TOKENIZER = None
+
+# Path to fine-tuned model. Set via env var or defaults to model dir next to this file.
+_TIER2_MODEL_PATH = os.environ.get(
+    "HERMES_CARDINALITY_MODEL",
+    os.path.join(os.path.dirname(__file__), "..", "cardinality_model", "best"),
+)
+# Confidence threshold: below this, return 'unknown' instead of committing
+_TIER2_CONFIDENCE = float(os.environ.get("HERMES_CARDINALITY_CONFIDENCE", "0.6"))
+
+
+def _get_tier2_model():
+    """Lazy-load fine-tuned DeBERTa for Tier 2 cardinality classification."""
+    global _TIER2_MODEL, _TIER2_TOKENIZER
+    if _TIER2_MODEL is None:
+        model_path = _TIER2_MODEL_PATH
+        if not os.path.isdir(model_path):
+            _cr_log.warning("tier2: model not found at %s — Tier 2 disabled", model_path)
+            return None, None
+        import torch
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
+        _TIER2_TOKENIZER = AutoTokenizer.from_pretrained(model_path)
+        _TIER2_MODEL = AutoModelForSequenceClassification.from_pretrained(model_path)
+        _TIER2_MODEL.eval()
+        _cr_log.info("tier2: loaded cardinality model from %s", model_path)
+    return _TIER2_MODEL, _TIER2_TOKENIZER
+
+
+def _classify_predicate_tier2(pred_str: str, subj_str: str = "") -> str:
+    """Tier 2: Fine-tuned NLI classification of predicate cardinality.
+
+    Uses DeBERTa-v3-xsmall fine-tuned on Wikidata property labels (22M params,
+    CPU, ~5ms) to classify predicates as exclusive or additive.
+    Results are cached permanently — predicate cardinality doesn't change.
+
+    Returns 'exclusive', 'additive', or 'unknown' (low confidence).
+    """
+    cache_key = f"{pred_str}|{subj_str}"
+    if cache_key in _CARDINALITY_CACHE:
+        return _CARDINALITY_CACHE[cache_key]
+
+    model, tokenizer = _get_tier2_model()
+    if model is None:
+        return 'unknown'
+
+    # Convert predicate to natural language
+    pred_natural = pred_str.replace('_', ' ').lower()
+
+    # For copular "be", the real predicate is in the subject
+    if pred_natural in ('be', 'is', 'was', 'are'):
+        pred_natural = subj_str.lower()
+        for prefix in ('the ', 'a ', 'an '):
+            if pred_natural.startswith(prefix):
+                pred_natural = pred_natural[len(prefix):]
+                break
+
+    # Construct premise+hypothesis (same format as training data)
+    premise = f"The property '{pred_natural}' describes a relationship between entities."
+    hypothesis = "This property can only have one value at a time for a given subject."
+
+    import torch
+    inputs = tokenizer(premise, hypothesis, return_tensors="pt", truncation=True,
+                       max_length=128, padding=True)
+    with torch.no_grad():
+        scores = model(**inputs).logits.softmax(dim=-1)[0]
+
+    # DeBERTa NLI output: 0=contradiction, 1=entailment, 2=neutral
+    # entailment → exclusive (hypothesis IS true: single-valued)
+    # contradiction → additive (hypothesis is FALSE: multi-valued)
+    entail_score = float(scores[1])
+    contr_score = float(scores[0])
+
+    if entail_score > contr_score and entail_score >= _TIER2_CONFIDENCE:
+        result = 'exclusive'
+    elif contr_score > entail_score and contr_score >= _TIER2_CONFIDENCE:
+        result = 'additive'
+    else:
+        result = 'unknown'
+
+    _cr_log.debug(
+        "tier2_finetuned: pred='%s' subj='%s' → %s (c=%.2f e=%.2f n=%.2f)",
+        pred_str, subj_str, result, float(scores[0]), float(scores[1]), float(scores[2]),
+    )
+
+    _CARDINALITY_CACHE[cache_key] = result
+    return result
+
+
+def _classify_predicate_cardinality(pred_str: str, subj_str: str = "") -> str:
+    """Classify predicate as 'exclusive', 'additive', or 'unknown'.
+
+    Tier 1 rule-based: check tokens against known verb classes.
+    For copular 'be', check subject for exclusivity signals.
+    Additive check first (conservative — avoid false positive conflict detection).
+    Falls through to Tier 2 (NLI zero-shot) when Tier 1 returns 'unknown'.
+
+    Set HERMES_NO_TIER1=1 to skip Tier 1 and go straight to Tier 2.
+    """
+    # Skip Tier 1 if env var set (for ablation testing)
+    if not os.environ.get("HERMES_NO_TIER1"):
+        tokens = set(pred_str.lower().replace('_', ' ').split())
+
+        # Tier 1: rule-based
+        for token in tokens:
+            if token in _ADDITIVE_LEMMAS:
+                return 'additive'
+
+        for token in tokens:
+            if token in _EXCLUSIVE_LEMMAS:
+                return 'exclusive'
+
+        if tokens & {'be', 'is', 'was', 'are'}:
+            subj_tokens = set(subj_str.lower().replace('_', ' ').split())
+            for token in subj_tokens:
+                if token in _EXCLUSIVE_SUBJECT_NOUNS:
+                    return 'exclusive'
+            return 'unknown'
+
+    # Tier 2: fine-tuned DeBERTa on Wikidata property labels
+    return _classify_predicate_tier2(pred_str, subj_str)
 
 
 def _extract_acl_triples(doc) -> list[tuple[str, str, str]]:
@@ -134,20 +300,55 @@ def _extract_acl_triples(doc) -> list[tuple[str, str, str]]:
                 triples.append((_get_subtree_text(nsubj), "be", obj_text))
 
         elif root.pos_ == "VERB":
-            # Non-copular: nsubj→VERB→dobj/attr/pobj
+            # Non-copular: nsubj/nsubjpass→VERB→dobj/attr/pobj/prep→pobj
             nsubj = None
             for child in root.children:
-                if child.dep_ == "nsubj":
+                if child.dep_ in ("nsubj", "nsubjpass"):
                     nsubj = child
                     break
             if nsubj is None:
                 continue
 
             pred = root.lemma_
+            found_direct = False
             for child in root.children:
                 if child.dep_ in ("dobj", "attr", "pobj"):
                     obj_text = _get_subtree_text(child)
                     triples.append((_get_subtree_text(nsubj), pred, obj_text))
+                    found_direct = True
+
+            # Prep-chain objects: "works in the field of Y",
+            # "was born in the city of Y", "was created in the country of Y"
+            # Descend prep→pobj→prep→pobj to extract the deepest pobj.
+            if not found_direct:
+                for child in root.children:
+                    if child.dep_ in ("prep", "agent"):
+                        # Build predicate from prep chain: "work_in_field_of"
+                        prep_parts = [pred, child.text.lower()]
+                        deepest_pobj = None
+                        current = child
+                        for _ in range(3):  # max depth
+                            pobj = None
+                            next_prep = None
+                            for gc in current.children:
+                                if gc.dep_ == "pobj":
+                                    pobj = gc
+                                elif gc.dep_ == "prep":
+                                    next_prep = gc
+                            if pobj is None:
+                                break
+                            if next_prep is not None:
+                                prep_parts.append(pobj.text.lower())
+                                prep_parts.append(next_prep.text.lower())
+                                current = next_prep
+                            else:
+                                deepest_pobj = pobj
+                                break
+                        if deepest_pobj is not None:
+                            canonical_pred = "_".join(prep_parts)
+                            obj_text = _get_subtree_text(deepest_pobj)
+                            triples.append((_get_subtree_text(nsubj), canonical_pred, obj_text))
+                            break  # one triple per sentence
 
     return triples
 
@@ -327,6 +528,12 @@ class HermesMemoryAgent:
         conflict_resolution: bool = False,
         cr_per_hop: bool = True,
         cr_entity_gate: bool = False,
+        cr_overfetch: int = 3,
+        cosine_dedup: bool = False,
+        cosine_dedup_threshold: float = 0.95,
+        entity_retrieval: bool = False,
+        bm25_hops: bool = False,
+        chain_cache: bool = False,
     ):
         self.model = model
         self.dedup_threshold = dedup_threshold
@@ -368,6 +575,14 @@ class HermesMemoryAgent:
         self.conflict_resolution = conflict_resolution
         self._cr_per_hop = cr_per_hop
         self._cr_entity_gate = cr_entity_gate
+        self._cr_overfetch = cr_overfetch
+        self.cosine_dedup = cosine_dedup
+        self._cosine_dedup_threshold = cosine_dedup_threshold
+        self.entity_retrieval = entity_retrieval
+        self.bm25_hops = bm25_hops
+        self.chain_cache = chain_cache
+        self._bm25_index = BM25Index() if bm25_hops else None
+        self._chain_cache = ChainCache(similarity_threshold=0.95) if chain_cache else None
         self._belief_overfetch = belief_overfetch
         self._belief_hard_floor = belief_hard_floor
         self._belief_propagation_damping = belief_propagation_damping
@@ -463,8 +678,230 @@ class HermesMemoryAgent:
         self._store_count = 0
         self._start_time = time.time()
 
+        # GLiNER entity extractor (lazy init)
+        self._gliner_model = None
+        self._gliner_labels = ["person", "organization", "location", "country", "city"]
+
+        # GLiNER entity index: entity_name.lower() → set of fact indices
+        # Built during ingestion, used for entity-aware retrieval at query time.
+        # Fact index = position in coupled_engine.memory_store.
+        self._gliner_entity_index: dict[str, set[int]] = defaultdict(set)
+
         # LLM client (lazy init)
         self._llm_client = None
+
+    def _ensure_gliner(self):
+        """Lazy-load GLiNER entity extractor."""
+        if getattr(self, "_gliner_model", None) is not None:
+            return
+        try:
+            from gliner import GLiNER
+            self._gliner_model = GLiNER.from_pretrained("urchade/gliner_multi-v2.1")
+            logging.getLogger(__name__).info("GLiNER loaded (gliner_multi-v2.1)")
+        except ImportError:
+            logging.getLogger(__name__).warning(
+                "GLiNER not installed — entity extraction disabled. "
+                "Install with: pip install gliner"
+            )
+            self._gliner_model = False  # sentinel: tried and failed
+
+    def _extract_entities_batch(
+        self, texts: list[str]
+    ) -> tuple[list[str | None], list[list[dict]]]:
+        """Extract entities from texts using GLiNER.
+
+        Returns:
+            primary_entities: one primary entity per text (person-preferred),
+                or None if no entity found.
+            all_entities: list of entity dicts per text, each dict has
+                keys 'text', 'label', 'score'.
+        """
+        self._ensure_gliner()
+        if not getattr(self, "_gliner_model", None):
+            return [None] * len(texts), [[] for _ in texts]
+
+        labels = getattr(self, "_gliner_labels",
+                         ["person", "organization", "location", "country", "city"])
+        results = self._gliner_model.batch_predict_entities(
+            texts, labels, threshold=0.4,
+        )
+        primary: list[str | None] = []
+        for ents in results:
+            if not ents:
+                primary.append(None)
+                continue
+            persons = [e for e in ents if e["label"] == "person"]
+            if persons:
+                primary.append(persons[0]["text"])
+            else:
+                best = max(ents, key=lambda e: e["score"])
+                primary.append(best["text"])
+        return primary, results
+
+    def _extract_primary_entity(self, texts: list[str]) -> list[str | None]:
+        """Extract the primary subject entity from each text using GLiNER."""
+        primary, _ = self._extract_entities_batch(texts)
+        return primary
+
+    def _entity_text_search(self, query: str, top_k: int = 10) -> list[dict]:
+        """Find facts by entity name match using GLiNER entity index.
+
+        Extracts entities from the query using GLiNER, looks them up in
+        the inverted entity index built during ingestion, and returns
+        matching facts ranked by number of matching entities.
+
+        Falls back to regex proper-noun extraction if GLiNER is unavailable.
+        """
+        # Extract query entities via GLiNER
+        query_entities = self._extract_query_entities(query)
+
+        if not query_entities:
+            return []
+
+        # Look up each query entity in the inverted index
+        store = self.coupled_engine.memory_store
+        fact_scores: dict[int, int] = {}  # fact_idx → match count
+        for ent_text in query_entities:
+            key = ent_text.lower().strip()
+            matching_indices = self._gliner_entity_index.get(key, set())
+            for idx in matching_indices:
+                if idx < len(store):
+                    fact_scores[idx] = fact_scores.get(idx, 0) + 1
+
+        if not fact_scores:
+            return []
+
+        # Sort by match count desc, take top_k
+        ranked = sorted(fact_scores.items(), key=lambda x: -x[1])[:top_k]
+        results = []
+        for idx, match_count in ranked:
+            entry = store[idx]
+            results.append({
+                "text": entry.text,
+                "score": float(match_count),
+                "recency": getattr(entry, "recency", 0.0),
+                "source": "entity_index",
+            })
+        return results
+
+    def _extract_query_entities(self, query: str) -> list[str]:
+        """Extract entity names from a query string using GLiNER.
+
+        Returns a list of entity text strings found in the query.
+        Falls back to regex proper-noun extraction if GLiNER is unavailable.
+        """
+        self._ensure_gliner()
+        if getattr(self, "_gliner_model", None) and self._gliner_model is not False:
+            labels = self._gliner_labels
+            results = self._gliner_model.predict_entities(
+                query, labels, threshold=0.3,  # lower threshold for short queries
+            )
+            return [e["text"] for e in results if len(e["text"].strip()) > 1]
+
+        # Fallback: regex proper nouns (less precise but works without GLiNER)
+        import re as _re
+        entities: list[str] = []
+        _stop = {"what", "where", "which", "when", "who", "how", "that", "this",
+                 "with", "from", "about", "based", "their", "does", "have", "been",
+                 "associated", "knowledge", "pool", "provided", "the", "question"}
+        for m in _re.finditer(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', query):
+            word = m.group(1)
+            if word.lower() not in _stop:
+                entities.append(word)
+        return entities
+
+    def rebuild_entity_index(self, batch_size: int = 64) -> int:
+        """Rebuild GLiNER entity index from existing memory_store.
+
+        Use after loading a cache that was built without the entity index.
+        Runs GLiNER batch extraction on all facts (~24 min for 17K facts on GPU).
+        Returns the number of unique entities indexed.
+        """
+        store = self.coupled_engine.memory_store
+        n = len(store)
+        if n == 0:
+            return 0
+
+        self._ensure_gliner()
+        if not getattr(self, "_gliner_model", None):
+            print("GLiNER not available — cannot rebuild entity index")
+            return 0
+
+        self._gliner_entity_index = defaultdict(set)
+        labels = self._gliner_labels
+
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            texts = [store[i].text for i in range(start, end)]
+            results = self._gliner_model.batch_predict_entities(
+                texts, labels, threshold=0.4,
+            )
+            for i, ents in enumerate(results):
+                fact_idx = start + i
+                for ent in ents:
+                    key = ent["text"].lower().strip()
+                    if len(key) > 1:
+                        self._gliner_entity_index[key].add(fact_idx)
+            if (end % 1000) < batch_size:
+                print(f"  Entity index: {end}/{n} facts processed, "
+                      f"{len(self._gliner_entity_index)} unique entities")
+
+        return len(self._gliner_entity_index)
+
+    def _entity_graph_expand(
+        self, seed_facts: list[str], top_k: int = 5
+    ) -> list[dict]:
+        """Expand seed facts via entity co-mention graph.
+
+        For each seed fact, find its entities in the index, then find OTHER
+        facts that share those entities. This enables multi-hop bridging:
+        "X plays basketball" + "basketball created in USA" → connects X to USA.
+
+        Returns facts NOT already in seed_facts, ranked by number of
+        entity connections to seed facts.
+        """
+        if not self._gliner_entity_index:
+            return []
+
+        store = self.coupled_engine.memory_store
+        seed_set = set(seed_facts)
+
+        # Find all entities mentioned in seed facts
+        seed_entities: set[str] = set()
+        seed_indices: set[int] = set()
+        for fact_text in seed_facts:
+            for ent_key, fact_indices in self._gliner_entity_index.items():
+                for idx in fact_indices:
+                    if idx < len(store) and store[idx].text == fact_text:
+                        seed_entities.add(ent_key)
+                        seed_indices.add(idx)
+                        break
+
+        if not seed_entities:
+            return []
+
+        # Find facts that share entities with seed facts (but aren't seeds)
+        neighbor_scores: dict[int, int] = {}
+        for ent_key in seed_entities:
+            for idx in self._gliner_entity_index.get(ent_key, set()):
+                if idx not in seed_indices and idx < len(store):
+                    neighbor_scores[idx] = neighbor_scores.get(idx, 0) + 1
+
+        if not neighbor_scores:
+            return []
+
+        ranked = sorted(neighbor_scores.items(), key=lambda x: -x[1])[:top_k]
+        results = []
+        for idx, score in ranked:
+            entry = store[idx]
+            if entry.text not in seed_set:
+                results.append({
+                    "text": entry.text,
+                    "score": float(score),
+                    "recency": getattr(entry, "recency", 0.0),
+                    "source": "entity_graph",
+                })
+        return results
 
     def _ensure_llm_client(self):
         if self._llm_client is not None:
@@ -515,7 +952,21 @@ class HermesMemoryAgent:
         fact_texts = [f.text for f in result.facts]
         embeddings = self._scorer.embed_batch(fact_texts)
 
-        for fact, emb in zip(result.facts, embeddings):
+        # Batch entity extraction via GLiNER (for dream merge gating + entity index)
+        primary_entities, all_entities = self._extract_entities_batch(fact_texts)
+
+        # Build entity index: map each entity to its fact's index in memory_store.
+        # Use current memory_store length as the insertion offset (safer than
+        # _store_count which tracks recency, not position).
+        base_idx = len(self.coupled_engine.memory_store)
+        for i, ents in enumerate(all_entities):
+            fact_idx = base_idx + i
+            for ent in ents:
+                key = ent["text"].lower().strip()
+                if len(key) > 1:  # skip single-char entities
+                    self._gliner_entity_index[key].add(fact_idx)
+
+        for fact, emb, entity in zip(result.facts, embeddings, primary_entities):
             # V1: Text-based store
             self.orchestrator.store(content=fact.text, embedding=emb)
 
@@ -524,7 +975,12 @@ class HermesMemoryAgent:
                 text=fact.text,
                 embedding=emb,
                 recency=float(self._store_count),
+                entity=entity,
             )
+
+            # BM25: index fact for lexical sub-query hop retrieval
+            if getattr(self, "_bm25_index", None) is not None:
+                self._bm25_index.add(self._store_count, fact.text)
 
             # Triadic: store fact's triples in the 3D tensor
             if getattr(self, "_triadic", None) is not None:
@@ -566,6 +1022,10 @@ class HermesMemoryAgent:
                             # Binary supersession (when enabled)
                             if self.supersession:
                                 self._superseded_texts.add(existing_text)
+
+                            # Chain cache: invalidate chains using the superseded fact
+                            if getattr(self, "_chain_cache", None) is not None:
+                                self._chain_cache.invalidate_fact(existing_text)
 
                             # Bayesian belief update (when enabled)
                             if self._belief_index is not None:
@@ -657,6 +1117,21 @@ class HermesMemoryAgent:
         # Extract bare question for embedding (strip MABench prompt preamble)
         bare_question = self._extract_question(question)
 
+        # Chain cache: check for cached decompose result (zero LLM calls)
+        _q_emb = None
+        if getattr(self, "_chain_cache", None) is not None and self.decompose_query:
+            _q_emb = self._scorer.embed(bare_question)
+            cached = self._chain_cache.lookup(_q_emb)
+            if cached is not None:
+                qt = time.time() - query_start
+                return {
+                    "output": cached.final_answer,
+                    "input_len": 0,
+                    "output_len": 0,
+                    "memory_construction_time": qt,
+                    "query_time_len": qt,
+                }
+
         # V2 retrieval from coupled engine
         if self.decompose_query:
             # Iterative multi-hop: decompose → retrieve → extract → substitute
@@ -688,7 +1163,17 @@ class HermesMemoryAgent:
                 max_sq_retries = 2  # 1 original + 1 retry
 
                 for retry in range(max_sq_retries):
-                    sq_results = self._retrieve_v2(current_sq)
+                    # BM25 hop retrieval: lexical matching for entity discrimination
+                    if getattr(self, "bm25_hops", False) and getattr(self, "_bm25_index", None) is not None:
+                        bm25_hits = self._bm25_index.query(current_sq, top_k=self.retrieve_num)
+                        sq_results = [
+                            {"text": self.coupled_engine.memory_store[doc_id].text,
+                             "score": score}
+                            for doc_id, score in bm25_hits
+                            if doc_id < len(self.coupled_engine.memory_store)
+                        ]
+                    else:
+                        sq_results = self._retrieve_v2(current_sq)
                     for r in sq_results:
                         key = r["text"].strip()[:200]
                         if key not in sq_seen:
@@ -754,14 +1239,45 @@ class HermesMemoryAgent:
                     else:
                         break  # unparseable → use what we have
 
+                # Entity index search: find facts by GLiNER entity lookup.
+                # Embedding retrieval groups by template similarity,
+                # so "What sport did X play?" returns facts about other
+                # athletes. Entity index ensures facts about X specifically
+                # are included. Also expand via entity co-mention graph
+                # for multi-hop bridging.
+                if self.entity_retrieval:
+                    ent_results = self._entity_text_search(sq, top_k=10)
+                    for r in ent_results:
+                        ekey = r["text"].strip()[:200]
+                        if ekey not in sq_seen:
+                            sq_seen.add(ekey)
+                            sq_all_texts.append(r["text"])
+                            sq_all_results.append(r)
+
+                    # Entity graph expansion: find facts sharing entities
+                    # with the entity-matched facts (multi-hop bridging).
+                    if ent_results:
+                        seed_texts = [r["text"] for r in ent_results]
+                        graph_results = self._entity_graph_expand(
+                            seed_texts, top_k=5,
+                        )
+                        for r in graph_results:
+                            gkey = r["text"].strip()[:200]
+                            if gkey not in sq_seen:
+                                sq_seen.add(gkey)
+                                sq_all_texts.append(r["text"])
+                                sq_all_results.append(r)
+
                 # Per-hop conflict resolution: remove stale facts
                 # BEFORE the LLM extracts an intermediate answer.
                 # Without this, the LLM sees all versions of a fact
                 # (e.g., 4 different sports for Abbiati) and picks wrong,
                 # poisoning all downstream hops.
+                if self.cosine_dedup:
+                    sq_all_texts = self._pairwise_cosine_dedup(sq_all_texts)
                 if self.conflict_resolution and self._cr_per_hop:
                     sq_all_texts = self._query_time_cr(sq_all_texts)
-                elif self._belief_index is not None:
+                elif not self.cosine_dedup and self._belief_index is not None:
                     sq_all_texts = [t for t in sq_all_texts if not self._belief_index.is_excluded(t)]
 
                 sq_chunks.append(sq_all_texts)
@@ -903,16 +1419,21 @@ class HermesMemoryAgent:
                     merged_chunks.append(line)
 
         # Fact currency filtering:
-        # - Conflict resolution (query-time): parse retrieved facts with spaCy,
-        #   extract acl-aware copular triples, keep newest per (S,P) group.
+        # - Cosine dedup: pairwise cosine > threshold → keep newest (no NLP)
+        # - Conflict resolution (query-time): spaCy triples, keep newest per (S,P)
         # - Belief (soft): demotes stale facts via P(current).
         # - Supersession (binary): fallback when neither is enabled.
+        # Cosine dedup can run standalone or stacked with triple-based CR.
+        if self.cosine_dedup:
+            merged_chunks = self._pairwise_cosine_dedup(merged_chunks)
         if self.conflict_resolution:
             merged_chunks = self._query_time_cr(merged_chunks)
-        elif self._belief_index is not None:
-            merged_chunks = [c for c in merged_chunks if not self._belief_index.is_excluded(c)]
-        elif self.supersession and self._superseded_texts:
-            merged_chunks = [c for c in merged_chunks if c not in self._superseded_texts]
+        elif not self.cosine_dedup:
+            # Only fall through to weaker methods if neither dedup nor CR active
+            if self._belief_index is not None:
+                merged_chunks = [c for c in merged_chunks if not self._belief_index.is_excluded(c)]
+            elif self.supersession and self._superseded_texts:
+                merged_chunks = [c for c in merged_chunks if c not in self._superseded_texts]
 
         # Build context for LLM via outgestion formatter
         final_chunks = merged_chunks[: self.retrieve_num]
@@ -926,6 +1447,19 @@ class HermesMemoryAgent:
             extra_system_instructions=outgestion_instructions,
         )
         query_time = time.time() - query_start
+
+        # Chain cache: store completed decompose chain for future reuse
+        if getattr(self, "_chain_cache", None) is not None and self.decompose_query and _q_emb is not None:
+            chain = CachedChain(
+                query_embedding=_q_emb,
+                query_text=bare_question,
+                sub_queries=subqueries,
+                intermediate_answers=answers,
+                evidence_facts=list(final_chunks),
+                final_answer=answer,
+                chain_id=len(self._chain_cache),
+            )
+            self._chain_cache.store(chain)
 
         return {
             "output": answer,
@@ -1293,10 +1827,16 @@ class HermesMemoryAgent:
         """
         q_emb = self._scorer.embed(query_text)
 
-        # Over-fetch when belief is active to compensate for exclusions
+        # Over-fetch when CR, cosine dedup, or belief is active to give
+        # filtering more candidates. Conflicting facts have cosine ~0.98-0.99,
+        # so top-10 drops correct versions.
         effective_k = self.retrieve_num
+        if self.conflict_resolution and self._cr_overfetch > 1:
+            effective_k = self.retrieve_num * self._cr_overfetch
+        if self.cosine_dedup:
+            effective_k = max(effective_k, self.retrieve_num * self._cr_overfetch)
         if self._belief_index is not None:
-            effective_k = self.retrieve_num * self._belief_overfetch
+            effective_k = max(effective_k, self.retrieve_num * self._belief_overfetch)
 
         if self.transfer_retrieval:
             results = self.coupled_engine.query_transfer(
@@ -1448,9 +1988,6 @@ class HermesMemoryAgent:
         if len(chunks) <= 1:
             return chunks
 
-        import logging
-        _cr_log = logging.getLogger("conflict_res")
-
         nlp = self._ingestion._nlp
 
         # Parse all chunks in one pass
@@ -1478,12 +2015,21 @@ class HermesMemoryAgent:
                     sp_groups[key].append((idx, obj.lower().strip(), recency))
 
         # Resolve conflicts: for each SP group with different objects,
-        # keep only the newest chunk
+        # keep only the newest chunk — gated by predicate cardinality.
         to_remove: set[int] = set()
         for (subj, pred), members in sp_groups.items():
             objects = set(obj for _, obj, _ in members)
             if len(objects) <= 1:
                 continue  # same object across all members → no conflict
+
+            # Tier 1 cardinality gate: skip additive predicates
+            cardinality = _classify_predicate_cardinality(pred, subj)
+            if cardinality == 'additive':
+                _cr_log.debug(
+                    "query_time_cr: SKIP additive (%s, %s) objs=%s",
+                    subj[:30], pred, objects,
+                )
+                continue
 
             # Sort by recency descending (newest first)
             members.sort(key=lambda x: x[2], reverse=True)
@@ -1506,6 +2052,87 @@ class HermesMemoryAgent:
                 _cr_log.info(
                     "  REMOVED [rec=%.0f]: %s",
                     text_to_recency.get(chunks[idx], 0),
+                    chunks[idx][:80],
+                )
+            return [c for i, c in enumerate(chunks) if i not in to_remove]
+        return chunks
+
+    def _pairwise_cosine_dedup(self, chunks: list[str]) -> list[str]:
+        """Pairwise cosine dedup: for near-duplicate retrieved facts, keep newest.
+
+        For every pair of retrieved facts with cosine > threshold to each other,
+        remove the older one (lower recency). This catches conflicting versions
+        of the same fact without requiring triple extraction or NLP parsing.
+
+        Rationale: conflicting facts share sentence templates (same S,P different O)
+        and have cosine > 0.95. Global recency sort destroys relevance ranking,
+        but pairwise dedup only touches true near-duplicates.
+        """
+        if len(chunks) <= 1:
+            return chunks
+
+        # Build text→(embedding, recency) from memory store
+        text_to_emb: dict[str, np.ndarray] = {}
+        text_to_rec: dict[str, float] = {}
+        for m in self.coupled_engine.memory_store:
+            text_to_emb[m.text] = m.embedding
+            text_to_rec[m.text] = m.recency
+
+        # Collect embeddings for retrieved chunks
+        embs = []
+        recs = []
+        valid_idx = []  # chunk indices that have embeddings
+        for i, chunk in enumerate(chunks):
+            emb = text_to_emb.get(chunk)
+            if emb is not None:
+                embs.append(emb)
+                recs.append(text_to_rec.get(chunk, 0.0))
+                valid_idx.append(i)
+
+        if len(embs) < 2:
+            return chunks
+
+        # Pairwise cosine similarity matrix
+        E = np.array(embs)
+        norms = np.linalg.norm(E, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-12)
+        E_norm = E / norms
+        sim_matrix = E_norm @ E_norm.T
+
+        # For each pair above threshold, mark the older one for removal
+        to_remove: set[int] = set()
+        threshold = self._cosine_dedup_threshold
+        n = len(valid_idx)
+        for i in range(n):
+            if valid_idx[i] in to_remove:
+                continue
+            for j in range(i + 1, n):
+                if valid_idx[j] in to_remove:
+                    continue
+                if sim_matrix[i, j] >= threshold:
+                    ci, cj = valid_idx[i], valid_idx[j]
+                    if recs[i] >= recs[j]:
+                        to_remove.add(cj)
+                        _cr_log.debug(
+                            "cosine_dedup: cos=%.4f, keep[rec=%.0f] drop[rec=%.0f]",
+                            sim_matrix[i, j], recs[i], recs[j],
+                        )
+                    else:
+                        to_remove.add(ci)
+                        _cr_log.debug(
+                            "cosine_dedup: cos=%.4f, keep[rec=%.0f] drop[rec=%.0f]",
+                            sim_matrix[i, j], recs[j], recs[i],
+                        )
+
+        if to_remove:
+            _cr_log.info(
+                "cosine_dedup: removing %d/%d chunks (threshold=%.3f)",
+                len(to_remove), len(chunks), threshold,
+            )
+            for idx in sorted(to_remove):
+                _cr_log.info(
+                    "  DEDUP [rec=%.0f, cos=max]: %s",
+                    text_to_rec.get(chunks[idx], 0),
                     chunks[idx][:80],
                 )
             return [c for i, c in enumerate(chunks) if i not in to_remove]
@@ -1725,6 +2352,12 @@ class HermesMemoryAgent:
         self._store_count = 0
         self._scorer._cache.clear()
 
+        # Reset BM25 index and chain cache
+        if getattr(self, "_bm25_index", None) is not None:
+            self._bm25_index = BM25Index()
+        if getattr(self, "_chain_cache", None) is not None:
+            self._chain_cache = ChainCache(similarity_threshold=0.95)
+
         # Reset triadic memory (fresh tensor, codebook, mappings)
         if getattr(self, "_triadic", None) is not None:
             self._triadic = TriadicMemory(
@@ -1742,6 +2375,9 @@ class HermesMemoryAgent:
         self._fact_entities = {}
         self._supersession_graph = {}
         self._supersedes = defaultdict(set)
+
+        # Reset GLiNER entity index
+        self._gliner_entity_index = defaultdict(set)
 
         # Reset belief index (preserve params, clear beliefs)
         if self._belief_index is not None:
