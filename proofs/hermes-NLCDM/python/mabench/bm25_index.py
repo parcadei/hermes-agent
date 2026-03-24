@@ -118,6 +118,57 @@ class BM25Index:
         scores.sort(key=lambda x: (-x[1], x[0]))
         return scores[:top_k]
 
+    def score_texts(self, query_text: str, texts: list[str]) -> list[float]:
+        """Score arbitrary texts against a query using global IDF statistics.
+
+        Uses IDF from the full indexed corpus but computes TF from the given
+        texts. This enables BM25 reranking of candidates retrieved by other
+        methods (e.g., cosine similarity) without requiring those candidates
+        to be in the index.
+
+        Args:
+            query_text: The query to score against.
+            texts: List of document texts to score.
+
+        Returns:
+            List of BM25 scores, one per input text. 0.0 if no lexical overlap.
+        """
+        n_texts = len(texts)
+        if not self._docs or n_texts == 0:
+            return [0.0] * n_texts
+
+        q_tokens = _tokenize(query_text)
+        if not q_tokens:
+            return [0.0] * n_texts
+
+        n = len(self._docs)
+        avgdl = self._total_tokens / n
+
+        scores: list[float] = []
+        for text in texts:
+            doc_tokens = _tokenize(text)
+            dl = len(doc_tokens)
+            tf = Counter(doc_tokens)
+            score = 0.0
+
+            for term in q_tokens:
+                df_t = self._df.get(term, 0)
+                if df_t == 0:
+                    continue
+
+                idf = math.log((n - df_t + 0.5) / (df_t + 0.5) + 1.0)
+                tf_val = tf.get(term, 0)
+                if tf_val == 0:
+                    continue
+
+                numerator = tf_val * (self.k1 + 1.0)
+                denominator = tf_val + self.k1 * (1.0 - self.b + self.b * dl / avgdl)
+                score += idf * numerator / denominator
+
+            scores.append(score)
+
+        return scores
+
     def __len__(self) -> int:
         """Number of indexed documents."""
         return len(self._docs)

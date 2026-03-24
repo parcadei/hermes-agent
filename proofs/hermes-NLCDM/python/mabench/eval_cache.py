@@ -169,17 +169,15 @@ def load_context(
     if "entity_accumulator" in state and hasattr(agent, "_entity_accumulator"):
         agent._entity_accumulator = state["entity_accumulator"]
 
-    # BM25 index: restore from cache or rebuild from memory_store
+    # BM25 index: always rebuild from memory_store to ensure doc_id == index.
+    # Cached BM25 may have stale doc_ids from _store_count (which diverges
+    # from memory_store indices when coupled_engine replaces contradictions).
     if getattr(agent, "_bm25_index", None) is not None:
-        if "bm25_index" in state:
-            agent._bm25_index = state["bm25_index"]
-        else:
-            # Rebuild from memory_store texts (fast, no model needed)
-            from mabench.bm25_index import BM25Index
-            agent._bm25_index = BM25Index()
-            agent._bm25_index.add_batch([
-                (i, m.text) for i, m in enumerate(agent.coupled_engine.memory_store)
-            ])
+        from mabench.bm25_index import BM25Index
+        agent._bm25_index = BM25Index()
+        agent._bm25_index.add_batch([
+            (i, m.text) for i, m in enumerate(agent.coupled_engine.memory_store)
+        ])
     # Chain cache: restore if available (not rebuilt — requires embeddings)
     if getattr(agent, "_chain_cache", None) is not None and "chain_cache" in state:
         agent._chain_cache = state["chain_cache"]

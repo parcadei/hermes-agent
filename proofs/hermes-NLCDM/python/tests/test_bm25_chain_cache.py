@@ -789,3 +789,502 @@ class TestDecomposeIntegration:
         assert result is None, (
             "Chain should be evicted after its evidence fact was superseded"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 4: BM25Index.score_texts — rerank arbitrary texts with corpus IDF
+# ---------------------------------------------------------------------------
+
+
+class TestBM25ScoreTexts:
+    """Tests for BM25Index.score_texts reranking method.
+
+    score_texts uses IDF from the full indexed corpus but computes TF from
+    the given input texts. This enables BM25 reranking of candidates retrieved
+    by other methods (e.g., cosine similarity) without requiring those
+    candidates to be in the index.
+    """
+
+    def test_score_texts_returns_correct_length(self):
+        """3 texts in -> 3 scores out, always."""
+        idx = BM25Index()
+        idx.add(0, "The capital of France is Paris")
+        idx.add(1, "The capital of Germany is Berlin")
+        idx.add(2, "The capital of Italy is Rome")
+
+        scores = idx.score_texts("capital of France", [
+            "France is in Europe",
+            "Paris is beautiful",
+            "Berlin is the largest city",
+        ])
+        assert len(scores) == 3, f"Expected 3 scores, got {len(scores)}"
+
+    def test_score_texts_empty_index_returns_zeros(self):
+        """No docs indexed -> IDF is undefined -> all zeros."""
+        idx = BM25Index()
+        scores = idx.score_texts("any query", ["text one", "text two"])
+        assert scores == [0.0, 0.0], f"Expected [0.0, 0.0], got {scores}"
+
+    def test_score_texts_no_overlap_returns_zero(self):
+        """Query tokens not in any input text -> 0.0 for all."""
+        idx = BM25Index()
+        idx.add(0, "alpha beta gamma")
+        idx.add(1, "delta epsilon zeta")
+
+        scores = idx.score_texts("alpha beta", [
+            "completely different words here",
+            "nothing matching at all",
+        ])
+        assert scores == [0.0, 0.0], (
+            f"Expected all zeros when no lexical overlap, got {scores}"
+        )
+
+    def test_score_texts_matches_query_score(self):
+        """Score for an indexed text should match query() result.
+
+        This verifies the same BM25 formula is used in both code paths.
+        Index 3 docs, then score_texts on the exact same texts. The scores
+        should match query() scores exactly (same IDF, same TF, same avgdl).
+        """
+        idx = BM25Index()
+        docs = [
+            (0, "Christian Abbiati was born in Treviglio"),
+            (1, "Marco Rossi was born in Bergamo"),
+            (2, "Luigi Verdi was born in Milan"),
+        ]
+        for doc_id, text in docs:
+            idx.add(doc_id, text)
+
+        query = "Who was born in Treviglio?"
+        query_results = idx.query(query, top_k=10)
+
+        # Build a map of doc_id -> score from query()
+        query_scores = {doc_id: score for doc_id, score in query_results}
+
+        # score_texts on the same texts in doc_id order
+        texts = [text for _, text in docs]
+        rerank_scores = idx.score_texts(query, texts)
+
+        for i, (doc_id, text) in enumerate(docs):
+            expected = query_scores.get(doc_id, 0.0)
+            actual = rerank_scores[i]
+            assert abs(expected - actual) < 1e-9, (
+                f"Doc {doc_id}: query() gave {expected:.6f}, "
+                f"score_texts() gave {actual:.6f}"
+            )
+
+    def test_score_texts_entity_discrimination(self):
+        """Core use case: BM25 reranks cosine-retrieved candidates correctly.
+
+        Given candidate texts from cosine retrieval (which conflates entities
+        due to shared template structure), BM25 should rank the text
+        containing the query entity higher.
+
+        Index many "X born in Y" facts to establish IDF statistics.
+        Candidates: one matching entity, one non-matching.
+        The matching candidate should score higher.
+        """
+        idx = BM25Index()
+        # Build corpus for IDF statistics
+        idx.add(0, "Christian Abbiati was born in Treviglio")
+        idx.add(1, "Marco Rossi was born in Bergamo")
+        idx.add(2, "Luigi Verdi was born in Milan")
+        idx.add(3, "Giovanni Bianchi was born in Turin")
+        idx.add(4, "Paolo Neri was born in Florence")
+
+        # Candidates from cosine retrieval (would have ~0.95+ cosine similarity)
+        candidates = [
+            "Marco Rossi was born in Bergamo",      # wrong entity
+            "Christian Abbiati was born in Treviglio",  # correct entity
+        ]
+
+        scores = idx.score_texts("born in Treviglio", candidates)
+        assert scores[1] > scores[0], (
+            f"Treviglio fact (score={scores[1]:.4f}) should rank higher than "
+            f"Bergamo fact (score={scores[0]:.4f})"
+        )
+
+    def test_score_texts_uses_corpus_idf(self):
+        """IDF should come from the full index, not the input texts.
+
+        A rare token in the corpus should get high IDF even if it appears
+        in all input texts. Conversely, a common token in the corpus should
+        get low IDF even if it appears in only one input text.
+        """
+        idx = BM25Index()
+        # "alpha" appears in 1 doc (rare), "common" appears in all 5
+        idx.add(0, "alpha common shared")
+        idx.add(1, "beta common shared")
+        idx.add(2, "gamma common shared")
+        idx.add(3, "delta common shared")
+        idx.add(4, "epsilon common shared")
+
+        # Both input texts contain "alpha" AND "common".
+        # "alpha" is rare in corpus (df=1) -> high IDF
+        # "common" is ubiquitous (df=5) -> low IDF
+        texts_with_both = [
+            "alpha common",
+            "alpha common",
+        ]
+
+        scores = idx.score_texts("alpha common", texts_with_both)
+
+        # Now score texts where only "common" appears (no "alpha")
+        texts_common_only = [
+            "common only here",
+            "common only there",
+        ]
+        scores_common = idx.score_texts("alpha common", texts_common_only)
+
+        # Texts with "alpha" (rare in corpus) should score much higher
+        # than texts with only "common" (ubiquitous in corpus)
+        assert scores[0] > scores_common[0], (
+            f"Text with rare 'alpha' (score={scores[0]:.4f}) should beat "
+            f"text with only 'common' (score={scores_common[0]:.4f}) "
+            f"because IDF comes from corpus, not input texts"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 5: BM25 hop retrieval with post-retrieval reranking (Test 1 architecture)
+# ---------------------------------------------------------------------------
+
+
+class TestBM25HopReranking:
+    """Tests for BM25 hop retrieval with post-retrieval reranking (Test 1 architecture).
+
+    The Test 1 architecture replaces the hard if/else BM25-vs-cosine in the
+    decompose loop with: BM25 candidate generation (overfetch 3x) followed by
+    graph signal reranking via _apply_post_retrieval.
+
+    Additionally, when bm25_hops is active, the original question's cosine
+    results are BM25-reranked for entity discrimination.
+    """
+
+    def _make_agent(self):
+        """Create a HermesMemoryAgent with mocked dependencies for full _query path."""
+        from mabench.hermes_agent import HermesMemoryAgent
+
+        mock_pipeline = MagicMock()
+        mock_scorer = MagicMock()
+        mock_scorer.embed_batch.return_value = [_unit_vec(8, i) for i in range(10)]
+        mock_scorer.embed.side_effect = lambda t: _unit_vec(8, hash(t) % 8)
+
+        with patch("mabench.hermes_agent.IngestionPipeline"):
+            with patch("mabench.hermes_agent.EmbeddingRelevanceScorer"):
+                agent = HermesMemoryAgent.__new__(HermesMemoryAgent)
+                agent.supersession = True
+                agent.conflict_resolution = True
+                agent._cr_per_hop = True
+                agent._cr_overfetch = 1
+                agent.cosine_dedup = False
+                agent.decompose_query = True
+                agent.decompose_rrf = False
+                agent.decompose_coverage = False
+                agent.decompose_max_hops = 3
+                agent.iterative_query = False
+                agent.entity_retrieval = False
+                agent.transfer_retrieval = False
+                agent.coretrieval_retrieval = False
+                agent.cooc_boost_retrieval = False
+                agent.ppr_retrieval = False
+                agent.hybrid_retrieval = False
+                agent.associative_retrieval = False
+                agent.sparse_retrieval = False
+                agent.bm25_weight = 0.0
+                agent.retrieve_num = 10
+                agent._triple_index = defaultdict(list)
+                agent._superseded_texts = set()
+                agent._fact_entities = {}
+                agent._supersession_graph = {}
+                agent._supersedes = defaultdict(set)
+                agent._ingestion = mock_pipeline
+                agent._scorer = mock_scorer
+                agent._store_count = 0
+                agent.dream_interval = 0
+                agent._triadic = None
+                agent._entity_accumulator = MagicMock()
+                agent._belief_index = None
+                agent._gliner_entity_index = defaultdict(set)
+                agent.model = "gpt-4o-mini"
+
+                agent.orchestrator = MagicMock()
+                agent.coupled_engine = MagicMock()
+                agent.coupled_engine._session_buffer = []
+                agent.coupled_engine.memory_store = []
+
+                # BM25 index (the new component)
+                agent.bm25_hops = True
+                agent._bm25_index = BM25Index()
+
+                # Chain cache
+                agent._chain_cache = ChainCache(similarity_threshold=0.95)
+
+                # Mock LLM client for decompose/extract
+                agent._llm_client = MagicMock()
+
+                # Mock downstream methods needed by _query to complete
+                agent._format_outgestion = MagicMock(
+                    return_value=("memory context", "")
+                )
+                agent._generate_answer = MagicMock(
+                    return_value=("test answer", 10, 5, 0.1)
+                )
+
+        return agent
+
+    def test_bm25_hops_calls_apply_post_retrieval(self):
+        """When bm25_hops=True, the decompose loop should call _apply_post_retrieval
+        on BM25 results before using them. This ensures belief reranking is applied
+        to BM25 candidates just like it is to cosine candidates."""
+        agent = self._make_agent()
+
+        # Populate memory store and BM25 index with test facts
+        from dataclasses import dataclass
+
+        @dataclass
+        class FakeMemEntry:
+            text: str
+
+        agent.coupled_engine.memory_store = [
+            FakeMemEntry(text="Christian Abbiati was born in Treviglio"),
+            FakeMemEntry(text="Marco Rossi was born in Bergamo"),
+            FakeMemEntry(text="Luigi Verdi was born in Milan"),
+        ]
+        for i, entry in enumerate(agent.coupled_engine.memory_store):
+            agent._bm25_index.add(i, entry.text)
+
+        # Mock _decompose_query to return a single sub-query (no multi-hop chaining)
+        agent._decompose_query = MagicMock(return_value=[
+            "Where was Christian Abbiati born?",
+        ])
+        # Mock _retrieve_v2 for the original question merge
+        agent._retrieve_v2 = MagicMock(return_value=[
+            {"text": "Christian Abbiati was born in Treviglio", "score": 0.9},
+        ])
+        # Mock _extract_question
+        agent._extract_question = MagicMock(return_value="Where was Abbiati born?")
+        # Mock _query_time_cr to pass through
+        agent._query_time_cr = MagicMock(side_effect=lambda texts: texts)
+        # Mock LLM calls (judge says ANSWER_READY immediately)
+        mock_judge = MagicMock()
+        mock_judge.choices = [MagicMock()]
+        mock_judge.choices[0].message.content = "ANSWER_READY"
+        agent._llm_client.chat.completions.create.return_value = mock_judge
+
+        # Spy on _apply_post_retrieval
+        agent._apply_post_retrieval = MagicMock(
+            side_effect=lambda results: results[:agent.retrieve_num]
+        )
+
+        # Run the full _query method (single argument: question string)
+        agent._query("Where was Abbiati born?")
+
+        # _apply_post_retrieval should have been called with BM25 results
+        assert agent._apply_post_retrieval.call_count >= 1, (
+            "_apply_post_retrieval was not called on BM25 hop results. "
+            f"Call count: {agent._apply_post_retrieval.call_count}"
+        )
+
+    def test_bm25_hops_overfetches_3x(self):
+        """BM25 query in the decompose loop should request retrieve_num * 3
+        candidates to give the reranker a bigger pool to work with."""
+        agent = self._make_agent()
+        agent.retrieve_num = 10
+
+        # Populate memory store and BM25 index
+        from dataclasses import dataclass
+
+        @dataclass
+        class FakeMemEntry:
+            text: str
+
+        entries = [FakeMemEntry(text=f"Fact number {i}") for i in range(30)]
+        agent.coupled_engine.memory_store = entries
+        for i, entry in enumerate(entries):
+            agent._bm25_index.add(i, entry.text)
+
+        # Mock _decompose_query to return a single sub-query
+        agent._decompose_query = MagicMock(return_value=[
+            "What is fact number 5?",
+        ])
+        agent._retrieve_v2 = MagicMock(return_value=[
+            {"text": "Fact number 5", "score": 0.9},
+        ])
+        agent._extract_question = MagicMock(return_value="What is fact 5?")
+        agent._query_time_cr = MagicMock(side_effect=lambda texts: texts)
+        mock_judge = MagicMock()
+        mock_judge.choices = [MagicMock()]
+        mock_judge.choices[0].message.content = "ANSWER_READY"
+        agent._llm_client.chat.completions.create.return_value = mock_judge
+        agent._apply_post_retrieval = MagicMock(
+            side_effect=lambda results: results[:agent.retrieve_num]
+        )
+
+        # Spy on the BM25 index query method
+        original_query = agent._bm25_index.query
+        query_calls = []
+
+        def spy_query(text, top_k=10):
+            query_calls.append({"text": text, "top_k": top_k})
+            return original_query(text, top_k=top_k)
+
+        agent._bm25_index.query = spy_query
+
+        agent._query("What is fact 5?")
+
+        # At least one BM25 query should have been made with top_k = retrieve_num * 3
+        assert len(query_calls) >= 1, "No BM25 queries were made"
+        bm25_top_ks = [c["top_k"] for c in query_calls]
+        assert any(k == 30 for k in bm25_top_ks), (
+            f"Expected BM25 query with top_k=30 (retrieve_num*3), "
+            f"got top_k values: {bm25_top_ks}"
+        )
+
+    def test_bm25_rerank_original_question(self):
+        """When bm25_hops is active, orig_results from _retrieve_v2 should be
+        BM25-reranked for entity discrimination. The BM25 reranking should
+        reorder cosine results using lexical matching scores."""
+        agent = self._make_agent()
+
+        # Populate BM25 index with facts that have high IDF tokens
+        agent._bm25_index.add(0, "Christian Abbiati was born in Treviglio")
+        agent._bm25_index.add(1, "Marco Rossi was born in Bergamo")
+        agent._bm25_index.add(2, "Luigi Verdi was born in Milan")
+
+        # Test score_texts directly (the mechanism used for reranking)
+        candidates = [
+            "Marco Rossi was born in Bergamo",
+            "Christian Abbiati was born in Treviglio",
+        ]
+        scores = agent._bm25_index.score_texts(
+            "Where was Abbiati born in Treviglio?", candidates
+        )
+
+        # The Abbiati/Treviglio fact should score higher
+        assert scores[1] > scores[0], (
+            f"BM25 reranking should put Abbiati/Treviglio (score={scores[1]:.4f}) "
+            f"above Rossi/Bergamo (score={scores[0]:.4f})"
+        )
+
+    def test_bm25_rerank_noop_when_no_overlap(self):
+        """BM25 reranking should be a no-op (preserve original order) when
+        BM25 scores are all zero (no lexical overlap between query and results)."""
+        agent = self._make_agent()
+
+        # Index facts with specific tokens
+        agent._bm25_index.add(0, "alpha beta gamma")
+        agent._bm25_index.add(1, "delta epsilon zeta")
+
+        # Query with completely different tokens
+        candidates = [
+            "first result from cosine",
+            "second result from cosine",
+        ]
+        scores = agent._bm25_index.score_texts(
+            "unrelated query terms", candidates
+        )
+
+        # All scores should be zero - original order preserved
+        assert all(s == 0.0 for s in scores), (
+            f"Expected all zero scores for no-overlap query, got {scores}"
+        )
+
+    def test_else_branch_unchanged(self):
+        """When bm25_hops=False, the decompose loop should use _retrieve_v2
+        for sub-query hops exactly as before, with no BM25 involvement."""
+        agent = self._make_agent()
+        agent.bm25_hops = False
+        agent._bm25_index = None
+
+        from dataclasses import dataclass
+
+        @dataclass
+        class FakeMemEntry:
+            text: str
+
+        agent.coupled_engine.memory_store = [
+            FakeMemEntry(text="Some fact"),
+        ]
+
+        agent._decompose_query = MagicMock(return_value=[
+            "What is the answer?",
+        ])
+        agent._retrieve_v2 = MagicMock(return_value=[
+            {"text": "Some fact", "score": 0.9},
+        ])
+        agent._extract_question = MagicMock(return_value="What is the answer?")
+        agent._query_time_cr = MagicMock(side_effect=lambda texts: texts)
+        mock_judge = MagicMock()
+        mock_judge.choices = [MagicMock()]
+        mock_judge.choices[0].message.content = "ANSWER_READY"
+        agent._llm_client.chat.completions.create.return_value = mock_judge
+
+        agent._query("What is the answer?")
+
+        # _retrieve_v2 should have been called for both sub-query and orig question
+        assert agent._retrieve_v2.call_count >= 2, (
+            f"_retrieve_v2 should be called for sub-query + original question when "
+            f"bm25_hops=False, but was called {agent._retrieve_v2.call_count} time(s)"
+        )
+
+    def test_bm25_rerank_orig_results_in_query(self):
+        """Full integration: when bm25_hops is active, the original question's
+        cosine results (from _retrieve_v2) should be BM25-reranked. Verify by
+        checking that score_texts is called on orig_results' texts."""
+        agent = self._make_agent()
+
+        from dataclasses import dataclass
+
+        @dataclass
+        class FakeMemEntry:
+            text: str
+
+        agent.coupled_engine.memory_store = [
+            FakeMemEntry(text="Christian Abbiati was born in Treviglio"),
+            FakeMemEntry(text="Marco Rossi was born in Bergamo"),
+        ]
+        for i, entry in enumerate(agent.coupled_engine.memory_store):
+            agent._bm25_index.add(i, entry.text)
+
+        # Decompose returns a single sub-query
+        agent._decompose_query = MagicMock(return_value=[
+            "Where was Abbiati born?",
+        ])
+        # _retrieve_v2 returns results in WRONG entity order (Rossi first)
+        # BM25 reranking should fix this for "Abbiati" query
+        agent._retrieve_v2 = MagicMock(return_value=[
+            {"text": "Marco Rossi was born in Bergamo", "score": 0.95},
+            {"text": "Christian Abbiati was born in Treviglio", "score": 0.94},
+        ])
+        agent._extract_question = MagicMock(
+            return_value="Where was Abbiati born in Treviglio?"
+        )
+        agent._query_time_cr = MagicMock(side_effect=lambda texts: texts)
+        mock_judge = MagicMock()
+        mock_judge.choices = [MagicMock()]
+        mock_judge.choices[0].message.content = "ANSWER_READY"
+        agent._llm_client.chat.completions.create.return_value = mock_judge
+
+        # Spy on score_texts
+        original_score_texts = agent._bm25_index.score_texts
+        score_texts_calls = []
+
+        def spy_score_texts(query_text, texts):
+            result = original_score_texts(query_text, texts)
+            score_texts_calls.append({
+                "query": query_text,
+                "texts": texts,
+                "scores": result,
+            })
+            return result
+
+        agent._bm25_index.score_texts = spy_score_texts
+
+        agent._query("Where was Abbiati born in Treviglio?")
+
+        # score_texts should have been called for orig_results reranking
+        assert len(score_texts_calls) >= 1, (
+            "BM25 score_texts was not called for original question reranking. "
+            f"Call count: {len(score_texts_calls)}"
+        )

@@ -971,16 +971,20 @@ class HermesMemoryAgent:
             self.orchestrator.store(content=fact.text, embedding=emb)
 
             # V2: Coupled engine store (no serial number prefix -- D3)
-            self.coupled_engine.store(
+            # Returns the memory_store index (may replace an existing entry
+            # when cosine > contradiction_threshold, so idx != _store_count).
+            ms_idx = self.coupled_engine.store(
                 text=fact.text,
                 embedding=emb,
                 recency=float(self._store_count),
                 entity=entity,
             )
 
-            # BM25: index fact for lexical sub-query hop retrieval
+            # BM25: index fact for lexical sub-query hop retrieval.
+            # Use ms_idx (memory_store position) as doc_id so BM25 hits
+            # map directly to memory_store[doc_id].
             if getattr(self, "_bm25_index", None) is not None:
-                self._bm25_index.add(self._store_count, fact.text)
+                self._bm25_index.add(ms_idx, fact.text)
 
             # Triadic: store fact's triples in the 3D tensor
             if getattr(self, "_triadic", None) is not None:
@@ -1165,13 +1169,17 @@ class HermesMemoryAgent:
                 for retry in range(max_sq_retries):
                     # BM25 hop retrieval: lexical matching for entity discrimination
                     if getattr(self, "bm25_hops", False) and getattr(self, "_bm25_index", None) is not None:
-                        bm25_hits = self._bm25_index.query(current_sq, top_k=self.retrieve_num)
+                        # Test 1: BM25 candidate generation -> post-retrieval reranking
+                        # BM25 picks the candidate pool (entity discrimination),
+                        # then _apply_post_retrieval adds belief reranking.
+                        bm25_hits = self._bm25_index.query(current_sq, top_k=self.retrieve_num * 3)
                         sq_results = [
                             {"text": self.coupled_engine.memory_store[doc_id].text,
                              "score": score}
                             for doc_id, score in bm25_hits
                             if doc_id < len(self.coupled_engine.memory_store)
                         ]
+                        sq_results = self._apply_post_retrieval(sq_results)
                     else:
                         sq_results = self._retrieve_v2(current_sq)
                     for r in sq_results:
@@ -1302,6 +1310,17 @@ class HermesMemoryAgent:
 
             # Merge sub-query and original results
             orig_results = self._retrieve_v2(bare_question)
+            # BM25 rerank original results for entity discrimination
+            if getattr(self, "bm25_hops", False) and getattr(self, "_bm25_index", None) is not None:
+                bm25_scores = self._bm25_index.score_texts(
+                    bare_question, [r["text"] for r in orig_results]
+                )
+                if any(s > 0 for s in bm25_scores):
+                    paired = sorted(
+                        zip(bm25_scores, orig_results),
+                        key=lambda x: -x[0],
+                    )
+                    orig_results = [r for _, r in paired]
             orig_texts = [r["text"] for r in orig_results]
 
             if self.decompose_rrf:
@@ -1818,25 +1837,46 @@ class HermesMemoryAgent:
             "hops": hops_taken,
         }
 
-    def _retrieve_v2(self, query_text: str) -> list[dict]:
-        """Run V2 embedding retrieval for a single query string.
+    def _embed_query(self, query_text: str):
+        """Embed a query string.
 
-        When belief scoring is active, over-fetches by belief_overfetch
-        multiplier and then applies belief reranking to compensate for
-        excluded/demoted facts.
+        Returns:
+            numpy array of shape (dim,) — the query embedding.
         """
-        q_emb = self._scorer.embed(query_text)
+        return self._scorer.embed(query_text)
 
+    def _retrieve_candidates(
+        self,
+        q_emb,
+        top_k: int,
+        query_text: str | None = None,
+    ) -> list[dict]:
+        """Run the appropriate retrieval backend based on config flags.
+
+        This is the big switch statement extracted from _retrieve_v2.
+        Computes effective_k internally (CR overfetch, cosine dedup,
+        belief overfetch).  The *top_k* parameter is the BASE
+        retrieve_num before overfetch multipliers.
+
+        Args:
+            q_emb: Query embedding (numpy array).
+            top_k: Base number of results to retrieve (before overfetch).
+            query_text: Original query string, needed by the cooc+bm25
+                backend.  May be ``None`` for backends that don't use it.
+
+        Returns:
+            List of result dicts with at minimum {"text": str, "score": float}.
+        """
         # Over-fetch when CR, cosine dedup, or belief is active to give
         # filtering more candidates. Conflicting facts have cosine ~0.98-0.99,
         # so top-10 drops correct versions.
-        effective_k = self.retrieve_num
+        effective_k = top_k
         if self.conflict_resolution and self._cr_overfetch > 1:
-            effective_k = self.retrieve_num * self._cr_overfetch
+            effective_k = top_k * self._cr_overfetch
         if self.cosine_dedup:
-            effective_k = max(effective_k, self.retrieve_num * self._cr_overfetch)
+            effective_k = max(effective_k, top_k * self._cr_overfetch)
         if self._belief_index is not None:
-            effective_k = max(effective_k, self.retrieve_num * self._belief_overfetch)
+            effective_k = max(effective_k, top_k * self._belief_overfetch)
 
         if self.transfer_retrieval:
             results = self.coupled_engine.query_transfer(
@@ -1901,11 +1941,36 @@ class HermesMemoryAgent:
                 top_k=effective_k,
             )
 
-        # Apply belief reranking when active
+        return results
+
+    def _apply_post_retrieval(self, results: list[dict]) -> list[dict]:
+        """Apply post-retrieval reranking and filtering.
+
+        Currently: belief reranking when active, truncation to retrieve_num.
+
+        Args:
+            results: Raw retrieval results.
+
+        Returns:
+            Reranked and truncated results.
+        """
         if self._belief_index is not None:
             results = self._apply_belief_rerank(results)[: self.retrieve_num]
-
         return results
+
+    def _retrieve_v2(self, query_text: str) -> list[dict]:
+        """Run V2 embedding retrieval for a single query string.
+
+        Composed from three independent stages:
+          1. _embed_query      -- vectorize the query text
+          2. _retrieve_candidates -- run the backend retrieval switch
+          3. _apply_post_retrieval -- belief rerank + truncation
+        """
+        q_emb = self._embed_query(query_text)
+        results = self._retrieve_candidates(
+            q_emb, self.retrieve_num, query_text=query_text,
+        )
+        return self._apply_post_retrieval(results)
 
     def _apply_belief_rerank(self, results: list[dict]) -> list[dict]:
         """Rerank retrieval results using Bayesian belief scores.
