@@ -33,6 +33,7 @@ from coupled_engine import CoupledEngine
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_engine(dim: int = 8) -> CoupledEngine:
     return CoupledEngine(dim=dim)
 
@@ -56,6 +57,7 @@ def _similar_vec(base: np.ndarray, noise: float = 0.1, seed: int = 0) -> np.ndar
 # ---------------------------------------------------------------------------
 # Test 1: Metadata envelope is populated
 # ---------------------------------------------------------------------------
+
 
 class TestMetadataEnvelope:
     """Verify that retrieval results include the full metadata envelope."""
@@ -108,6 +110,7 @@ class TestMetadataEnvelope:
 # Test 2: Temporal ordering formatter
 # ---------------------------------------------------------------------------
 
+
 class TestTemporalOrdering:
     """Verify the outgestion formatter sorts by recency and annotates."""
 
@@ -118,6 +121,7 @@ class TestTemporalOrdering:
 
         class MinimalAgent:
             """Stub that only has _format_outgestion."""
+
             def __init__(self, tc):
                 self.temporal_context = tc
                 # Bind the real method
@@ -160,10 +164,7 @@ class TestTemporalOrdering:
         agent = self._make_agent_minimal(temporal_context=True)
         # Need enough facts for the 1/3 split to produce tags
         chunks = [f"Fact {i}" for i in range(6)]
-        metadata = {
-            f"Fact {i}": {"recency": float(i * 100)}
-            for i in range(6)
-        }
+        metadata = {f"Fact {i}": {"recency": float(i * 100)} for i in range(6)}
         context, instructions = agent._format_outgestion(chunks, metadata)
         lines = context.split("\n\n")
 
@@ -202,6 +203,7 @@ class TestTemporalOrdering:
 # Test 3: Discriminative — temporal ordering resolves conflicts
 # ---------------------------------------------------------------------------
 
+
 class TestTemporalConflictResolution:
     """Discriminative test: does temporal ordering let a downstream consumer
     resolve fact conflicts that flat text cannot?
@@ -220,11 +222,9 @@ class TestTemporalConflictResolution:
         base_emb = _unit_vec(8, 0)
 
         # Older fact (recency=100): "Born in Lima"
-        e.store("Born in Lima", _similar_vec(base_emb, noise=0.02, seed=10),
-                recency=100.0)
+        e.store("Born in Lima", _similar_vec(base_emb, noise=0.02, seed=10), recency=100.0)
         # Newer fact (recency=500): "Born in Madrid" (updated info)
-        e.store("Born in Madrid", _similar_vec(base_emb, noise=0.02, seed=11),
-                recency=500.0)
+        e.store("Born in Madrid", _similar_vec(base_emb, noise=0.02, seed=11), recency=500.0)
         # Unrelated fact
         e.store("Studied at MIT", _unit_vec(8, 3), recency=300.0)
 
@@ -248,17 +248,14 @@ class TestTemporalConflictResolution:
         stub = StubAgent()
         stub._format_outgestion = HermesMemoryAgent._format_outgestion.__get__(stub)
 
-        temporal_context, instructions = stub._format_outgestion(
-            texts, metadata_by_key
-        )
+        temporal_context, instructions = stub._format_outgestion(texts, metadata_by_key)
 
         # The newer fact ("Born in Madrid", recency=500) should appear
         # AFTER the older fact ("Born in Lima", recency=100)
         lima_pos = temporal_context.find("Born in Lima")
         madrid_pos = temporal_context.find("Born in Madrid")
         assert lima_pos < madrid_pos, (
-            f"Newer fact should appear after older fact in temporal context. "
-            f"Lima@{lima_pos}, Madrid@{madrid_pos}"
+            f"Newer fact should appear after older fact in temporal context. Lima@{lima_pos}, Madrid@{madrid_pos}"
         )
 
         # Instructions should tell LLM to prefer newer
@@ -270,10 +267,10 @@ class TestTemporalConflictResolution:
         base_emb = _unit_vec(8, 0)
 
         # Store facts with recency, but different similarity to query
-        e.store("Born in Lima", _similar_vec(base_emb, noise=0.01, seed=20),
-                recency=100.0)  # older, slightly more similar
-        e.store("Born in Madrid", _similar_vec(base_emb, noise=0.08, seed=21),
-                recency=500.0)  # newer, less similar
+        e.store(
+            "Born in Lima", _similar_vec(base_emb, noise=0.01, seed=20), recency=100.0
+        )  # older, slightly more similar
+        e.store("Born in Madrid", _similar_vec(base_emb, noise=0.08, seed=21), recency=500.0)  # newer, less similar
 
         results = e.query_cooc_boost(base_emb, top_k=2)
         texts = [r["text"] for r in results]
@@ -288,9 +285,7 @@ class TestTemporalConflictResolution:
         stub = StubAgent()
         stub._format_outgestion = HermesMemoryAgent._format_outgestion.__get__(stub)
 
-        baseline_context, instructions = stub._format_outgestion(
-            texts, metadata_by_key
-        )
+        baseline_context, instructions = stub._format_outgestion(texts, metadata_by_key)
 
         # Baseline: no instructions, original order preserved
         assert instructions == ""
@@ -301,6 +296,7 @@ class TestTemporalConflictResolution:
 # ---------------------------------------------------------------------------
 # Test 4: End-to-end metadata flow
 # ---------------------------------------------------------------------------
+
 
 class TestMetadataFlow:
     """Verify metadata survives from store → query → outgestion formatter."""
@@ -342,8 +338,8 @@ class TestMetadataFlow:
 
         # Verify sorted by recency — strip fact number + temporal tags
         import re
-        lines = [re.sub(r'^\[fact \d+.*?\]\s*', '', l)
-                 for l in context.split("\n\n")]
+
+        lines = [re.sub(r"^\[fact \d+.*?\]\s*", "", l) for l in context.split("\n\n")]
 
         recency_order = []
         for line in lines:
@@ -355,9 +351,7 @@ class TestMetadataFlow:
 
         # Recency values should be monotonically increasing
         for i in range(len(recency_order) - 1):
-            assert recency_order[i] <= recency_order[i + 1], (
-                f"Recency not sorted: {recency_order}"
-            )
+            assert recency_order[i] <= recency_order[i + 1], f"Recency not sorted: {recency_order}"
 
         # Verify instructions present
         assert len(instructions) > 0
@@ -366,6 +360,7 @@ class TestMetadataFlow:
 # ---------------------------------------------------------------------------
 # Test 5: Contradiction detection
 # ---------------------------------------------------------------------------
+
 
 class TestSoftContradictionSurfacing:
     """Verify that high-similarity chunks with different recency values
@@ -376,9 +371,7 @@ class TestSoftContradictionSurfacing:
     as the primary resolution signal.
     """
 
-    def _make_agent_minimal(self, temporal_context=True,
-                            contradiction_context=True,
-                            contradiction_sim_threshold=0.85):
+    def _make_agent_minimal(self, temporal_context=True, contradiction_context=True, contradiction_sim_threshold=0.85):
         from mabench.hermes_agent import HermesMemoryAgent
 
         class MinimalAgent:
@@ -388,8 +381,7 @@ class TestSoftContradictionSurfacing:
                 self.contradiction_sim_threshold = cst
                 self._format_outgestion = HermesMemoryAgent._format_outgestion.__get__(self)
 
-        return MinimalAgent(temporal_context, contradiction_context,
-                            contradiction_sim_threshold)
+        return MinimalAgent(temporal_context, contradiction_context, contradiction_sim_threshold)
 
     def test_conflicting_facts_cross_referenced(self):
         """Two similar embeddings with different recency → both get CONFLICTS WITH."""
@@ -506,10 +498,8 @@ class TestSoftContradictionSurfacing:
         base_emb = _unit_vec(dim, 0)
 
         # Two conflicting facts about the same subject
-        e.store("Capital is Paris", _similar_vec(base_emb, noise=0.02, seed=60),
-                recency=100.0)
-        e.store("Capital is Berlin", _similar_vec(base_emb, noise=0.02, seed=61),
-                recency=500.0)
+        e.store("Capital is Paris", _similar_vec(base_emb, noise=0.02, seed=60), recency=100.0)
+        e.store("Capital is Berlin", _similar_vec(base_emb, noise=0.02, seed=61), recency=500.0)
         # Unrelated
         e.store("Population is 67M", _unit_vec(dim, 4), recency=300.0)
 
@@ -557,10 +547,7 @@ class TestSoftContradictionSurfacing:
         """All facts should have [fact N] numbering when temporal is enabled."""
         agent = self._make_agent_minimal(contradiction_context=False)
         chunks = [f"Fact {i}" for i in range(4)]
-        metadata = {
-            f"Fact {i}": {"recency": float(i * 100)}
-            for i in range(4)
-        }
+        metadata = {f"Fact {i}": {"recency": float(i * 100)} for i in range(4)}
         context, _ = agent._format_outgestion(chunks, metadata)
         lines = context.split("\n\n")
         for i, line in enumerate(lines):

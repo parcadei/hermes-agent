@@ -33,6 +33,7 @@ from mabench.belief import FactBelief, BeliefIndex
 # Helpers (reused from test_supersession.py)
 # ---------------------------------------------------------------------------
 
+
 def _unit_vec(dim: int, idx: int, noise: float = 0.05) -> np.ndarray:
     """Unit vector along axis `idx` with small noise."""
     v = np.zeros(dim, dtype=np.float64)
@@ -45,6 +46,7 @@ def _unit_vec(dim: int, idx: int, noise: float = 0.05) -> np.ndarray:
 @dataclass(frozen=True)
 class FakeFact:
     """Minimal SegmentedFact-like object for testing."""
+
     text: str
     triples: tuple
     entities: tuple = ()
@@ -58,6 +60,7 @@ class FakeFact:
 @dataclass(frozen=True)
 class FakeIngestionResult:
     """Minimal IngestionResult-like object for testing."""
+
     facts: list
     entity_graph: object = None
     n_sentences: int = 1
@@ -75,12 +78,14 @@ class FakeEntityGraph:
 @dataclass
 class FakeMemoryEntry:
     """Minimal memory store entry with a .text attribute."""
+
     text: str
 
 
 # ===========================================================================
 # Test 1: Layer 1 — Beta-Bernoulli unit tests
 # ===========================================================================
+
 
 class TestFactBelief:
     """Test the FactBelief dataclass."""
@@ -194,6 +199,7 @@ class TestBeliefIndexLayer1:
 # Test 2: Layer 2 — Belief propagation
 # ===========================================================================
 
+
 class TestBeliefPropagation:
     """Test Layer 2: entity-graph belief propagation."""
 
@@ -254,7 +260,9 @@ class TestBeliefPropagation:
         """Higher damping → larger penalty on connected facts."""
         for damping in [0.1, 0.5, 0.9]:
             idx = BeliefIndex(
-                prior_alpha=2.0, prior_beta=1.0, propagation_damping=damping,
+                prior_alpha=2.0,
+                prior_beta=1.0,
+                propagation_damping=damping,
             )
             idx.register_fact("degraded")
             idx.register_fact("connected")
@@ -308,6 +316,7 @@ class TestBeliefPropagation:
 # Test 3: Integration through _store()
 # ===========================================================================
 
+
 class TestBeliefStore:
     """Test belief updates through the _store method."""
 
@@ -346,8 +355,10 @@ class TestBeliefStore:
                 # Belief index
                 if belief:
                     agent._belief_index = BeliefIndex(
-                        prior_alpha=2.0, prior_beta=1.0,
-                        propagation_damping=0.3, hard_floor=0.05,
+                        prior_alpha=2.0,
+                        prior_beta=1.0,
+                        propagation_damping=0.3,
+                        hard_floor=0.05,
                     )
                 else:
                     agent._belief_index = None
@@ -364,7 +375,8 @@ class TestBeliefStore:
             entities=("Abbiati",),
         )
         agent._ingestion.segment.return_value = FakeIngestionResult(
-            facts=[fact], entity_graph=FakeEntityGraph(),
+            facts=[fact],
+            entity_graph=FakeEntityGraph(),
         )
         agent._scorer.embed_batch.return_value = [_unit_vec(8, 0)]
         agent._store("Abbiati plays football")
@@ -382,7 +394,8 @@ class TestBeliefStore:
             entities=("Abbiati",),
         )
         agent._ingestion.segment.return_value = FakeIngestionResult(
-            facts=[fact1], entity_graph=FakeEntityGraph(),
+            facts=[fact1],
+            entity_graph=FakeEntityGraph(),
         )
         agent._scorer.embed_batch.return_value = [_unit_vec(8, 0)]
         agent._store("Abbiati plays football")
@@ -394,14 +407,16 @@ class TestBeliefStore:
             entities=("Abbiati",),
         )
         agent._ingestion.segment.return_value = FakeIngestionResult(
-            facts=[fact2], entity_graph=FakeEntityGraph(),
+            facts=[fact2],
+            entity_graph=FakeEntityGraph(),
         )
         agent._scorer.embed_batch.return_value = [_unit_vec(8, 1)]
         agent._store("Abbiati plays basketball")
 
         # Old fact belief should be lower than new
-        assert agent._belief_index.score("Abbiati plays football") < \
-               agent._belief_index.score("Abbiati plays basketball")
+        assert agent._belief_index.score("Abbiati plays football") < agent._belief_index.score(
+            "Abbiati plays basketball"
+        )
 
     def test_belief_works_without_supersession(self):
         """Belief should detect conflicts even when --supersession is off."""
@@ -413,7 +428,8 @@ class TestBeliefStore:
             entities=("Abbiati",),
         )
         agent._ingestion.segment.return_value = FakeIngestionResult(
-            facts=[fact1], entity_graph=FakeEntityGraph(),
+            facts=[fact1],
+            entity_graph=FakeEntityGraph(),
         )
         agent._scorer.embed_batch.return_value = [_unit_vec(8, 0)]
         agent._store("Abbiati plays football")
@@ -424,7 +440,8 @@ class TestBeliefStore:
             entities=("Abbiati",),
         )
         agent._ingestion.segment.return_value = FakeIngestionResult(
-            facts=[fact2], entity_graph=FakeEntityGraph(),
+            facts=[fact2],
+            entity_graph=FakeEntityGraph(),
         )
         agent._scorer.embed_batch.return_value = [_unit_vec(8, 1)]
         agent._store("Abbiati plays basketball")
@@ -444,7 +461,8 @@ class TestBeliefStore:
             entities=("Hubbard", "Dianetics"),
         )
         agent._ingestion.segment.return_value = FakeIngestionResult(
-            facts=[fact1], entity_graph=FakeEntityGraph(),
+            facts=[fact1],
+            entity_graph=FakeEntityGraph(),
         )
         agent._scorer.embed_batch.return_value = [_unit_vec(8, 0)]
         agent._store("The author of Dianetics is Hubbard")
@@ -455,14 +473,14 @@ class TestBeliefStore:
             entities=("Aristotle", "Prior Analytics"),
         )
         agent._ingestion.segment.return_value = FakeIngestionResult(
-            facts=[fact2], entity_graph=FakeEntityGraph(),
+            facts=[fact2],
+            entity_graph=FakeEntityGraph(),
         )
         agent._scorer.embed_batch.return_value = [_unit_vec(8, 1)]
         agent._store("The author of Prior Analytics is Aristotle")
 
         # No conflict — different entities, both at default prior
-        assert agent._belief_index.score("The author of Dianetics is Hubbard") == \
-               pytest.approx(2.0 / 3.0)
+        assert agent._belief_index.score("The author of Dianetics is Hubbard") == pytest.approx(2.0 / 3.0)
 
     def test_propagation_fires_after_merge(self):
         """Propagation should run after entity_accumulator.merge in _store."""
@@ -479,7 +497,8 @@ class TestBeliefStore:
             entities=(),
         )
         agent._ingestion.segment.return_value = FakeIngestionResult(
-            facts=[fact], entity_graph=FakeEntityGraph(),
+            facts=[fact],
+            entity_graph=FakeEntityGraph(),
         )
         agent._scorer.embed_batch.return_value = [_unit_vec(8, 0)]
 
@@ -491,6 +510,7 @@ class TestBeliefStore:
 # ===========================================================================
 # Test 4: Retrieval reranking
 # ===========================================================================
+
 
 class TestBeliefRerank:
     """Test belief-based retrieval reranking."""
@@ -554,6 +574,7 @@ class TestBeliefRerank:
 # Test 5: Backward compatibility
 # ===========================================================================
 
+
 class TestBeliefBackwardCompat:
     """Test that disabling belief preserves existing behavior."""
 
@@ -593,7 +614,8 @@ class TestBeliefBackwardCompat:
             entities=("A",),
         )
         agent._ingestion.segment.return_value = FakeIngestionResult(
-            facts=[fact], entity_graph=FakeEntityGraph(),
+            facts=[fact],
+            entity_graph=FakeEntityGraph(),
         )
         agent._store("some text")
 
@@ -638,7 +660,8 @@ class TestBeliefBackwardCompat:
             entities=("Abbiati",),
         )
         agent._ingestion.segment.return_value = FakeIngestionResult(
-            facts=[fact1], entity_graph=FakeEntityGraph(),
+            facts=[fact1],
+            entity_graph=FakeEntityGraph(),
         )
         agent._store("Abbiati plays football")
 
@@ -648,7 +671,8 @@ class TestBeliefBackwardCompat:
             entities=("Abbiati",),
         )
         agent._ingestion.segment.return_value = FakeIngestionResult(
-            facts=[fact2], entity_graph=FakeEntityGraph(),
+            facts=[fact2],
+            entity_graph=FakeEntityGraph(),
         )
         agent._scorer.embed_batch.return_value = [_unit_vec(8, 1)]
         agent._store("Abbiati plays basketball")
@@ -663,13 +687,13 @@ class TestBeliefBackwardCompat:
 # Test 6: Serialization
 # ===========================================================================
 
+
 class TestBeliefSerialization:
     """Test state_dict / from_state_dict round-trip."""
 
     def test_round_trip(self):
         """Serialize and deserialize should preserve all state."""
-        idx = BeliefIndex(prior_alpha=3.0, prior_beta=2.0,
-                          propagation_damping=0.5, hard_floor=0.1)
+        idx = BeliefIndex(prior_alpha=3.0, prior_beta=2.0, propagation_damping=0.5, hard_floor=0.1)
         idx.register_fact("fact A")
         idx.register_fact("fact B")
         idx.on_conflict("fact A", "fact B")

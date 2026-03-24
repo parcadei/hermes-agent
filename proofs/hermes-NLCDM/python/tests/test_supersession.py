@@ -888,3 +888,413 @@ class TestQueryTimeCR:
 
         # No removal: entity gate blocks it (no shared NER)
         assert len(result) == 2
+
+    def test_cr_overfetch_increases_effective_k(self):
+        """With conflict_resolution + cr_overfetch=3, _retrieve_v2 should
+        pass top_k = retrieve_num * 3 to the retrieval method."""
+        from mabench.hermes_agent import HermesMemoryAgent
+
+        with patch("mabench.hermes_agent.IngestionPipeline"):
+            with patch("mabench.hermes_agent.EmbeddingRelevanceScorer"):
+                agent = HermesMemoryAgent.__new__(HermesMemoryAgent)
+                agent.conflict_resolution = True
+                agent._cr_overfetch = 3
+                agent.retrieve_num = 10
+                agent._belief_index = None
+                agent.cosine_dedup = False
+                agent.cooc_boost_retrieval = True
+                agent.transfer_retrieval = False
+                agent.coretrieval_retrieval = False
+                agent.ppr_retrieval = False
+                agent.bm25_weight = 0.0
+                agent.hybrid_retrieval = False
+                agent.associative_retrieval = False
+                agent.sparse_retrieval = False
+                agent.cooc_weight = 1.0
+                agent.dream_weight = 0.0
+                agent.cooc_gate_threshold = 0.0
+
+                agent._scorer = MagicMock()
+                agent._scorer.embed.return_value = _unit_vec(8, 0)
+                agent.coupled_engine = MagicMock()
+                agent.coupled_engine.query_cooc_boost.return_value = [
+                    {"index": i, "score": 0.9 - i * 0.01, "text": f"fact {i}"}
+                    for i in range(30)
+                ]
+
+        results = agent._retrieve_v2("test query")
+
+        # Should have called query_cooc_boost with top_k=30 (10 * 3)
+        call_kwargs = agent.coupled_engine.query_cooc_boost.call_args
+        assert call_kwargs.kwargs.get("top_k", call_kwargs[1].get("top_k")) == 30
+        assert len(results) == 30
+
+    def test_cr_overfetch_1_no_overfetch(self):
+        """With cr_overfetch=1, effective_k should equal retrieve_num."""
+        from mabench.hermes_agent import HermesMemoryAgent
+
+        with patch("mabench.hermes_agent.IngestionPipeline"):
+            with patch("mabench.hermes_agent.EmbeddingRelevanceScorer"):
+                agent = HermesMemoryAgent.__new__(HermesMemoryAgent)
+                agent.conflict_resolution = True
+                agent._cr_overfetch = 1
+                agent.retrieve_num = 10
+                agent._belief_index = None
+                agent.cosine_dedup = False
+                agent.cooc_boost_retrieval = True
+                agent.transfer_retrieval = False
+                agent.coretrieval_retrieval = False
+                agent.ppr_retrieval = False
+                agent.bm25_weight = 0.0
+                agent.hybrid_retrieval = False
+                agent.associative_retrieval = False
+                agent.sparse_retrieval = False
+                agent.cooc_weight = 1.0
+                agent.dream_weight = 0.0
+                agent.cooc_gate_threshold = 0.0
+
+                agent._scorer = MagicMock()
+                agent._scorer.embed.return_value = _unit_vec(8, 0)
+                agent.coupled_engine = MagicMock()
+                agent.coupled_engine.query_cooc_boost.return_value = [
+                    {"index": i, "score": 0.9, "text": f"fact {i}"}
+                    for i in range(10)
+                ]
+
+        results = agent._retrieve_v2("test query")
+
+        call_kwargs = agent.coupled_engine.query_cooc_boost.call_args
+        assert call_kwargs.kwargs.get("top_k", call_kwargs[1].get("top_k")) == 10
+
+
+class TestPairwiseCosineDedup:
+    """Tests for pairwise cosine dedup: near-duplicate facts → keep newest."""
+
+    def _make_agent_with_store(self, facts, threshold=0.95):
+        """Create a minimal agent with cosine_dedup enabled and a mock store."""
+        from mabench.hermes_agent import HermesMemoryAgent
+
+        with patch("mabench.hermes_agent.IngestionPipeline"):
+            with patch("mabench.hermes_agent.EmbeddingRelevanceScorer"):
+                agent = HermesMemoryAgent.__new__(HermesMemoryAgent)
+                agent.cosine_dedup = True
+                agent._cosine_dedup_threshold = threshold
+                agent.conflict_resolution = False
+
+                # Build mock memory store
+                store = []
+                for text, emb, recency in facts:
+                    m = MagicMock()
+                    m.text = text
+                    m.embedding = np.array(emb, dtype=np.float64)
+                    m.recency = recency
+                    store.append(m)
+
+                agent.coupled_engine = MagicMock()
+                agent.coupled_engine.memory_store = store
+        return agent
+
+    def test_identical_embeddings_keeps_newest(self):
+        """Two facts with identical embeddings → older one removed."""
+        emb = [1.0, 0.0, 0.0]
+        facts = [
+            ("Paris is capital", emb, 1.0),
+            ("Lyon is capital", emb, 2.0),
+        ]
+        agent = self._make_agent_with_store(facts, threshold=0.99)
+        result = agent._pairwise_cosine_dedup(["Paris is capital", "Lyon is capital"])
+        assert result == ["Lyon is capital"]
+
+    def test_orthogonal_embeddings_no_removal(self):
+        """Two facts with orthogonal embeddings → both kept."""
+        facts = [
+            ("Fact about France", [1.0, 0.0, 0.0], 1.0),
+            ("Fact about sports", [0.0, 1.0, 0.0], 2.0),
+        ]
+        agent = self._make_agent_with_store(facts, threshold=0.95)
+        result = agent._pairwise_cosine_dedup(
+            ["Fact about France", "Fact about sports"]
+        )
+        assert len(result) == 2
+
+    def test_threshold_boundary(self):
+        """Facts just below threshold → both kept."""
+        # cos(a, b) ≈ 0.94 (below 0.95 threshold)
+        emb_a = [0.94, 0.34, 0.0]
+        emb_b = [1.0, 0.0, 0.0]
+        facts = [
+            ("Fact A", emb_a, 1.0),
+            ("Fact B", emb_b, 2.0),
+        ]
+        agent = self._make_agent_with_store(facts, threshold=0.95)
+        result = agent._pairwise_cosine_dedup(["Fact A", "Fact B"])
+        assert len(result) == 2
+
+    def test_three_way_conflict_keeps_newest(self):
+        """Three near-identical facts → only newest survives."""
+        emb = [1.0, 0.0, 0.0]
+        facts = [
+            ("V1: capital is Paris", emb, 1.0),
+            ("V2: capital is Lyon", emb, 2.0),
+            ("V3: capital is Marseille", emb, 3.0),
+        ]
+        agent = self._make_agent_with_store(facts, threshold=0.99)
+        chunks = ["V1: capital is Paris", "V2: capital is Lyon", "V3: capital is Marseille"]
+        result = agent._pairwise_cosine_dedup(chunks)
+        assert result == ["V3: capital is Marseille"]
+
+    def test_mixed_conflicts_and_unrelated(self):
+        """Some facts conflict, others are unrelated → only conflicts deduped."""
+        facts = [
+            ("Abbiati plays football", [1.0, 0.0, 0.0], 1.0),
+            ("Abbiati plays hockey", [1.0, 0.01, 0.0], 2.0),  # near-identical
+            ("France capital is Paris", [0.0, 1.0, 0.0], 1.0),  # unrelated
+        ]
+        agent = self._make_agent_with_store(facts, threshold=0.95)
+        chunks = ["Abbiati plays football", "Abbiati plays hockey", "France capital is Paris"]
+        result = agent._pairwise_cosine_dedup(chunks)
+        assert "Abbiati plays hockey" in result  # newer kept
+        assert "France capital is Paris" in result  # unrelated kept
+        assert "Abbiati plays football" not in result  # older removed
+
+    def test_single_chunk_passthrough(self):
+        """Single chunk → returned as-is."""
+        facts = [("Only fact", [1.0, 0.0], 1.0)]
+        agent = self._make_agent_with_store(facts)
+        result = agent._pairwise_cosine_dedup(["Only fact"])
+        assert result == ["Only fact"]
+
+    def test_empty_chunks_passthrough(self):
+        """Empty list → returned as-is."""
+        agent = self._make_agent_with_store([])
+        result = agent._pairwise_cosine_dedup([])
+        assert result == []
+
+    def test_chunk_without_embedding_preserved(self):
+        """Chunks not found in memory store are preserved (e.g. V1 text recall)."""
+        facts = [
+            ("Known fact", [1.0, 0.0, 0.0], 1.0),
+        ]
+        agent = self._make_agent_with_store(facts)
+        result = agent._pairwise_cosine_dedup(["Known fact", "Unknown V1 fact"])
+        assert len(result) == 2
+
+
+class TestEntityTextSearch:
+    """Tests for GLiNER entity index search: find facts by entity lookup."""
+
+    def _make_agent_with_facts(self, fact_texts, entity_map=None):
+        """Create a mock agent with facts and a pre-built entity index.
+
+        entity_map: dict mapping entity_name.lower() → list of fact indices.
+            If None, builds a simple index from proper nouns in each fact.
+        """
+        from collections import defaultdict
+        from mabench.hermes_agent import HermesMemoryAgent
+        with patch("mabench.hermes_agent.IngestionPipeline"):
+            with patch("mabench.hermes_agent.EmbeddingRelevanceScorer"):
+                agent = HermesMemoryAgent.__new__(HermesMemoryAgent)
+                agent.entity_retrieval = True
+                agent._gliner_model = None  # GLiNER not available
+                agent._gliner_labels = ["person", "organization", "location", "country", "city"]
+                store = []
+                for text in fact_texts:
+                    m = MagicMock()
+                    m.text = text
+                    m.recency = 1.0
+                    store.append(m)
+                agent.coupled_engine = MagicMock()
+                agent.coupled_engine.memory_store = store
+
+                # Build entity index
+                agent._gliner_entity_index = defaultdict(set)
+                if entity_map:
+                    for ent, indices in entity_map.items():
+                        agent._gliner_entity_index[ent.lower()] = set(indices)
+        return agent
+
+    def test_finds_exact_entity(self):
+        """Sub-query about 'Christian Abbiati' finds facts mentioning that entity."""
+        agent = self._make_agent_with_facts(
+            [
+                "Esteban Cambiasso is associated with the sport of cricket.",
+                "Christian Abbiati is associated with the sport of basketball.",
+                "Marco Belinelli is associated with the sport of football.",
+            ],
+            entity_map={
+                "esteban cambiasso": [0], "cricket": [0],
+                "christian abbiati": [1], "basketball": [1],
+                "marco belinelli": [2], "football": [2],
+            },
+        )
+        results = agent._entity_text_search("What sport did Christian Abbiati play?")
+        assert len(results) >= 1
+        assert "Christian Abbiati" in results[0]["text"]
+
+    def test_finds_multiword_entity(self):
+        """Finds facts about multi-word entities like 'Measure for Measure'."""
+        agent = self._make_agent_with_facts(
+            [
+                'The author of Measure for Measure is Terrance Dicks.',
+                'The author of Romeo and Juliet is William Shakespeare.',
+                'The author of The Dark Knight Returns is Frank Miller.',
+            ],
+            entity_map={
+                "measure for measure": [0], "terrance dicks": [0],
+                "romeo and juliet": [1], "william shakespeare": [1],
+                "the dark knight returns": [2], "frank miller": [2],
+            },
+        )
+        # Mock entity extraction to simulate GLiNER output
+        agent._extract_query_entities = lambda q: ["Measure for Measure"]
+        results = agent._entity_text_search("What is the author of Measure for Measure?")
+        assert len(results) >= 1
+        assert "Measure for Measure" in results[0]["text"]
+
+    def test_returns_empty_for_no_match(self):
+        """Returns empty when no facts match the entity."""
+        agent = self._make_agent_with_facts(
+            [
+                "Paris is the capital of France.",
+                "Berlin is the capital of Germany.",
+            ],
+            entity_map={
+                "paris": [0], "france": [0],
+                "berlin": [1], "germany": [1],
+            },
+        )
+        results = agent._entity_text_search("What is the capital of Atlantis?")
+        assert len(results) == 0
+
+    def test_ranks_by_match_count(self):
+        """Facts matching more entities rank higher."""
+        agent = self._make_agent_with_facts(
+            [
+                "CBS is a broadcasting company.",
+                "The CEO of CBS Corporation is John Smith.",
+                "NBC is a broadcasting company.",
+            ],
+            entity_map={
+                "cbs": [0, 1],
+                "cbs corporation": [1],
+                "john smith": [1],
+                "nbc": [2],
+            },
+        )
+        # Mock entity extraction to simulate GLiNER output
+        agent._extract_query_entities = lambda q: ["CBS", "CBS Corporation"]
+        results = agent._entity_text_search(
+            "Who is the Chief Executive Officer of CBS Corporation?"
+        )
+        # Fact 1 matches both "CBS" and "CBS Corporation" → score 2
+        # Fact 0 matches only "CBS" → score 1
+        assert len(results) >= 2
+        assert "CBS Corporation" in results[0]["text"]
+
+    def test_case_insensitive(self):
+        """Entity index lookup is case-insensitive."""
+        agent = self._make_agent_with_facts(
+            [
+                "The author of Dune is Frank Herbert.",
+            ],
+            entity_map={"dune": [0], "frank herbert": [0]},
+        )
+        results = agent._entity_text_search("Who wrote Dune?")
+        assert len(results) >= 1
+
+    def test_result_format(self):
+        """Results have the expected structure."""
+        agent = self._make_agent_with_facts(
+            [
+                "Karl Lueger is a citizen of Austria.",
+            ],
+            entity_map={"karl lueger": [0], "austria": [0]},
+        )
+        results = agent._entity_text_search("What is the country of citizenship of Karl Lueger?")
+        assert len(results) == 1
+        r = results[0]
+        assert "text" in r
+        assert "score" in r
+        assert "source" in r
+        assert r["source"] == "entity_index"
+
+
+class TestEntityGraphExpand:
+    """Tests for entity co-mention graph expansion."""
+
+    def _make_agent(self, fact_texts, entity_map):
+        from collections import defaultdict
+        from mabench.hermes_agent import HermesMemoryAgent
+        with patch("mabench.hermes_agent.IngestionPipeline"):
+            with patch("mabench.hermes_agent.EmbeddingRelevanceScorer"):
+                agent = HermesMemoryAgent.__new__(HermesMemoryAgent)
+                store = []
+                for text in fact_texts:
+                    m = MagicMock()
+                    m.text = text
+                    m.recency = 1.0
+                    store.append(m)
+                agent.coupled_engine = MagicMock()
+                agent.coupled_engine.memory_store = store
+                agent._gliner_entity_index = defaultdict(set)
+                for ent, indices in entity_map.items():
+                    agent._gliner_entity_index[ent.lower()] = set(indices)
+        return agent
+
+    def test_bridges_via_shared_entity(self):
+        """Finds facts sharing an entity with seed facts."""
+        agent = self._make_agent(
+            [
+                "Christian Abbiati plays basketball.",     # 0
+                "Basketball was created in USA.",          # 1
+                "Marco Belinelli plays football.",         # 2
+            ],
+            entity_map={
+                "christian abbiati": [0],
+                "basketball": [0, 1],
+                "usa": [1],
+                "marco belinelli": [2],
+                "football": [2],
+            },
+        )
+        results = agent._entity_graph_expand(
+            ["Christian Abbiati plays basketball."], top_k=5,
+        )
+        # Should find fact 1 (shares "basketball" entity) but not fact 2
+        assert len(results) >= 1
+        assert any("USA" in r["text"] for r in results)
+        assert not any("Belinelli" in r["text"] for r in results)
+
+    def test_returns_empty_when_no_neighbors(self):
+        """Returns empty when seed facts have no shared entities."""
+        agent = self._make_agent(
+            [
+                "Paris is the capital of France.",
+                "Berlin is the capital of Germany.",
+            ],
+            entity_map={
+                "paris": [0], "france": [0],
+                "berlin": [1], "germany": [1],
+            },
+        )
+        results = agent._entity_graph_expand(
+            ["Paris is the capital of France."], top_k=5,
+        )
+        # No other facts share "paris" or "france"
+        assert len(results) == 0
+
+    def test_excludes_seed_facts(self):
+        """Seed facts are not included in expansion results."""
+        agent = self._make_agent(
+            [
+                "X plays basketball.",
+                "Basketball was created in USA.",
+            ],
+            entity_map={
+                "x": [0], "basketball": [0, 1], "usa": [1],
+            },
+        )
+        results = agent._entity_graph_expand(
+            ["X plays basketball."], top_k=5,
+        )
+        assert all(r["text"] != "X plays basketball." for r in results)

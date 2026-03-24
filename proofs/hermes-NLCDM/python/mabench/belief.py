@@ -33,6 +33,7 @@ class FactBelief:
     alpha: confirming evidence count (pseudo-count).
     beta:  contradicting evidence count (pseudo-count).
     """
+
     alpha: float
     beta: float
 
@@ -114,7 +115,7 @@ class BeliefIndex:
         # Build reverse lookup: fact_text → set of fact indices
         text_to_indices: dict[str, set[int]] = {}
         for idx, entry in enumerate(memory_store):
-            text = entry.text if hasattr(entry, 'text') else str(entry)
+            text = entry.text if hasattr(entry, "text") else str(entry)
             text_to_indices.setdefault(text, set()).add(idx)
 
         # Find degraded facts (P < 0.5)
@@ -128,8 +129,8 @@ class BeliefIndex:
 
         # For each degraded fact, find connected facts via entity graph
         # and penalize them
-        fact_to_entities = getattr(entity_accumulator, 'fact_to_entities', {})
-        entity_to_facts = getattr(entity_accumulator, 'entity_to_facts', {})
+        fact_to_entities = getattr(entity_accumulator, "fact_to_entities", {})
+        entity_to_facts = getattr(entity_accumulator, "entity_to_facts", {})
 
         for degraded_text, p_degraded in degraded_texts:
             # Find indices for this degraded fact
@@ -157,11 +158,7 @@ class BeliefIndex:
             for conn_idx in connected_indices:
                 if conn_idx < len(memory_store):
                     conn_entry = memory_store[conn_idx]
-                    conn_text = (
-                        conn_entry.text
-                        if hasattr(conn_entry, 'text')
-                        else str(conn_entry)
-                    )
+                    conn_text = conn_entry.text if hasattr(conn_entry, "text") else str(conn_entry)
                     if conn_text in self._beliefs:
                         self._beliefs[conn_text].beta += penalty
 
@@ -186,10 +183,7 @@ class BeliefIndex:
             "prior_beta": self._prior_beta,
             "propagation_damping": self._propagation_damping,
             "hard_floor": self._hard_floor,
-            "beliefs": {
-                text: {"alpha": b.alpha, "beta": b.beta}
-                for text, b in self._beliefs.items()
-            },
+            "beliefs": {text: {"alpha": b.alpha, "beta": b.beta} for text, b in self._beliefs.items()},
         }
 
     @classmethod

@@ -27,7 +27,7 @@ _HERMES_MEMORY = _NLCDM_PYTHON.parent.parent / "hermes-memory" / "python"
 sys.path.insert(0, str(_NLCDM_PYTHON))
 sys.path.insert(0, str(_HERMES_MEMORY))
 
-import faiss  # noqa: E402 (must come after path setup)
+faiss = pytest.importorskip("faiss", reason="faiss-cpu not installed")  # noqa: E402
 from coupled_engine import CoupledEngine  # noqa: E402
 from hermes_memory.contradiction import (  # noqa: E402
     ContradictionConfig,

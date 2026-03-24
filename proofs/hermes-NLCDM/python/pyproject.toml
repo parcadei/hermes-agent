@@ -10,9 +10,52 @@ dependencies = [
     "pytest>=7.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.4",
+    "mypy>=1.10",
+    "vulture>=2.11",
+    "deptry>=0.16",
+    "pytest-cov>=4.0",
+    "pytest-timeout>=2.2",
+    "pytest-rerunfailures>=13.0",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --tb=short"
+addopts = "-q --tb=short --cov=mabench --cov-fail-under=80 --cov-report=term-missing --durations=10 --reruns=2"
+timeout = 300
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests requiring GPU (deselect with '-m \"not gpu\"')",
 ]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C901"]
+ignore = ["E501", "E402", "F541"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.isort]
+known-first-party = ["mabench"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.vulture]
+min_confidence = 80
+paths = ["mabench", "tests"]
+
+[tool.deptry]
+ignore_notebooks = true

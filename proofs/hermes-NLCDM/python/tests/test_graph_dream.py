@@ -48,6 +48,7 @@ from dream_ops import (
 # Helpers: controlled embedding generation
 # ---------------------------------------------------------------------------
 
+
 def _make_topic_embedding(topic_id: int, dim: int = 128, rng=None) -> np.ndarray:
     """Create a unit embedding anchored to a topic.
 
@@ -155,9 +156,7 @@ def bridging_kb():
     # Indices 7, 8, 9 = domain B
 
     # --- Add distractor sessions (noise, unrelated topics) ---
-    distractor_topics = [
-        _make_topic_embedding(10 + i, DIM) for i in range(5)
-    ]
+    distractor_topics = [_make_topic_embedding(10 + i, DIM) for i in range(5)]
     for dt in distractor_topics:
         for _ in range(4):
             emb = _perturb(dt, noise=0.15, rng=rng)
@@ -183,6 +182,7 @@ def bridging_kb():
 # ---------------------------------------------------------------------------
 # Helper: transitive closure on co-occurrence graph
 # ---------------------------------------------------------------------------
+
 
 def add_transitive_closure(cooc: dict, discount: float = 0.5, min_weight: float = 0.01):
     """Add 2-hop transitive edges to co-occurrence graph.
@@ -218,6 +218,7 @@ def add_transitive_closure(cooc: dict, discount: float = 0.5, min_weight: float 
 # Test 1: BASELINE — co-occurrence graph as-is
 # ---------------------------------------------------------------------------
 
+
 class TestGraphDreamDiscriminative:
     """Discriminative tests for graph-level vs embedding-level dream."""
 
@@ -233,7 +234,9 @@ class TestGraphDreamDiscriminative:
         engine, query_emb, bridge_indices, all_relevant = bridging_kb
 
         results = engine.query_cooc_boost(
-            query_emb, top_k=10, cooc_weight=0.3,
+            query_emb,
+            top_k=10,
+            cooc_weight=0.3,
         )
         retrieved_indices = {r["index"] for r in results}
 
@@ -252,8 +255,7 @@ class TestGraphDreamDiscriminative:
         for i in [0, 1, 2]:
             for j in [5, 6]:
                 assert j not in cooc.get(i, {}), (
-                    f"Baseline cooc should NOT have edge {i}→{j} "
-                    f"(cross-session without shared facts)"
+                    f"Baseline cooc should NOT have edge {i}→{j} (cross-session without shared facts)"
                 )
 
     def test_graph_dream_adds_transitive_bridges(self, bridging_kb):
@@ -333,8 +335,7 @@ class TestGraphDreamDiscriminative:
             # At minimum, A should now reach bridge_AB
             bridge_ab_reachable = reachable & {3, 4}
             assert len(bridge_ab_reachable) > 0, (
-                f"After replay, domain A fact {i} should reach bridge AB facts. "
-                f"Reachable: {reachable}"
+                f"After replay, domain A fact {i} should reach bridge AB facts. Reachable: {reachable}"
             )
 
     def test_graph_dream_improves_retrieval(self, bridging_kb):
@@ -349,7 +350,9 @@ class TestGraphDreamDiscriminative:
 
         # --- Baseline retrieval ---
         baseline_results = engine.query_cooc_boost(
-            query_emb, top_k=10, cooc_weight=0.3,
+            query_emb,
+            top_k=10,
+            cooc_weight=0.3,
         )
         baseline_retrieved = {r["index"] for r in baseline_results}
         baseline_bridge_recall = len(baseline_retrieved & bridge_indices)
@@ -373,7 +376,9 @@ class TestGraphDreamDiscriminative:
 
         # --- Graph-dream retrieval ---
         graph_results = engine.query_cooc_boost(
-            query_emb, top_k=10, cooc_weight=0.3,
+            query_emb,
+            top_k=10,
+            cooc_weight=0.3,
         )
         graph_retrieved = {r["index"] for r in graph_results}
         graph_bridge_recall = len(graph_retrieved & bridge_indices)
@@ -388,8 +393,7 @@ class TestGraphDreamDiscriminative:
             f"Graph retrieved: {graph_retrieved & bridge_indices}"
         )
         assert graph_relevant_recall >= baseline_relevant_recall, (
-            f"Graph dream total relevant ({graph_relevant_recall}) should be >= "
-            f"baseline ({baseline_relevant_recall})"
+            f"Graph dream total relevant ({graph_relevant_recall}) should be >= baseline ({baseline_relevant_recall})"
         )
 
     def test_embed_dream_hurts_bridge_retrieval(self, bridging_kb):
@@ -403,7 +407,9 @@ class TestGraphDreamDiscriminative:
 
         # --- Baseline retrieval ---
         baseline_results = engine.query_cooc_boost(
-            query_emb, top_k=10, cooc_weight=0.3,
+            query_emb,
+            top_k=10,
+            cooc_weight=0.3,
         )
         baseline_retrieved = {r["index"] for r in baseline_results}
         baseline_relevant = len(baseline_retrieved & all_relevant)
@@ -428,9 +434,7 @@ class TestGraphDreamDiscriminative:
         drift_6 = 1.0 - _cosine(embs[6], centroid_bc)
 
         # Even merging 2 bridge facts produces drift
-        assert drift_3 > 0.001 or drift_4 > 0.001, (
-            "Merge should produce some drift for bridge AB facts"
-        )
+        assert drift_3 > 0.001 or drift_4 > 0.001, "Merge should produce some drift for bridge AB facts"
 
         # Replace bridge embeddings with centroids (simulating merge)
         engine.memory_store[3].embedding = centroid_ab
@@ -441,7 +445,9 @@ class TestGraphDreamDiscriminative:
 
         # --- Post-merge retrieval ---
         merge_results = engine.query_cooc_boost(
-            query_emb, top_k=10, cooc_weight=0.3,
+            query_emb,
+            top_k=10,
+            cooc_weight=0.3,
         )
         merge_retrieved = {r["index"] for r in merge_results}
         merge_relevant = len(merge_retrieved & all_relevant)
@@ -480,9 +486,7 @@ class TestGraphDreamDiscriminative:
         engine, query_emb, bridge_indices, all_relevant = bridging_kb
 
         n_before = engine.n_memories
-        cooc_before = {
-            i: dict(neighbors) for i, neighbors in engine._co_occurrence.items()
-        }
+        cooc_before = {i: dict(neighbors) for i, neighbors in engine._co_occurrence.items()}
 
         # Apply graph dream: replay (cross-session discovery) + transitive closure
         embs = engine._embeddings_matrix()
@@ -510,16 +514,13 @@ class TestGraphDreamDiscriminative:
             for j, w in neighbors.items():
                 new_w = engine._co_occurrence.get(i, {}).get(j, 0.0)
                 assert new_w >= w - 1e-9, (
-                    f"Edge {i}→{j} weight decreased: {w:.4f} → {new_w:.4f}. "
-                    f"Graph dream must be monotonic."
+                    f"Edge {i}→{j} weight decreased: {w:.4f} → {new_w:.4f}. Graph dream must be monotonic."
                 )
 
         # INVARIANT 3: new edges exist (dream did something)
         total_before = sum(len(n) for n in cooc_before.values())
         total_after = sum(len(n) for n in engine._co_occurrence.values())
-        assert total_after > total_before, (
-            f"Graph dream should add edges: {total_before} → {total_after}"
-        )
+        assert total_after > total_before, f"Graph dream should add edges: {total_before} → {total_after}"
 
     def test_edge_prune_only_removes_weak_edges(self, bridging_kb):
         """Edge pruning removes low-weight edges but preserves strong ones.
@@ -570,9 +571,7 @@ class TestGraphDreamDiscriminative:
 
         # And strong intra-session edges should survive
         # Session 1 (0,1,2) have session_weight=1/3 ≈ 0.33, * 0.8 = 0.27 > 0.1
-        assert 1 in engine._co_occurrence.get(0, {}), (
-            "Strong intra-session edge 0→1 should survive edge prune"
-        )
+        assert 1 in engine._co_occurrence.get(0, {}), "Strong intra-session edge 0→1 should survive edge prune"
 
 
 class TestTransitiveClosureProperties:
@@ -667,6 +666,7 @@ class TestTransitiveClosureProperties:
             2: {1: 0.6},
         }
         import copy
+
         cooc_prod = copy.deepcopy(cooc_test)
 
         added_test = add_transitive_closure(cooc_test, discount=0.5)
@@ -763,8 +763,7 @@ class TestCoupledEngineGraphDream:
         after_bridges = {r["index"] for r in after} & bridge_indices
 
         assert len(after_bridges) >= len(baseline_bridges), (
-            f"Graph dream should not reduce bridge recall: "
-            f"{len(baseline_bridges)} -> {len(after_bridges)}"
+            f"Graph dream should not reduce bridge recall: {len(baseline_bridges)} -> {len(after_bridges)}"
         )
 
 
@@ -812,8 +811,7 @@ class TestDualGraphImmutability:
             f"Graph dream must write to _dream_edges, not _co_occurrence."
         )
         assert cooc_before == cooc_after, (
-            "_co_occurrence was mutated by graph dream. "
-            "Dream edges must go to _dream_edges."
+            "_co_occurrence was mutated by graph dream. Dream edges must go to _dream_edges."
         )
 
     def test_dream_edges_populated_after_graph_dream(self, bridging_kb):
@@ -821,9 +819,7 @@ class TestDualGraphImmutability:
         engine, query_emb, bridge_indices, all_relevant = bridging_kb
 
         # Before dream: _dream_edges should be empty
-        assert len(engine._dream_edges) == 0, (
-            "_dream_edges should be empty before dream"
-        )
+        assert len(engine._dream_edges) == 0, "_dream_edges should be empty before dream"
 
         params = GraphDreamParams(replay_threshold=0.20)
         engine.dream(graph_mode=True, graph_dream_params=params)
@@ -831,8 +827,7 @@ class TestDualGraphImmutability:
         # After dream: _dream_edges should have cross-session edges
         dream_edge_count = sum(len(n) for n in engine._dream_edges.values())
         assert dream_edge_count > 0, (
-            "_dream_edges should be populated after graph dream. "
-            f"Got {dream_edge_count} edges."
+            f"_dream_edges should be populated after graph dream. Got {dream_edge_count} edges."
         )
 
     def test_dream_edges_are_cross_session_only(self, bridging_kb):
@@ -874,8 +869,7 @@ class TestTopKSparsification:
 
         for i, neighbors in engine._dream_edges.items():
             assert len(neighbors) <= top_k, (
-                f"Node {i} has {len(neighbors)} dream neighbors, "
-                f"but replay_top_k={top_k}. Sparsification failed."
+                f"Node {i} has {len(neighbors)} dream neighbors, but replay_top_k={top_k}. Sparsification failed."
             )
 
     def test_top_k_selects_strongest_neighbors(self, bridging_kb):
@@ -919,9 +913,7 @@ class TestTopKSparsification:
     def test_top_k_default_is_5(self):
         """GraphDreamParams.replay_top_k should default to 5."""
         params = GraphDreamParams()
-        assert params.replay_top_k == 5, (
-            f"Default replay_top_k should be 5, got {params.replay_top_k}"
-        )
+        assert params.replay_top_k == 5, f"Default replay_top_k should be 5, got {params.replay_top_k}"
 
 
 class TestDreamBoostSeparateSignal:
@@ -943,7 +935,9 @@ class TestDreamBoostSeparateSignal:
 
         # Baseline: no dream, just cooc_boost
         baseline = engine.query_cooc_boost(
-            query_emb, top_k=10, cooc_weight=0.3,
+            query_emb,
+            top_k=10,
+            cooc_weight=0.3,
         )
         baseline_indices = [r["index"] for r in baseline]
         baseline_bridges = set(baseline_indices) & bridge_indices
@@ -954,7 +948,10 @@ class TestDreamBoostSeparateSignal:
 
         # Query with dream_boost enabled
         after = engine.query_cooc_boost(
-            query_emb, top_k=10, cooc_weight=0.3, dream_weight=0.3,
+            query_emb,
+            top_k=10,
+            cooc_weight=0.3,
+            dream_weight=0.3,
         )
         after_indices = [r["index"] for r in after]
         after_bridges = set(after_indices) & bridge_indices
@@ -976,7 +973,9 @@ class TestDreamBoostSeparateSignal:
 
         # Get baseline scores before dream
         baseline = engine.query_cooc_boost(
-            query_emb, top_k=10, cooc_weight=0.3,
+            query_emb,
+            top_k=10,
+            cooc_weight=0.3,
         )
         baseline_scores = {r["index"]: r["score"] for r in baseline}
 
@@ -987,7 +986,10 @@ class TestDreamBoostSeparateSignal:
 
         # Query with dream_weight=0.0 — should match baseline exactly
         silent = engine.query_cooc_boost(
-            query_emb, top_k=10, cooc_weight=0.3, dream_weight=0.0,
+            query_emb,
+            top_k=10,
+            cooc_weight=0.3,
+            dream_weight=0.0,
         )
         silent_scores = {r["index"]: r["score"] for r in silent}
 

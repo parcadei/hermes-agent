@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Query-time conflict resolution ablation: 4 configs from 1 ingestion.
+"""Query-time conflict resolution ablation from 1 ingestion.
 
 All configs share the same ingested state (cooc+triadic+decompose+chunk512).
 Only the query-time CR variant differs. Ingestion happens ONCE per context,
@@ -11,10 +11,9 @@ Usage (on RunPod):
         --chunk_size 512
 
 Configs:
-    1. baseline:         No CR (expect SubEM=22)
-    2. cr_acl:           Query-time CR with acl-aware copular extraction
-    3. cr_acl_perhop:    CR + per-hop dedup (before each intermediate answer)
-    4. cr_entity_gate:   CR + per-hop + NER entity overlap required
+    1. cr_perhop_of1:    Per-hop CR, no overfetch (previous winner, SubEM=25)
+    2. cr_perhop_of3:    Per-hop CR, overfetch 3x (fetch 30, CR filters to 10)
+    3. cr_perhop_of5:    Per-hop CR, overfetch 5x (fetch 50, CR filters to 10)
 """
 
 from __future__ import annotations
@@ -45,6 +44,7 @@ sys.path.insert(0, str(_NLCDM_PYTHON))
 from conversation_creator import ConversationCreator
 from dream_ops import DreamParams
 from mabench.hermes_agent import HermesMemoryAgent
+from mabench.eval_cache import cache_dir, save_context, load_context, list_caches
 from utils.eval_other_utils import metrics_summarization
 
 dotenv.load_dotenv(_NLCDM_PYTHON / ".env")
@@ -52,28 +52,25 @@ dotenv.load_dotenv(_NLCDM_PYTHON / ".env")
 
 CONFIGS = [
     {
-        "name": "baseline",
-        "conflict_resolution": False,
-        "cr_per_hop": False,
-        "cr_entity_gate": False,
-    },
-    {
-        "name": "cr_acl",
-        "conflict_resolution": True,
-        "cr_per_hop": False,
-        "cr_entity_gate": False,
-    },
-    {
-        "name": "cr_acl_perhop",
+        "name": "cr_perhop_of1",
         "conflict_resolution": True,
         "cr_per_hop": True,
         "cr_entity_gate": False,
+        "cr_overfetch": 1,
     },
     {
-        "name": "cr_entity_gate",
+        "name": "cr_perhop_of3",
         "conflict_resolution": True,
         "cr_per_hop": True,
-        "cr_entity_gate": True,
+        "cr_entity_gate": False,
+        "cr_overfetch": 3,
+    },
+    {
+        "name": "cr_perhop_of5",
+        "conflict_resolution": True,
+        "cr_per_hop": True,
+        "cr_entity_gate": False,
+        "cr_overfetch": 5,
     },
 ]
 
@@ -129,6 +126,7 @@ def _apply_cr_flags(agent: HermesMemoryAgent, cfg: dict) -> None:
     agent.conflict_resolution = cfg["conflict_resolution"]
     agent._cr_per_hop = cfg["cr_per_hop"]
     agent._cr_entity_gate = cfg["cr_entity_gate"]
+    agent._cr_overfetch = cfg.get("cr_overfetch", 3)
 
 
 def main():
@@ -139,7 +137,24 @@ def main():
     parser.add_argument("--chunk_size", type=int, default=512)
     parser.add_argument("--configs", type=str, default="all",
                         help="Comma-separated config names or 'all'")
+    parser.add_argument("--no_cache", action="store_true",
+                        help="Disable ingestion cache (always re-ingest)")
+    parser.add_argument("--refresh_cache", action="store_true",
+                        help="Re-ingest and overwrite cached state")
+    parser.add_argument("--cache_label", type=str, default=None,
+                        help="Custom label for ingestion cache directory")
+    parser.add_argument("--list_caches", action="store_true",
+                        help="List available ingestion caches and exit")
     args = parser.parse_args()
+
+    # Handle --list_caches
+    if args.list_caches:
+        for c in list_caches():
+            print(f"  {c['name']}:")
+            for ctx in c["contexts"]:
+                print(f"    {ctx['context']}: {ctx['n_memories']} memories, "
+                      f"{ctx['size_mb']} MB, saved {ctx['saved_at']}")
+        return
 
     with open(args.dataset_config) as f:
         dataset_config = yaml.safe_load(f)
@@ -182,6 +197,18 @@ def main():
     print(f"Total queries: {n_queries}")
     print(f"Configs: {[c['name'] for c in selected]}")
     print(f"Strategy: ingest once per context, query {len(selected)}x")
+
+    # Ingestion cache setup
+    use_cache = not args.no_cache
+    cache_path = None
+    if use_cache:
+        effective_cs = dataset_config.get("chunk_size", 0)
+        cache_path = cache_dir(dataset_config["sub_dataset"], effective_cs, args.cache_label)
+        print(f"Ingestion cache: {cache_path}")
+        if args.refresh_cache:
+            print("  (refresh mode: will re-ingest and overwrite)")
+    else:
+        print("Ingestion cache: disabled")
     print()
 
     # Create ONE agent — CR flags are irrelevant during ingestion
@@ -207,12 +234,20 @@ def main():
             desc="Contexts",
         )
     ):
-        # ── INGEST ONCE ──────────────────────────────────────────
+        # ── INGEST (or load from cache) ───────────────────────────
         agent.reset()
-        print(f"\n--- Context {context_idx}: memorizing {len(chunks)} chunks ---")
-        for chunk in tqdm(chunks, desc="Memorizing", leave=False):
-            agent.send_message(chunk, memorizing=True)
-        agent._scorer.save_disk_cache()
+        cached = False
+        if use_cache and not args.refresh_cache:
+            cached = load_context(agent, cache_path, context_idx)
+
+        if not cached:
+            print(f"\n--- Context {context_idx}: memorizing {len(chunks)} chunks ---")
+            for chunk in tqdm(chunks, desc="Memorizing", leave=False):
+                agent.send_message(chunk, memorizing=True)
+            agent._scorer.save_disk_cache()
+
+            if use_cache:
+                save_context(agent, cache_path, context_idx)
 
         # Snapshot post-ingestion state (coupled_engine + triadic + belief)
         snap = _snapshot_agent_state(agent)
@@ -267,6 +302,7 @@ def main():
             "conflict_resolution": cfg["conflict_resolution"],
             "cr_per_hop": cfg["cr_per_hop"],
             "cr_entity_gate": cfg["cr_entity_gate"],
+            "cr_overfetch": cfg.get("cr_overfetch", 3),
             "dataset_config": dataset_config,
             "data": config_results[cfg_name],
             "metrics": dict(config_metrics[cfg_name]),

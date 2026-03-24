@@ -10,18 +10,31 @@ __pycache__/
 .hypothesis/
 .coverage
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Secrets
+.env
+.env.*
+!.env.example
+!**/.env.example
 
 # Large data files
 embeddings_170k.npy
 *.npy
+sentences_170k.txt
 
 # OS
 .DS_Store
 
 # IDE
 .scout/
-.claude/
+**/.claude/
+!/.claude/
+/.claude/*
+!/.claude/skills/
+.idea/
+.vscode/
 
 # Coverage
-.coverage
 htmlcov/
