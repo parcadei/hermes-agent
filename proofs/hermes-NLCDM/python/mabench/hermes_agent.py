@@ -532,8 +532,11 @@ class HermesMemoryAgent:
         cosine_dedup: bool = False,
         cosine_dedup_threshold: float = 0.95,
         entity_retrieval: bool = False,
+        entity_first: bool = False,
+        entity_first_aggressive: bool = False,
         bm25_hops: bool = False,
         chain_cache: bool = False,
+        rebel_kg: bool = False,
     ):
         self.model = model
         self.dedup_threshold = dedup_threshold
@@ -579,10 +582,13 @@ class HermesMemoryAgent:
         self.cosine_dedup = cosine_dedup
         self._cosine_dedup_threshold = cosine_dedup_threshold
         self.entity_retrieval = entity_retrieval
+        self.entity_first = entity_first
+        self.entity_first_aggressive = entity_first_aggressive
         self.bm25_hops = bm25_hops
         self.chain_cache = chain_cache
         self._bm25_index = BM25Index() if bm25_hops else None
         self._chain_cache = ChainCache(similarity_threshold=0.95) if chain_cache else None
+        self.rebel_kg = rebel_kg
         self._belief_overfetch = belief_overfetch
         self._belief_hard_floor = belief_hard_floor
         self._belief_propagation_damping = belief_propagation_damping
@@ -687,6 +693,20 @@ class HermesMemoryAgent:
         # Fact index = position in coupled_engine.memory_store.
         self._gliner_entity_index: dict[str, set[int]] = defaultdict(set)
 
+        # REBEL KG: dict-of-dicts knowledge graph built at ingest time.
+        # Forward: kg[subject_lower][relation_lower] = [original-case objects]
+        # Reverse: kg_rev[object_lower][relation_lower] = [original-case subjects]
+        # Query-time: graph hop bypasses retrieval+LLM for structured lookups.
+        if rebel_kg:
+            self._rebel_kg: dict[str, dict[str, list[str]]] = {}
+            self._rebel_kg_reverse: dict[str, dict[str, list[str]]] = {}
+            self._rebel_model = None
+            self._rebel_tokenizer = None
+            self._rebel_device = None
+        else:
+            self._rebel_kg = None
+            self._rebel_kg_reverse = None
+
         # LLM client (lazy init)
         self._llm_client = None
 
@@ -742,6 +762,211 @@ class HermesMemoryAgent:
         """Extract the primary subject entity from each text using GLiNER."""
         primary, _ = self._extract_entities_batch(texts)
         return primary
+
+    # ------------------------------------------------------------------
+    # REBEL KG: knowledge graph built at ingest, queried at decompose
+    # ------------------------------------------------------------------
+
+    def _ensure_rebel(self):
+        """Lazy-load REBEL model (Babelscape/rebel-large, 350M params)."""
+        if getattr(self, "_rebel_model", None) is not None:
+            return
+        try:
+            import torch
+            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+            self._rebel_device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._rebel_tokenizer = AutoTokenizer.from_pretrained(
+                "Babelscape/rebel-large"
+            )
+            self._rebel_model = AutoModelForSeq2SeqLM.from_pretrained(
+                "Babelscape/rebel-large",
+                device_map={"": self._rebel_device},
+            )
+            self._rebel_model.eval()
+            logging.getLogger(__name__).info(
+                "REBEL loaded (rebel-large) on %s", self._rebel_device
+            )
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "REBEL load failed: %s — KG extraction disabled", e
+            )
+            self._rebel_model = False  # sentinel: tried and failed
+
+    @staticmethod
+    def _parse_rebel_output(decoded: str) -> list[dict]:
+        """Parse REBEL decoder output into (head, relation, tail) dicts.
+
+        REBEL encodes: <triplet> subject <subj> relation <obj> object
+        """
+        triplets = []
+        for part in decoded.split("<triplet>"):
+            part = part.strip()
+            if not part or part in ("<s>", "</s>"):
+                continue
+            part = part.replace("</s>", "").replace("<pad>", "").strip()
+            if "<subj>" in part and "<obj>" in part:
+                subj_split = part.split("<subj>")
+                head = subj_split[0].strip()
+                rest = subj_split[1] if len(subj_split) > 1 else ""
+                obj_split = rest.split("<obj>")
+                relation = obj_split[0].strip()
+                tail = obj_split[1].strip() if len(obj_split) > 1 else ""
+                if head and relation and tail:
+                    triplets.append(
+                        {"head": head, "relation": relation, "tail": tail}
+                    )
+        return triplets
+
+    def _rebel_extract_batch(self, texts: list[str]) -> list[list[dict]]:
+        """Extract triples from a batch of texts using REBEL.
+
+        Returns a list of triple-lists, one per input text.
+        """
+        self._ensure_rebel()
+        if not self._rebel_model:
+            return [[] for _ in texts]
+
+        import torch
+
+        all_triples: list[list[dict]] = []
+        batch_size = 16
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
+            inputs = self._rebel_tokenizer(
+                batch,
+                return_tensors="pt",
+                max_length=128,
+                truncation=True,
+                padding=True,
+            )
+            inputs = {k: v.to(self._rebel_device) for k, v in inputs.items()}
+            with torch.no_grad():
+                outputs = self._rebel_model.generate(
+                    **inputs, max_length=128, num_beams=1
+                )
+            decoded = self._rebel_tokenizer.batch_decode(
+                outputs, skip_special_tokens=False
+            )
+            for dec in decoded:
+                all_triples.append(self._parse_rebel_output(dec))
+
+        return all_triples
+
+    def _rebel_kg_add(self, head: str, relation: str, tail: str) -> None:
+        """Add a triple to the REBEL KG (forward + reverse index)."""
+        h = head.lower().strip()
+        r = relation.lower().strip()
+        t_key = tail.lower().strip()
+        if not h or not r or not t_key:
+            return
+
+        # Forward: subject → relation → [objects]
+        if h not in self._rebel_kg:
+            self._rebel_kg[h] = {}
+        if r not in self._rebel_kg[h]:
+            self._rebel_kg[h][r] = []
+        if tail.strip() not in self._rebel_kg[h][r]:
+            self._rebel_kg[h][r].append(tail.strip())
+
+        # Reverse: object → relation → [subjects]
+        if t_key not in self._rebel_kg_reverse:
+            self._rebel_kg_reverse[t_key] = {}
+        if r not in self._rebel_kg_reverse[t_key]:
+            self._rebel_kg_reverse[t_key][r] = []
+        if head.strip() not in self._rebel_kg_reverse[t_key][r]:
+            self._rebel_kg_reverse[t_key][r].append(head.strip())
+
+    # Relation keyword matching for KG query-time hop
+    _KG_STOP_WORDS = frozenset({
+        "what", "is", "the", "of", "a", "an", "did", "does", "was", "were",
+        "where", "who", "which", "how", "do", "has", "had", "that", "this",
+        "in", "on", "at", "to", "for", "by", "with", "from", "are", "be",
+    })
+    _KG_STEM_MAP = {
+        "born": "birth", "die": "death", "died": "death",
+        "married": "spouse", "marry": "spouse",
+        "play": "sport", "plays": "sport", "played": "sport",
+        "follow": "religion", "follows": "religion", "followed": "religion",
+        "work": "field", "works": "field", "worked": "field",
+        "educated": "educated", "studied": "educated",
+        "created": "origin", "compose": "genre", "composed": "genre",
+        "perform": "genre", "performed": "genre",
+        "hold": "position", "held": "position",
+        "capital": "capital",
+    }
+
+    def _rebel_kg_hop(self, sub_query: str) -> str | None:
+        """Try to answer a sub-query via REBEL KG graph traversal.
+
+        1. Find KG entities that appear in the sub-query (longest first).
+        2. For each, find relations whose keywords overlap the sub-query.
+        3. Return the object/subject if a clear match is found.
+        4. Return None to fall through to retrieval+LLM.
+        """
+        if not self._rebel_kg:
+            return None
+
+        sq_lower = sub_query.lower()
+
+        # Collect candidate entities from both forward and reverse KG
+        candidates: list[tuple[str, dict, bool]] = []  # (entity_key, relations, is_reverse)
+        for entity_key, rels in self._rebel_kg.items():
+            if entity_key in sq_lower:
+                candidates.append((entity_key, rels, False))
+        for entity_key, rels in self._rebel_kg_reverse.items():
+            if entity_key in sq_lower:
+                candidates.append((entity_key, rels, True))
+
+        if not candidates:
+            return None
+
+        # Prefer longest entity match (most specific)
+        candidates.sort(key=lambda c: len(c[0]), reverse=True)
+
+        # Tokenize query (minus stop words, strip punctuation)
+        q_tokens = set()
+        for w in sq_lower.split():
+            w = w.strip(".,?!;:'\"()[]")
+            if w and w not in self._KG_STOP_WORDS:
+                q_tokens.add(w)
+        # Add stemmed variants
+        stemmed = set()
+        for t in q_tokens:
+            stemmed.add(t)
+            if t in self._KG_STEM_MAP:
+                stemmed.add(self._KG_STEM_MAP[t])
+
+        for entity_key, relations, is_reverse in candidates:
+            # Remove entity from query tokens to avoid self-matching
+            entity_tokens = set(entity_key.split())
+            q_clean = stemmed - entity_tokens
+
+            best_rel = None
+            best_overlap = 0
+            for rel, values in relations.items():
+                rel_tokens = set(rel.replace("_", " ").split()) - self._KG_STOP_WORDS
+                if not rel_tokens:
+                    continue
+                overlap = len(rel_tokens & q_clean)
+                # Also check if full relation is substring of query
+                if overlap == 0 and rel in sq_lower:
+                    overlap = len(rel_tokens)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_rel = rel
+
+            if best_rel is not None and best_overlap > 0:
+                values = relations[best_rel]
+                # Return last added (most recent = temporal supersession)
+                answer = values[-1]
+                _cr_log.info(
+                    "KG hop: entity=%s rel=%s → %s (reverse=%s)",
+                    entity_key, best_rel, answer, is_reverse,
+                )
+                return answer
+
+        return None
 
     def _entity_text_search(self, query: str, top_k: int = 10) -> list[dict]:
         """Find facts by entity name match using GLiNER entity index.
@@ -809,6 +1034,65 @@ class HermesMemoryAgent:
             if word.lower() not in _stop:
                 entities.append(word)
         return entities
+
+    def _entity_first_retrieve(self, query: str) -> list[dict] | None:
+        """Entity-first retrieval: narrow to an entity's facts before ranking.
+
+        Extracts entities from the query, looks them up in the GLiNER
+        entity index, and returns ONLY that entity's facts ranked by
+        cosine similarity to the query.
+
+        Returns None if no entity is found (caller should fall back to
+        BM25/cosine). Returns a list of result dicts if entity matched.
+
+        This eliminates template confusion: instead of ranking 17K facts
+        where 500 share the same template (mean pairwise cos=0.976),
+        we rank only the 3-5 facts belonging to the target entity.
+        """
+        query_entities = self._extract_query_entities(query)
+        if not query_entities:
+            return None
+
+        store = self.coupled_engine.memory_store
+        # Union of fact indices across all extracted entities
+        matched_indices: set[int] = set()
+        for ent_text in query_entities:
+            key = ent_text.lower().strip()
+            idx_set = self._gliner_entity_index.get(key, set())
+            matched_indices.update(idx_set)
+
+        if not matched_indices:
+            return None
+
+        # Cosine-rank within the entity's fact subset
+        q_emb = self._embed_query(query)
+        scored: list[tuple[float, int]] = []
+        for idx in matched_indices:
+            if idx >= len(store):
+                continue
+            entry = store[idx]
+            emb = getattr(entry, "embedding", None)
+            if emb is not None:
+                sim = float(np.dot(q_emb, emb) / (
+                    np.linalg.norm(q_emb) * np.linalg.norm(emb) + 1e-9
+                ))
+            else:
+                sim = 0.0
+            scored.append((sim, idx))
+
+        # Sort by cosine similarity descending
+        scored.sort(key=lambda x: -x[0])
+
+        results = []
+        for sim, idx in scored[: self.retrieve_num]:
+            entry = store[idx]
+            results.append({
+                "text": entry.text,
+                "score": sim,
+                "recency": getattr(entry, "recency", 0.0),
+                "source": "entity_first",
+            })
+        return results
 
     def rebuild_entity_index(self, batch_size: int = 64) -> int:
         """Rebuild GLiNER entity index from existing memory_store.
@@ -946,14 +1230,38 @@ class HermesMemoryAgent:
         Each atomic fact is stored individually for fine-grained retrieval,
         contradiction detection, and dream consolidation.
         """
+        import time as _time
+        _t0 = _time.perf_counter()
         result = self._ingestion.segment(text)
+        _t_seg = _time.perf_counter()
 
-        # Batch-embed all atomic facts (single GPU pass)
+        # --- Parallel extraction: embed, GLiNER, REBEL are independent ---
+        # All three take fact_texts as input with no shared mutable state.
+        # PyTorch releases the GIL during GPU kernels, so threads overlap
+        # GPU work and CPU↔GPU transfers via CUDA stream interleaving.
+        from concurrent.futures import ThreadPoolExecutor
+
         fact_texts = [f.text for f in result.facts]
-        embeddings = self._scorer.embed_batch(fact_texts)
+        rebel_triples_batch: list[list[dict]] | None = None
+        run_rebel = getattr(self, "_rebel_kg", None) is not None
 
-        # Batch entity extraction via GLiNER (for dream merge gating + entity index)
-        primary_entities, all_entities = self._extract_entities_batch(fact_texts)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_embed = pool.submit(self._scorer.embed_batch, fact_texts)
+            if run_rebel:
+                fut_rebel = pool.submit(self._rebel_extract_batch, fact_texts)
+
+            embeddings = fut_embed.result()
+            if run_rebel:
+                rebel_triples_batch = fut_rebel.result()
+
+        # GLiNER entity extraction skipped — both consumers are disabled:
+        #   entity_first (default False), entity_retrieval (default False),
+        #   dream merge gating (dream disabled on batch ingest).
+        # Pass None/empty to satisfy downstream signatures.
+        primary_entities = [None] * len(fact_texts)
+        all_entities: list[list] = [[] for _ in fact_texts]
+        _t_gpu = _time.perf_counter()
+        print(f"TIMING segment={_t_seg-_t0:.2f}s gpu_parallel={_t_gpu-_t_seg:.2f}s facts={len(fact_texts)}", flush=True)
 
         # Build entity index: map each entity to its fact's index in memory_store.
         # Use current memory_store length as the insertion offset (safer than
@@ -966,7 +1274,7 @@ class HermesMemoryAgent:
                 if len(key) > 1:  # skip single-char entities
                     self._gliner_entity_index[key].add(fact_idx)
 
-        for fact, emb, entity in zip(result.facts, embeddings, primary_entities):
+        for fi, (fact, emb, entity) in enumerate(zip(result.facts, embeddings, primary_entities)):
             # V1: Text-based store
             self.orchestrator.store(content=fact.text, embedding=emb)
 
@@ -989,6 +1297,13 @@ class HermesMemoryAgent:
             # Triadic: store fact's triples in the 3D tensor
             if getattr(self, "_triadic", None) is not None:
                 self._triadic.store_fact(fact.text, list(fact.triples))
+
+            # REBEL KG: add extracted triples to knowledge graph
+            if rebel_triples_batch is not None and fi < len(rebel_triples_batch):
+                for triple in rebel_triples_batch[fi]:
+                    self._rebel_kg_add(
+                        triple["head"], triple["relation"], triple["tail"]
+                    )
 
             # Register fact in belief index (before conflict detection)
             if self._belief_index is not None:
@@ -1152,11 +1467,36 @@ class HermesMemoryAgent:
             sq_chunks: list[list[str]] = []  # per-subquery chunk lists
             sq_chunks_raw: list[list[dict]] = []  # raw result dicts for metadata
 
+            final_kg_answer = None  # set if the last hop is KG-answered
+
             for i, sq_template in enumerate(subqueries):
                 # Substitute any {answer_N} placeholders from prior hops
                 sq = sq_template
                 for key, val in answers.items():
                     sq = sq.replace(key, val)
+
+                # --- REBEL KG fast lane: deterministic graph hop ---
+                # Try graph[entity][relation] BEFORE retrieval+LLM.
+                # If hit: skip the entire retrieve/judge/extract cycle.
+                # If miss: fall through to existing path unchanged.
+                if getattr(self, "_rebel_kg", None) is not None:
+                    kg_answer = self._rebel_kg_hop(sq)
+                    if kg_answer is not None:
+                        answers[f"{{answer_{i + 1}}}"] = kg_answer
+                        evidence_chain.append({
+                            "q": sq,
+                            "a": kg_answer,
+                            "evidence": [f"[KG: {kg_answer}]"],
+                        })
+                        sq_chunks.append([f"[KG] {sq} -> {kg_answer}"])
+                        sq_chunks_raw.append([])
+                        if i == len(subqueries) - 1:
+                            final_kg_answer = kg_answer
+                        _cr_log.info(
+                            "KG hop %d/%d: %s -> %s",
+                            i + 1, len(subqueries), sq, kg_answer,
+                        )
+                        continue  # skip retrieval+LLM for this hop
 
                 # Mini iterative loop per sub-query: retrieve → judge →
                 # retry with targeted NEED if first retrieval misses.
@@ -1165,23 +1505,33 @@ class HermesMemoryAgent:
                 sq_seen: set[str] = set()
                 current_sq = sq
                 max_sq_retries = 2  # 1 original + 1 retry
+                entity_first_hit = False
 
                 for retry in range(max_sq_retries):
-                    # BM25 hop retrieval: lexical matching for entity discrimination
-                    if getattr(self, "bm25_hops", False) and getattr(self, "_bm25_index", None) is not None:
-                        # Test 1: BM25 candidate generation -> post-retrieval reranking
-                        # BM25 picks the candidate pool (entity discrimination),
-                        # then _apply_post_retrieval adds belief reranking.
-                        bm25_hits = self._bm25_index.query(current_sq, top_k=self.retrieve_num * 3)
-                        sq_results = [
-                            {"text": self.coupled_engine.memory_store[doc_id].text,
-                             "score": score}
-                            for doc_id, score in bm25_hits
-                            if doc_id < len(self.coupled_engine.memory_store)
-                        ]
-                        sq_results = self._apply_post_retrieval(sq_results)
-                    else:
-                        sq_results = self._retrieve_v2(current_sq)
+                    # Entity-first retrieval: narrow to entity's facts
+                    # before cosine ranking. Eliminates template confusion
+                    # (88% of failures: 500 template-similar facts with
+                    # mean pairwise cos=0.976 → wrong entity picked).
+                    sq_results = None
+                    if getattr(self, "entity_first", False) and self._gliner_entity_index:
+                        ef_results = self._entity_first_retrieve(current_sq)
+                        if ef_results is not None:
+                            sq_results = ef_results
+                            entity_first_hit = True
+
+                    # Fallback: BM25 or cosine when entity-first misses
+                    if sq_results is None:
+                        if getattr(self, "bm25_hops", False) and getattr(self, "_bm25_index", None) is not None:
+                            bm25_hits = self._bm25_index.query(current_sq, top_k=self.retrieve_num * 3)
+                            sq_results = [
+                                {"text": self.coupled_engine.memory_store[doc_id].text,
+                                 "score": score}
+                                for doc_id, score in bm25_hits
+                                if doc_id < len(self.coupled_engine.memory_store)
+                            ]
+                            sq_results = self._apply_post_retrieval(sq_results)
+                        else:
+                            sq_results = self._retrieve_v2(current_sq)
                     for r in sq_results:
                         key = r["text"].strip()[:200]
                         if key not in sq_seen:
@@ -1201,6 +1551,12 @@ class HermesMemoryAgent:
                                 if tkey not in sq_seen:
                                     sq_seen.add(tkey)
                                     sq_all_texts.append(t)
+
+                    # AGGRESSIVE entity-first: entity matched + triadic
+                    # done. Skip retry loop and judge to prevent BM25/cosine
+                    # from re-polluting context with wrong-entity facts.
+                    if entity_first_hit and getattr(self, "entity_first_aggressive", False):
+                        break
 
                     # On last retry or final sub-query, skip judge
                     if retry >= max_sq_retries - 1:
@@ -1253,7 +1609,13 @@ class HermesMemoryAgent:
                 # athletes. Entity index ensures facts about X specifically
                 # are included. Also expand via entity co-mention graph
                 # for multi-hop bridging.
-                if self.entity_retrieval:
+                # SKIP when aggressive entity-first already fired — entity
+                # facts are already the primary results; adding more via
+                # text search would re-pollute with wrong-entity facts.
+                _skip_entity_supplement = (
+                    entity_first_hit and getattr(self, "entity_first_aggressive", False)
+                )
+                if self.entity_retrieval and not _skip_entity_supplement:
                     ent_results = self._entity_text_search(sq, top_k=10)
                     for r in ent_results:
                         ekey = r["text"].strip()[:200]
@@ -1307,6 +1669,22 @@ class HermesMemoryAgent:
                                 "evidence": sq_all_texts[:2],
                             }
                         )
+
+            # Short-circuit: if the final hop was answered by KG, return directly.
+            # No need for retrieval+LLM — we have a deterministic answer.
+            if final_kg_answer is not None:
+                qt = time.time() - query_start
+                if getattr(self, "_chain_cache", None) is not None and _q_emb is not None:
+                    self._chain_cache.store(
+                        _q_emb, bare_question, final_kg_answer, evidence_chain
+                    )
+                return {
+                    "output": final_kg_answer,
+                    "input_len": 0,
+                    "output_len": 0,
+                    "memory_construction_time": qt,
+                    "query_time_len": qt,
+                }
 
             # Merge sub-query and original results
             orig_results = self._retrieve_v2(bare_question)
@@ -2443,6 +2821,11 @@ class HermesMemoryAgent:
 
         # Reset GLiNER entity index
         self._gliner_entity_index = defaultdict(set)
+
+        # Reset REBEL KG
+        if getattr(self, "_rebel_kg", None) is not None:
+            self._rebel_kg = {}
+            self._rebel_kg_reverse = {}
 
         # Reset belief index (preserve params, clear beliefs)
         if self._belief_index is not None:

@@ -101,6 +101,10 @@ def save_context(
     # BM25 index can be rebuilt from memory_store (fast), but save for consistency
     if getattr(agent, "_bm25_index", None) is not None:
         state["bm25_index"] = agent._bm25_index
+    # REBEL KG: dict-of-dicts knowledge graph
+    if getattr(agent, "_rebel_kg", None) is not None:
+        state["rebel_kg"] = agent._rebel_kg
+        state["rebel_kg_reverse"] = agent._rebel_kg_reverse
     # Chain cache must be pickled (contains embeddings + reverse index)
     if getattr(agent, "_chain_cache", None) is not None:
         state["chain_cache"] = agent._chain_cache
@@ -168,6 +172,11 @@ def load_context(
         agent._belief_index = state["belief_index"]
     if "entity_accumulator" in state and hasattr(agent, "_entity_accumulator"):
         agent._entity_accumulator = state["entity_accumulator"]
+
+    # REBEL KG: restore knowledge graph
+    if getattr(agent, "_rebel_kg", None) is not None and "rebel_kg" in state:
+        agent._rebel_kg = state["rebel_kg"]
+        agent._rebel_kg_reverse = state.get("rebel_kg_reverse", {})
 
     # BM25 index: always rebuild from memory_store to ensure doc_id == index.
     # Cached BM25 may have stale doc_ids from _store_count (which diverges

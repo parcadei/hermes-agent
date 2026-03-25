@@ -174,10 +174,16 @@ def parse_args():
                         help="Cosine similarity threshold for pairwise dedup (default: 0.95)")
     parser.add_argument("--entity_retrieval", action="store_true",
                         help="Add entity name text search to decompose hops")
+    parser.add_argument("--entity_first", action="store_true",
+                        help="Entity-first retrieval: use entity index as PRIMARY path, cosine/BM25 as fallback")
+    parser.add_argument("--entity_first_aggressive", action="store_true",
+                        help="When entity-first hits, use ONLY entity facts + triadic. Skip BM25/cosine/supplement.")
     parser.add_argument("--bm25_hops", action="store_true",
                         help="Use BM25 lexical retrieval for sub-query hops (entity discrimination)")
     parser.add_argument("--chain_cache", action="store_true",
                         help="Cache completed decompose chains for identical queries")
+    parser.add_argument("--rebel_kg", action="store_true",
+                        help="Build REBEL knowledge graph at ingest, use graph hops in decompose")
     parser.add_argument("--dream_explore_only", action="store_true",
                         help="Dream with only cross-domain exploration (skip repulsion/prune/merge/unlearn)")
     parser.add_argument("--no_cache", action="store_true",
@@ -332,8 +338,11 @@ def main():
             cosine_dedup=args.cosine_dedup,
             cosine_dedup_threshold=args.cosine_dedup_threshold,
             entity_retrieval=args.entity_retrieval,
+            entity_first=args.entity_first,
+            entity_first_aggressive=args.entity_first_aggressive,
             bm25_hops=args.bm25_hops,
             chain_cache=args.chain_cache,
+            rebel_kg=args.rebel_kg,
         )
 
     # Run evaluation
