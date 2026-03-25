@@ -219,6 +219,8 @@ class CoupledEngine:
         self._W_cache: np.ndarray | None = None
         # FAISS ANN index for O(1) nearest-neighbor search
         self._faiss_index = None  # faiss.IndexFlatIP, lazy init
+        self._norm_embs_f32 = np.zeros((0, dim), dtype=np.float32)
+        self._faiss_dirty = False
         self.hebbian_epsilon = hebbian_epsilon
         self._session_buffer: list[np.ndarray] = []
         self._session_indices: list[int] = []  # indices of facts stored in current session
@@ -385,14 +387,14 @@ class CoupledEngine:
             best_idx = -1
             best_sim = -1.0
 
-            if self._faiss_index is not None and self._faiss_index.ntotal > 0:
-                # FAISS path: O(1) nearest-neighbor search
+            if self._norm_embs_f32.shape[0] > 0:
+                # Use numpy matmul for detection — O(1) BLAS call, ~1ms at N=37K
                 emb_f32 = emb_normed.astype(np.float32).reshape(1, -1)
-                D, I = self._faiss_index.search(emb_f32, 1)
-                best_sim = float(D[0, 0])
-                best_idx = int(I[0, 0])
+                sims = (self._norm_embs_f32 @ emb_f32.T).ravel()
+                best_idx = int(np.argmax(sims))
+                best_sim = float(sims[best_idx])
             elif emb_norm > 1e-12:
-                # Fallback: matrix multiply
+                # Fallback: matrix multiply (before any entries in _norm_embs_f32)
                 X = self._embeddings_matrix()
                 sims = X @ emb / (
                     np.linalg.norm(X, axis=1) * emb_norm + 1e-12
@@ -422,17 +424,9 @@ class CoupledEngine:
                 old.access_count += 1
                 old.tagged = old.importance >= 0.7
                 self._invalidate_cache()
-                # Update FAISS index: overwrite the old row with the new embedding
-                if self._faiss_index is not None:
-                    # Rebuild the FAISS index to reflect the replacement.
-                    # For IndexFlatIP, the simplest correct approach is rebuild.
-                    self._faiss_index.reset()
-                    all_embs = np.array(
-                        [m.embedding / (np.linalg.norm(m.embedding) + 1e-12)
-                         for m in self.memory_store],
-                        dtype=np.float32,
-                    )
-                    self._faiss_index.add(all_embs)
+                # Update _norm_embs_f32 in-place (O(1)), defer FAISS rebuild
+                self._norm_embs_f32[best_idx] = emb_normed.astype(np.float32)
+                self._faiss_dirty = True
                 self._session_buffer.append(emb.copy())
                 self._session_indices.append(best_idx)
                 return best_idx
@@ -454,8 +448,13 @@ class CoupledEngine:
         )
         self.memory_store.append(entry)
         self._invalidate_cache()
+        # Append to incremental normalized matrix
+        self._norm_embs_f32 = np.vstack([
+            self._norm_embs_f32,
+            emb_normed.astype(np.float32).reshape(1, -1),
+        ])
 
-        # Add the new embedding to the FAISS index
+        # Add the new embedding to the FAISS index (incremental, O(1))
         if self._faiss_index is not None:
             emb_f32 = emb_normed.astype(np.float32).reshape(1, -1)
             self._faiss_index.add(emb_f32)
@@ -463,6 +462,17 @@ class CoupledEngine:
         self._session_buffer.append(emb.copy())
         self._session_indices.append(idx)
         return idx
+
+    def rebuild_faiss_if_dirty(self) -> None:
+        """Rebuild FAISS index from _norm_embs_f32 if any contradiction
+        replacements made the index stale. Call once per chunk, not per fact.
+        """
+        if not self._faiss_dirty:
+            return
+        if self._faiss_index is not None and self._norm_embs_f32.shape[0] > 0:
+            self._faiss_index.reset()
+            self._faiss_index.add(self._norm_embs_f32)
+        self._faiss_dirty = False
 
     # ------------------------------------------------------------------
     # temporal Hebbian binding

@@ -1230,10 +1230,7 @@ class HermesMemoryAgent:
         Each atomic fact is stored individually for fine-grained retrieval,
         contradiction detection, and dream consolidation.
         """
-        import time as _time
-        _t0 = _time.perf_counter()
         result = self._ingestion.segment(text)
-        _t_seg = _time.perf_counter()
 
         # --- Parallel extraction: embed, GLiNER, REBEL are independent ---
         # All three take fact_texts as input with no shared mutable state.
@@ -1260,9 +1257,6 @@ class HermesMemoryAgent:
         # Pass None/empty to satisfy downstream signatures.
         primary_entities = [None] * len(fact_texts)
         all_entities: list[list] = [[] for _ in fact_texts]
-        _t_gpu = _time.perf_counter()
-        print(f"TIMING segment={_t_seg-_t0:.2f}s gpu_parallel={_t_gpu-_t_seg:.2f}s facts={len(fact_texts)}", flush=True)
-
         # Build entity index: map each entity to its fact's index in memory_store.
         # Use current memory_store length as the insertion offset (safer than
         # _store_count which tracks recency, not position).
@@ -1355,6 +1349,9 @@ class HermesMemoryAgent:
                     self._triple_index[key].append((new_obj, fact.text))
 
             self._store_count += 1
+
+        # Deferred FAISS rebuild: one rebuild per chunk instead of per-contradiction
+        self.coupled_engine.rebuild_faiss_if_dirty()
 
         # Synonym dict: feed coref clusters and verb mappings to triadic
         if getattr(self, "_triadic", None) is not None:
