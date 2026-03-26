@@ -63,6 +63,7 @@ QUERY_METHODS = {
     "_query_hop_judge",
     "_query_hop_entity_supplement",
     "_query_hop_filter",
+    "_query_hop_record",
     # Cross-module resolvers (functions, not properties)
     "_resolve_apply_post_retrieval",
     "_resolve_ensure_llm_client",

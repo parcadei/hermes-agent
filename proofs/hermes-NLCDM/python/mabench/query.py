@@ -183,9 +183,10 @@ class QueryEngine:
 
     @property
     def _resolve_bm25_hops(self) -> bool:
-        if hasattr(self, "_retrieval_cfg") and self._retrieval_cfg is not None:
-            # bm25_hops not on RetrievalConfig -- fall through to mixin
-            pass
+        # Standalone: infer from presence of BM25Index
+        if hasattr(self, "_bm25_index") and self._bm25_index is not None:
+            return True
+        # Mixin fallback: check host class attribute
         return getattr(self, "bm25_hops", False)
 
     @property
@@ -408,6 +409,7 @@ class QueryEngine:
 
         # Retrieve + retry loop
         sq_all_texts, sq_all_results, entity_first_hit = self._query_hop_retrieve(sq)
+        pre_cr_texts = list(sq_all_texts)
 
         # Per-hop CR / dedup / belief
         sq_all_texts = self._query_hop_filter(sq_all_texts)
@@ -415,16 +417,40 @@ class QueryEngine:
         sq_chunks.append(sq_all_texts)
         sq_chunks_raw.append(sq_all_results)
 
-        # Extract intermediate answer for chaining
+        # Extract intermediate answer + record trace
+        self._query_hop_record(
+            sq, hop_idx, num_subqueries, answers, evidence_chain,
+            sq_all_texts, pre_cr_texts, entity_first_hit,
+        )
+        return None
+
+    def _query_hop_record(
+        self, sq, hop_idx, num_subqueries, answers, evidence_chain,
+        sq_all_texts, pre_cr_texts, entity_first_hit,
+    ) -> None:
+        """Extract intermediate answer and record hop trace."""
+        method = (
+            "entity_first" if entity_first_hit
+            else "bm25" if self._resolve_bm25_hops
+            else "cosine"
+        )
         if hop_idx < num_subqueries - 1 and sq_all_texts:
             short_ans = self._resolve_extract_short_answer(sq, sq_all_texts, evidence_chain)
             if short_ans:
                 answers[f"{{answer_{hop_idx + 1}}}"] = short_ans
                 evidence_chain.append({
-                    "q": sq, "a": short_ans,
-                    "evidence": sq_all_texts[:2],
+                    "q": sq, "a": short_ans, "evidence": sq_all_texts[:2],
+                    "retrieved_facts": pre_cr_texts,
+                    "post_cr_facts": list(sq_all_texts),
+                    "retrieval_method": method,
                 })
-        return None
+        elif hop_idx == num_subqueries - 1:
+            evidence_chain.append({
+                "q": sq, "a": None, "evidence": sq_all_texts[:2],
+                "retrieved_facts": pre_cr_texts,
+                "post_cr_facts": list(sq_all_texts),
+                "retrieval_method": method,
+            })
 
     @property
     def _resolve_rebel_kg_attr(self):

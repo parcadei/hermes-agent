@@ -144,6 +144,8 @@ class QueryPipeline:
 
     @property
     def _resolve_bm25_hops(self) -> bool:
+        if hasattr(self, "_bm25_index") and self._bm25_index is not None:
+            return True
         return getattr(self, "bm25_hops", False)
 
     @property
@@ -524,6 +526,16 @@ class QueryPipeline:
                 "output_len": 0,
                 "memory_construction_time": qt,
                 "query_time_len": qt,
+                "trace": {
+                    "subqueries": hop_state.get("subqueries"),
+                    "answers": hop_state.get("answers"),
+                    "evidence_chain": hop_state.get("evidence_chain"),
+                    "final_kg_answer": final_kg_answer,
+                    "final_context": None,
+                    "final_chunks": [],
+                    "outgestion_instructions": None,
+                    "llm_response": final_kg_answer,
+                },
             }
 
         final_chunks = merged_chunks[: self._resolve_retrieve_num]
@@ -543,13 +555,27 @@ class QueryPipeline:
             bare_question, final_chunks, answer, hop_state,
         )
 
-        return {
+        result = {
             "output": answer,
             "input_len": input_tokens,
             "output_len": output_tokens,
             "memory_construction_time": memory_time,
             "query_time_len": query_time,
         }
+
+        # Trace data for debugging and analysis
+        result["trace"] = {
+            "subqueries": hop_state.get("subqueries"),
+            "answers": hop_state.get("answers"),
+            "evidence_chain": hop_state.get("evidence_chain"),
+            "final_kg_answer": hop_state.get("final_kg_answer"),
+            "final_context": memory_context,
+            "final_chunks": list(final_chunks),
+            "outgestion_instructions": outgestion_instructions,
+            "llm_response": answer,
+        }
+
+        return result
 
     def _query_store_chain_cache(
         self,
