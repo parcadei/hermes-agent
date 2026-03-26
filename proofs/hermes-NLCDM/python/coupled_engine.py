@@ -463,6 +463,28 @@ class CoupledEngine:
         self._session_indices.append(idx)
         return idx
 
+    def replace_entry(self, idx: int, text: str, embedding: np.ndarray, recency: float = 0.0) -> None:
+        """Replace an existing memory entry in-place (for structural supersession).
+
+        Updates text, embedding, recency, timestamps. Keeps existing importance/layer.
+        Updates _norm_embs_f32 in-place and marks FAISS dirty for deferred rebuild.
+        """
+        emb = np.asarray(embedding, dtype=np.float64).ravel()
+        entry = self.memory_store[idx]
+        entry.text = text
+        entry.embedding = emb
+        entry.recency = max(entry.recency, recency)
+        now = time.time()
+        entry.creation_time = now
+        entry.last_access_time = now
+        entry.access_count += 1
+        self._invalidate_cache()
+        # Update normalized embedding cache (O(1))
+        emb_norm = np.linalg.norm(emb)
+        emb_normed = emb / (emb_norm + 1e-12) if emb_norm > 1e-12 else emb
+        self._norm_embs_f32[idx] = emb_normed.astype(np.float32)
+        self._faiss_dirty = True
+
     def rebuild_faiss_if_dirty(self) -> None:
         """Rebuild FAISS index from _norm_embs_f32 if any contradiction
         replacements made the index stale. Call once per chunk, not per fact.
@@ -495,13 +517,15 @@ class CoupledEngine:
             return 0
 
         eps = epsilon if epsilon is not None else self.hebbian_epsilon
-        pairs = 0
-        for i in range(n):
-            for j in range(i + 1, n):
-                self._W_temporal += eps * (
-                    np.outer(buf[i], buf[j]) + np.outer(buf[j], buf[i])
-                )
-                pairs += 1
+        pairs = n * (n - 1) // 2
+
+        # Vectorized Hebbian: replace O(n²) Python loop with BLAS matmul.
+        # Original: sum_{i<j} eps*(outer(b_i,b_j) + outer(b_j,b_i))
+        #         = eps * sum_{i≠j} outer(b_i, b_j)
+        #         = eps * (outer(s, s) - B.T @ B)   where s = sum(b_i)
+        B = np.array(buf)  # (n, dim)
+        s = B.sum(axis=0)  # (dim,)
+        self._W_temporal += eps * (np.outer(s, s) - B.T @ B)
 
         # Record index-space co-occurrence for two-hop retrieval
         # Weight = 1/session_size: small sessions (bridge pairs) get strong links,

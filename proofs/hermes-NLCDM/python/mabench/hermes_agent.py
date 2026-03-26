@@ -69,167 +69,6 @@ def _get_subtree_text(token) -> str:
     return " ".join(t.text for t in token.subtree)
 
 
-# ---------------------------------------------------------------------------
-# Tier 1: Rule-based predicate cardinality classification
-# ---------------------------------------------------------------------------
-# Verbs/predicates where same (S,P) with different O is NOT a conflict
-_ADDITIVE_LEMMAS = frozenset({
-    'support', 'use', 'contain', 'include', 'feature', 'have', 'has',
-    'produce', 'export', 'import', 'teach', 'study', 'offer', 'provide',
-    'involve', 'receive', 'attend', 'visit', 'speak', 'know',
-    'start', 'begin',
-})
-
-# Predicates where same (S,P) with different O IS a conflict
-_EXCLUSIVE_LEMMAS = frozenset({
-    'capital', 'ceo', 'president', 'founder', 'creator', 'spouse',
-    'father', 'mother', 'birthplace', 'deathplace', 'headquarters',
-    'nationality', 'gender', 'sex',
-    'live', 'reside', 'born', 'die', 'locate', 'headquarter',
-    'manage', 'lead', 'head',
-    'field', 'sport',
-    'schedule', 'deadline', 'due',
-    'population', 'release', 'version', 'latest', 'default',
-    'port', 'endpoint', 'limit', 'rate',
-})
-
-# For copular "be", check subject for these exclusivity signals
-_EXCLUSIVE_SUBJECT_NOUNS = frozenset({
-    'capital', 'ceo', 'president', 'founder', 'headquarters', 'birthplace',
-    'population', 'release', 'deadline', 'port', 'endpoint', 'limit',
-    'branch', 'default', 'latest', 'location', 'address', 'spouse',
-    'father', 'mother', 'nationality', 'gender',
-    'meeting', 'schedule', 'sport', 'field',
-})
-
-
-# ---------------------------------------------------------------------------
-# Tier 2: Fine-tuned DeBERTa NLI predicate cardinality (lazy-loaded, cached)
-# ---------------------------------------------------------------------------
-_CARDINALITY_CACHE: dict[str, str] = {}
-_TIER2_MODEL = None
-_TIER2_TOKENIZER = None
-
-# Path to fine-tuned model. Set via env var or defaults to model dir next to this file.
-_TIER2_MODEL_PATH = os.environ.get(
-    "HERMES_CARDINALITY_MODEL",
-    os.path.join(os.path.dirname(__file__), "..", "cardinality_model", "best"),
-)
-# Confidence threshold: below this, return 'unknown' instead of committing
-_TIER2_CONFIDENCE = float(os.environ.get("HERMES_CARDINALITY_CONFIDENCE", "0.6"))
-
-
-def _get_tier2_model():
-    """Lazy-load fine-tuned DeBERTa for Tier 2 cardinality classification."""
-    global _TIER2_MODEL, _TIER2_TOKENIZER
-    if _TIER2_MODEL is None:
-        model_path = _TIER2_MODEL_PATH
-        if not os.path.isdir(model_path):
-            _cr_log.warning("tier2: model not found at %s — Tier 2 disabled", model_path)
-            return None, None
-        import torch
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer
-        _TIER2_TOKENIZER = AutoTokenizer.from_pretrained(model_path)
-        _TIER2_MODEL = AutoModelForSequenceClassification.from_pretrained(model_path)
-        _TIER2_MODEL.eval()
-        _cr_log.info("tier2: loaded cardinality model from %s", model_path)
-    return _TIER2_MODEL, _TIER2_TOKENIZER
-
-
-def _classify_predicate_tier2(pred_str: str, subj_str: str = "") -> str:
-    """Tier 2: Fine-tuned NLI classification of predicate cardinality.
-
-    Uses DeBERTa-v3-xsmall fine-tuned on Wikidata property labels (22M params,
-    CPU, ~5ms) to classify predicates as exclusive or additive.
-    Results are cached permanently — predicate cardinality doesn't change.
-
-    Returns 'exclusive', 'additive', or 'unknown' (low confidence).
-    """
-    cache_key = f"{pred_str}|{subj_str}"
-    if cache_key in _CARDINALITY_CACHE:
-        return _CARDINALITY_CACHE[cache_key]
-
-    model, tokenizer = _get_tier2_model()
-    if model is None:
-        return 'unknown'
-
-    # Convert predicate to natural language
-    pred_natural = pred_str.replace('_', ' ').lower()
-
-    # For copular "be", the real predicate is in the subject
-    if pred_natural in ('be', 'is', 'was', 'are'):
-        pred_natural = subj_str.lower()
-        for prefix in ('the ', 'a ', 'an '):
-            if pred_natural.startswith(prefix):
-                pred_natural = pred_natural[len(prefix):]
-                break
-
-    # Construct premise+hypothesis (same format as training data)
-    premise = f"The property '{pred_natural}' describes a relationship between entities."
-    hypothesis = "This property can only have one value at a time for a given subject."
-
-    import torch
-    inputs = tokenizer(premise, hypothesis, return_tensors="pt", truncation=True,
-                       max_length=128, padding=True)
-    with torch.no_grad():
-        scores = model(**inputs).logits.softmax(dim=-1)[0]
-
-    # DeBERTa NLI output: 0=contradiction, 1=entailment, 2=neutral
-    # entailment → exclusive (hypothesis IS true: single-valued)
-    # contradiction → additive (hypothesis is FALSE: multi-valued)
-    entail_score = float(scores[1])
-    contr_score = float(scores[0])
-
-    if entail_score > contr_score and entail_score >= _TIER2_CONFIDENCE:
-        result = 'exclusive'
-    elif contr_score > entail_score and contr_score >= _TIER2_CONFIDENCE:
-        result = 'additive'
-    else:
-        result = 'unknown'
-
-    _cr_log.debug(
-        "tier2_finetuned: pred='%s' subj='%s' → %s (c=%.2f e=%.2f n=%.2f)",
-        pred_str, subj_str, result, float(scores[0]), float(scores[1]), float(scores[2]),
-    )
-
-    _CARDINALITY_CACHE[cache_key] = result
-    return result
-
-
-def _classify_predicate_cardinality(pred_str: str, subj_str: str = "") -> str:
-    """Classify predicate as 'exclusive', 'additive', or 'unknown'.
-
-    Tier 1 rule-based: check tokens against known verb classes.
-    For copular 'be', check subject for exclusivity signals.
-    Additive check first (conservative — avoid false positive conflict detection).
-    Falls through to Tier 2 (NLI zero-shot) when Tier 1 returns 'unknown'.
-
-    Set HERMES_NO_TIER1=1 to skip Tier 1 and go straight to Tier 2.
-    """
-    # Skip Tier 1 if env var set (for ablation testing)
-    if not os.environ.get("HERMES_NO_TIER1"):
-        tokens = set(pred_str.lower().replace('_', ' ').split())
-
-        # Tier 1: rule-based
-        for token in tokens:
-            if token in _ADDITIVE_LEMMAS:
-                return 'additive'
-
-        for token in tokens:
-            if token in _EXCLUSIVE_LEMMAS:
-                return 'exclusive'
-
-        if tokens & {'be', 'is', 'was', 'are'}:
-            subj_tokens = set(subj_str.lower().replace('_', ' ').split())
-            for token in subj_tokens:
-                if token in _EXCLUSIVE_SUBJECT_NOUNS:
-                    return 'exclusive'
-            return 'unknown'
-
-    # Tier 2: fine-tuned DeBERTa on Wikidata property labels
-    return _classify_predicate_tier2(pred_str, subj_str)
-
-
 def _extract_acl_triples(doc) -> list[tuple[str, str, str]]:
     """Extract (subject, predicate, object) triples using acl-aware copular parsing.
 
@@ -616,6 +455,8 @@ class HermesMemoryAgent:
         self._supersession_graph: dict[str, str] = {}
         # new_text → {old_text_1, old_text_2, ...}
         self._supersedes: dict[str, set[str]] = defaultdict(set)
+        self._text_to_store_idx: dict[str, int] = {}  # fact text → memory_store index (for supersession replacement)
+        self._supersession_log: list[dict] = []  # bitemporal audit trail of replaced facts
 
         # V1: Text-based orchestrator (validated baseline from test_engine.py)
         params = ParameterSet(
@@ -650,7 +491,7 @@ class HermesMemoryAgent:
         # Reconsolidation OFF (no measurable effect)
         self.coupled_engine = CoupledEngine(
             dim=dim,
-            contradiction_aware=True,
+            contradiction_aware=False,  # cosine > 0.95 fires on template siblings (cos=0.976) — overwrites wrong entities
             contradiction_threshold=contradiction_threshold,
             novelty_N0=0.2,
             novelty_gamma=0.05,
@@ -1232,24 +1073,17 @@ class HermesMemoryAgent:
         """
         result = self._ingestion.segment(text)
 
-        # --- Parallel extraction: embed, GLiNER, REBEL are independent ---
-        # All three take fact_texts as input with no shared mutable state.
-        # PyTorch releases the GIL during GPU kernels, so threads overlap
-        # GPU work and CPU↔GPU transfers via CUDA stream interleaving.
-        from concurrent.futures import ThreadPoolExecutor
-
         fact_texts = [f.text for f in result.facts]
         rebel_triples_batch: list[list[dict]] | None = None
         run_rebel = getattr(self, "_rebel_kg", None) is not None
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            fut_embed = pool.submit(self._scorer.embed_batch, fact_texts)
-            if run_rebel:
-                fut_rebel = pool.submit(self._rebel_extract_batch, fact_texts)
-
-            embeddings = fut_embed.result()
-            if run_rebel:
-                rebel_triples_batch = fut_rebel.result()
+        # Run embedding first, then REBEL sequentially.
+        # Both models share one GPU — ThreadPool parallelism caused
+        # "Tensor on device cuda:0 is not on the expected device meta!"
+        # from concurrent device_map weight materialization.
+        embeddings = self._scorer.embed_batch(fact_texts)
+        if run_rebel:
+            rebel_triples_batch = self._rebel_extract_batch(fact_texts)
 
         # GLiNER entity extraction skipped — both consumers are disabled:
         #   entity_first (default False), entity_retrieval (default False),
@@ -1269,55 +1103,19 @@ class HermesMemoryAgent:
                     self._gliner_entity_index[key].add(fact_idx)
 
         for fi, (fact, emb, entity) in enumerate(zip(result.facts, embeddings, primary_entities)):
-            # V1: Text-based store
-            self.orchestrator.store(content=fact.text, embedding=emb)
-
-            # V2: Coupled engine store (no serial number prefix -- D3)
-            # Returns the memory_store index (may replace an existing entry
-            # when cosine > contradiction_threshold, so idx != _store_count).
-            ms_idx = self.coupled_engine.store(
-                text=fact.text,
-                embedding=emb,
-                recency=float(self._store_count),
-                entity=entity,
-            )
-
-            # BM25: index fact for lexical sub-query hop retrieval.
-            # Use ms_idx (memory_store position) as doc_id so BM25 hits
-            # map directly to memory_store[doc_id].
-            if getattr(self, "_bm25_index", None) is not None:
-                self._bm25_index.add(ms_idx, fact.text)
-
-            # Triadic: store fact's triples in the 3D tensor
-            if getattr(self, "_triadic", None) is not None:
-                self._triadic.store_fact(fact.text, list(fact.triples))
-
-            # REBEL KG: add extracted triples to knowledge graph
-            if rebel_triples_batch is not None and fi < len(rebel_triples_batch):
-                for triple in rebel_triples_batch[fi]:
-                    self._rebel_kg_add(
-                        triple["head"], triple["relation"], triple["tail"]
-                    )
-
-            # Register fact in belief index (before conflict detection)
-            if self._belief_index is not None:
-                self._belief_index.register_fact(fact.text)
-
-            # --- Conflict detection: triple-based with entity gating ---
-            # Same subject+predicate, different object → potential conflict,
-            # but only act if the old and new facts share a named entity.
-            # When supersession=True: populate flat _superseded_texts set.
-            # When belief is active: update belief scores.
-            # NOTE: conflict_resolution now uses query-time CR (_query_time_cr),
-            # so it no longer needs ingestion-time triple index building.
-            if (self.supersession or self._belief_index) and fact.triples:
+            # --- Supersession check BEFORE storing ---
+            # If this fact supersedes an existing one (same entity+predicate, different object),
+            # replace the old entry in-place instead of adding a new one.
+            superseded_idx = None
+            superseded_text = None
+            if self.supersession and fact.triples:
                 new_entities = set(e.lower() for e in fact.entities) if fact.entities else set()
                 self._fact_entities[fact.text] = fact.entities
                 for subj, pred, obj in fact.triples:
                     key = (subj.lower().strip(), pred.lower().strip())
                     new_obj = obj.lower().strip()
                     if not key[0] or not key[1]:
-                        continue  # skip degenerate triples
+                        continue
                     for existing_obj, existing_text in self._triple_index[key]:
                         if existing_obj != new_obj:
                             # Entity gate: require shared named entity via substring matching.
@@ -1330,23 +1128,115 @@ class HermesMemoryAgent:
                                 e in fact_lower for e in old_entities if len(e) > 2
                             )
                             if not shared:
-                                continue  # no shared entity → not a real conflict
+                                continue
+                            # Check we have a store index for the old text
+                            old_idx = self._text_to_store_idx.get(existing_text)
+                            if old_idx is not None:
+                                superseded_idx = old_idx
+                                superseded_text = existing_text
+                                break
+                    if superseded_idx is not None:
+                        break
 
-                            # Binary supersession (when enabled)
-                            if self.supersession:
-                                self._superseded_texts.add(existing_text)
+            if superseded_idx is not None:
+                # --- In-place replacement ---
+                # Save to audit log (bitemporal history)
+                old_entry = self.coupled_engine.memory_store[superseded_idx]
+                self._supersession_log.append({
+                    "old_text": old_entry.text,
+                    "new_text": fact.text,
+                    "old_recency": old_entry.recency,
+                    "new_recency": float(self._store_count),
+                    "timestamp": time.time(),
+                })
+                # Replace entry in coupled engine
+                self.coupled_engine.replace_entry(
+                    superseded_idx, fact.text, emb, recency=float(self._store_count)
+                )
+                ms_idx = superseded_idx
+                # Update reverse lookup
+                del self._text_to_store_idx[superseded_text]
+                self._text_to_store_idx[fact.text] = ms_idx
+                # Track superseded text for backward compat (query-time safety net)
+                self._superseded_texts.add(superseded_text)
+                # Update supersession graph for query-time CR
+                self._supersession_graph[superseded_text] = fact.text
+                self._supersedes[fact.text].add(superseded_text)
+                # Chain cache invalidation
+                if getattr(self, "_chain_cache", None) is not None:
+                    self._chain_cache.invalidate_fact(superseded_text)
+                # Bayesian belief update (when enabled)
+                if self._belief_index is not None:
+                    self._belief_index.on_conflict(superseded_text, fact.text)
+            else:
+                # --- Normal store (no supersession) ---
+                # V1: Skip orchestrator.store() when cooc_boost is active.
+                if not self.cooc_boost_retrieval:
+                    self.orchestrator.store(content=fact.text, embedding=emb)
+                # V2: Coupled engine store
+                ms_idx = self.coupled_engine.store(
+                    text=fact.text,
+                    embedding=emb,
+                    recency=float(self._store_count),
+                    entity=entity,
+                )
+                self._text_to_store_idx[fact.text] = ms_idx
 
-                            # Chain cache: invalidate chains using the superseded fact
-                            if getattr(self, "_chain_cache", None) is not None:
-                                self._chain_cache.invalidate_fact(existing_text)
+            # BM25: index fact (works for both new and replaced entries)
+            if getattr(self, "_bm25_index", None) is not None:
+                self._bm25_index.add(ms_idx, fact.text)
 
-                            # Bayesian belief update (when enabled)
-                            if self._belief_index is not None:
-                                self._belief_index.on_conflict(
-                                    existing_text,
-                                    fact.text,
-                                )
+            # Triadic: store fact's triples
+            if getattr(self, "_triadic", None) is not None:
+                self._triadic.store_fact(fact.text, list(fact.triples))
+
+            # REBEL KG: add extracted triples
+            if rebel_triples_batch is not None and fi < len(rebel_triples_batch):
+                for triple in rebel_triples_batch[fi]:
+                    self._rebel_kg_add(
+                        triple["head"], triple["relation"], triple["tail"]
+                    )
+
+            # Register fact in belief index
+            if self._belief_index is not None:
+                self._belief_index.register_fact(fact.text)
+
+            # Update triple index (for both new and replaced entries)
+            if fact.triples:
+                if fact.text not in self._fact_entities:
+                    self._fact_entities[fact.text] = fact.entities
+                for subj, pred, obj in fact.triples:
+                    key = (subj.lower().strip(), pred.lower().strip())
+                    new_obj = obj.lower().strip()
+                    if not key[0] or not key[1]:
+                        continue
+                    # Remove old entry from triple_index if we superseded it
+                    if superseded_text is not None:
+                        self._triple_index[key] = [
+                            (o, t) for o, t in self._triple_index[key] if t != superseded_text
+                        ]
                     self._triple_index[key].append((new_obj, fact.text))
+
+            # Belief-only conflict detection (when supersession is off but belief is active)
+            if not self.supersession and self._belief_index and fact.triples:
+                new_entities = set(e.lower() for e in fact.entities) if fact.entities else set()
+                if fact.text not in self._fact_entities:
+                    self._fact_entities[fact.text] = fact.entities
+                for subj, pred, obj in fact.triples:
+                    key = (subj.lower().strip(), pred.lower().strip())
+                    new_obj = obj.lower().strip()
+                    if not key[0] or not key[1]:
+                        continue
+                    for existing_obj, existing_text in self._triple_index[key]:
+                        if existing_obj != new_obj:
+                            old_entities = [e.lower() for e in self._fact_entities.get(existing_text, ())]
+                            existing_lower = existing_text.lower()
+                            fact_lower = fact.text.lower()
+                            shared = any(e in existing_lower for e in new_entities if len(e) > 2) or any(
+                                e in fact_lower for e in old_entities if len(e) > 2
+                            )
+                            if shared:
+                                self._belief_index.on_conflict(existing_text, fact.text)
 
             self._store_count += 1
 
@@ -2455,21 +2345,12 @@ class HermesMemoryAgent:
                     sp_groups[key].append((idx, obj.lower().strip(), recency))
 
         # Resolve conflicts: for each SP group with different objects,
-        # keep only the newest chunk — gated by predicate cardinality.
+        # keep only the newest chunk (newest wins by recency).
         to_remove: set[int] = set()
         for (subj, pred), members in sp_groups.items():
             objects = set(obj for _, obj, _ in members)
             if len(objects) <= 1:
                 continue  # same object across all members → no conflict
-
-            # Tier 1 cardinality gate: skip additive predicates
-            cardinality = _classify_predicate_cardinality(pred, subj)
-            if cardinality == 'additive':
-                _cr_log.debug(
-                    "query_time_cr: SKIP additive (%s, %s) objs=%s",
-                    subj[:30], pred, objects,
-                )
-                continue
 
             # Sort by recency descending (newest first)
             members.sort(key=lambda x: x[2], reverse=True)
@@ -2779,7 +2660,7 @@ class HermesMemoryAgent:
         )
         self.coupled_engine = CoupledEngine(
             dim=self.dim,
-            contradiction_aware=True,
+            contradiction_aware=False,
             contradiction_threshold=self.contradiction_threshold,
             novelty_N0=0.2,
             novelty_gamma=0.05,
@@ -2815,6 +2696,8 @@ class HermesMemoryAgent:
         self._fact_entities = {}
         self._supersession_graph = {}
         self._supersedes = defaultdict(set)
+        self._text_to_store_idx = {}
+        self._supersession_log = []
 
         # Reset GLiNER entity index
         self._gliner_entity_index = defaultdict(set)
