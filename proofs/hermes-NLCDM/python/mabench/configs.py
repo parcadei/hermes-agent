@@ -41,6 +41,9 @@ class RetrievalConfig:
     coretrieval_min_count: float = 2.0
     transfer: bool = False
     transfer_k: int | None = None
+    # entity_rerank: bool — rerank candidates by entity-position residual similarity
+    entity_rerank: bool = False
+    entity_rerank_alpha: float = 0.3  # blend weight: (1-α)*cosine + α*entity_residual
 
 
 @dataclass(frozen=True)

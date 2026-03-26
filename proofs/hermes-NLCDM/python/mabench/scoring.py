@@ -121,6 +121,133 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
         np.savez(str(cache_file), texts=texts, embeddings=embs)
         print(f"Saved {len(texts)} embeddings to {cache_file}")
 
+    # ------------------------------------------------------------------
+    # Entity-position residual extraction (arXiv:2603.19664)
+    # ------------------------------------------------------------------
+
+    _ENTITY_LAYER = 14  # Mid-network layer — best Cohen's d in discrimination test
+
+    def embed_entity_position(
+        self, text: str, entity: str, *, layer: int | None = None,
+    ) -> np.ndarray:
+        """Extract hidden state at entity mention position.
+
+        Uses token-ID subsequence matching to find the entity span in
+        the tokenized text, then averages hidden states over that span
+        at the specified transformer layer.  Falls back to first-token
+        residual if the entity mention is not found.
+
+        Returns a normalized 1024-dim vector.
+        """
+        self._ensure_model()
+        import torch
+
+        target_layer = layer if layer is not None else self._ENTITY_LAYER
+
+        inputs = self._tokenizer(
+            [text], return_tensors="pt", padding=True,
+            truncation=True, max_length=512,
+        )
+        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+        with torch.no_grad():
+            outputs = self._model(**inputs, output_hidden_states=True)
+
+        hidden = outputs.hidden_states[target_layer][0]  # (seq, d_hidden)
+
+        # Find entity token span
+        span = self._find_entity_tokens(text, entity)
+        if span is not None:
+            # Offset for special tokens (BOS)
+            bare_ids = self._tokenizer.encode(text, add_special_tokens=False)
+            full_ids = self._tokenizer.encode(text, add_special_tokens=True)
+            bos_offset = len(full_ids) - len(bare_ids)
+            adjusted = [p + bos_offset for p in span if p + bos_offset < hidden.shape[0]]
+            if adjusted:
+                entity_h = hidden[adjusted].mean(dim=0)
+            else:
+                entity_h = hidden[bos_offset]
+        else:
+            # Fallback: first real token
+            entity_h = hidden[1] if hidden.shape[0] > 1 else hidden[0]
+
+        vec = entity_h.cpu().numpy().astype(np.float64)
+        norm = np.linalg.norm(vec)
+        return vec / (norm + 1e-12)
+
+    def embed_entity_position_batch(
+        self, texts: list[str], entities: list[str], *, layer: int | None = None,
+    ) -> list[np.ndarray]:
+        """Batch entity-position residual extraction.
+
+        Processes all texts in a single forward pass.  Falls back to
+        first-token for any text where the entity mention is not found.
+        """
+        if not texts:
+            return []
+
+        self._ensure_model()
+        import torch
+
+        target_layer = layer if layer is not None else self._ENTITY_LAYER
+
+        # Pre-compute entity spans
+        entity_spans = [self._find_entity_tokens(t, e) for t, e in zip(texts, entities)]
+
+        inputs = self._tokenizer(
+            texts, return_tensors="pt", padding=True,
+            truncation=True, max_length=512,
+        )
+        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+        with torch.no_grad():
+            outputs = self._model(**inputs, output_hidden_states=True)
+
+        hidden = outputs.hidden_states[target_layer]  # (batch, seq, d_hidden)
+        mask = inputs["attention_mask"]
+
+        results = []
+        for i in range(len(texts)):
+            h = hidden[i]  # (seq, d_hidden)
+            span = entity_spans[i]
+
+            # Compute BOS offset per sample
+            m = mask[i].cpu().numpy()
+            first_real = int(np.argmax(m))
+            bare_ids = self._tokenizer.encode(texts[i], add_special_tokens=False)
+            full_ids = self._tokenizer.encode(texts[i], add_special_tokens=True)
+            bos_offset = first_real + (len(full_ids) - len(bare_ids))
+
+            if span is not None:
+                adjusted = [p + bos_offset for p in span if p + bos_offset < h.shape[0]]
+                if adjusted:
+                    entity_h = h[adjusted].mean(dim=0)
+                else:
+                    entity_h = h[bos_offset] if bos_offset < h.shape[0] else h[0]
+            else:
+                entity_h = h[bos_offset] if bos_offset < h.shape[0] else h[0]
+
+            vec = entity_h.cpu().numpy().astype(np.float64)
+            norm = np.linalg.norm(vec)
+            results.append(vec / (norm + 1e-12))
+
+        return results
+
+    def _find_entity_tokens(self, text: str, entity: str) -> list[int] | None:
+        """Find token indices of entity mention via subsequence matching."""
+        full_ids = self._tokenizer.encode(text, add_special_tokens=False)
+        entity_ids = self._tokenizer.encode(entity, add_special_tokens=False)
+
+        for i in range(len(full_ids) - len(entity_ids) + 1):
+            if full_ids[i:i + len(entity_ids)] == entity_ids:
+                return list(range(i, i + len(entity_ids)))
+
+        # Try with leading space (common tokenizer artifact)
+        entity_ids_sp = self._tokenizer.encode(" " + entity, add_special_tokens=False)
+        for i in range(len(full_ids) - len(entity_ids_sp) + 1):
+            if full_ids[i:i + len(entity_ids_sp)] == entity_ids_sp:
+                return list(range(i, i + len(entity_ids_sp)))
+
+        return None
+
     def score(self, query: str, content: str) -> float:
         """Cosine similarity between query and content embeddings."""
         q_emb = self.embed(query)

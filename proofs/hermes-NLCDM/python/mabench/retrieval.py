@@ -18,6 +18,8 @@ Migration notes for callers:
 
 from __future__ import annotations
 
+import numpy as np
+
 from mabench.configs import BeliefConfig, CRConfig, DedupConfig, RetrievalConfig
 
 
@@ -120,6 +122,20 @@ class Retriever:
         if hasattr(self, "_belief_cfg"):
             return self._belief_cfg.overfetch
         return getattr(self, "_belief_overfetch", 3)
+
+    @property
+    def _resolve_entity_rerank(self) -> bool:
+        """Whether entity-position residual reranking is active."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.entity_rerank
+        return getattr(self, "entity_rerank", False)
+
+    @property
+    def _resolve_entity_rerank_alpha(self) -> float:
+        """Entity reranking blend weight."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.entity_rerank_alpha
+        return getattr(self, "entity_rerank_alpha", 0.3)
 
     @property
     def _resolve_transfer(self) -> bool:
@@ -376,16 +392,20 @@ class Retriever:
     def _retrieve_v2(self, query_text: str) -> list[dict]:
         """Run V2 embedding retrieval for a single query string.
 
-        Composed from three independent stages:
+        Composed from independent stages:
           1. _embed_query      -- vectorize the query text
           2. _retrieve_candidates -- run the backend retrieval switch
           3. _apply_post_retrieval -- belief rerank + truncation
+          4. _entity_rerank (optional) -- entity-position residual reranking
         """
         q_emb = self._embed_query(query_text)
         results = self._retrieve_candidates(
             q_emb, self._resolve_retrieve_num, query_text=query_text,
         )
-        return self._apply_post_retrieval(results)
+        results = self._apply_post_retrieval(results)
+        if self._resolve_entity_rerank:
+            results = self._entity_rerank(query_text, results)
+        return results
 
     def _apply_belief_rerank(self, results: list[dict]) -> list[dict]:
         """Rerank retrieval results using Bayesian belief scores.
@@ -406,6 +426,89 @@ class Retriever:
             reranked.append(adjusted)
         reranked.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         return reranked
+
+    # ------------------------------------------------------------------
+    # Entity-position residual reranking (arXiv:2603.19664)
+    # ------------------------------------------------------------------
+
+    def _entity_rerank(self, query_text: str, results: list[dict]) -> list[dict]:
+        """Rerank candidates by entity-position residual similarity.
+
+        Extracts the primary entity from the query, computes the query's
+        entity-position residual, then blends it with existing scores.
+
+        Facts without a stored entity_residual keep their original score.
+        """
+        import re
+
+        alpha = self._resolve_entity_rerank_alpha
+        engine = self._resolve_engine
+        scorer = self._resolve_scorer
+
+        # Extract primary entity from query text
+        query_entity = self._extract_query_entity(query_text)
+        if query_entity is None:
+            return results  # Can't rerank without an entity
+
+        # Compute query entity-position residual
+        q_residual = scorer.embed_entity_position(query_text, query_entity)
+
+        # Build text→index lookup for fast MemoryEntry access
+        store = engine.memory_store
+        text_to_idx = {}
+        for idx_i, entry in enumerate(store):
+            text_to_idx[entry.text] = idx_i
+
+        reranked = []
+        for r in results:
+            text = r.get("text", "")
+            original_score = r.get("score", 0.0)
+
+            # Look up the MemoryEntry to get entity_residual
+            entity_res = None
+            ms_idx = text_to_idx.get(text)
+            if ms_idx is not None:
+                entity_res = store[ms_idx].entity_residual
+
+            if entity_res is not None:
+                # Cosine similarity between query and fact entity residuals
+                ent_score = float(np.dot(q_residual, entity_res))
+                blended = (1 - alpha) * original_score + alpha * ent_score
+            else:
+                blended = original_score
+
+            adjusted = dict(r)
+            adjusted["score"] = blended
+            adjusted["entity_rerank_score"] = ent_score if entity_res is not None else None
+            reranked.append(adjusted)
+
+        reranked.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        return reranked
+
+    @staticmethod
+    def _extract_query_entity(query_text: str) -> str | None:
+        """Extract the primary entity from a query string.
+
+        Uses regex patterns that cover MABench-style decomposed sub-queries
+        and natural questions.  Returns the entity mention string or None.
+        """
+        import re
+
+        # Quoted entity (highest priority — explicit mention)
+        m = re.search(r'"([^"]+)"', query_text)
+        if m:
+            return m.group(1)
+
+        # "What is the X of Y?" or "What X does Y have?"
+        m = re.search(r'(?:of|about|for|by|does|did|is|was)\s+(.+?)[\?\.]?\s*$', query_text, re.I)
+        if m:
+            candidate = m.group(1).strip().rstrip("?.")
+            # Filter out very short or stopword-only results
+            if len(candidate) > 2 and candidate.lower() not in {"the", "this", "that", "it"}:
+                return candidate
+
+        # Fallback: no entity found
+        return None
 
     # ------------------------------------------------------------------
     # Public API aliases (for standalone callers who prefer clean names)

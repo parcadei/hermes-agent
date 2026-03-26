@@ -51,6 +51,8 @@ def test_retrieval_mixin_has_all_methods():
         "_retrieve_v2",
         "_apply_belief_rerank",
         "_compute_effective_k",
+        "_entity_rerank",
+        "_extract_query_entity",
     ]
     for method_name in expected_methods:
         assert hasattr(RetrievalMixin, method_name), (

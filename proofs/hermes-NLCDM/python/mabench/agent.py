@@ -240,6 +240,7 @@ class HermesAgent:
             supersession=self._store_cfg.supersession,
             cooc_boost=self._store_cfg.cooc_boost,
             dream_interval=self._store_cfg.dream_interval,
+            entity_rerank=self._retrieval_cfg.entity_rerank,
         )
 
         # -- 8. Tier 4: query engine + pipeline (circular dep) ------------

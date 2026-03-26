@@ -87,6 +87,7 @@ class MemoryEntry:
     layer: str = "user_knowledge"  # "user_knowledge", "agent_meta", "procedural"
     fact_type: str = "general"  # freeform, e.g. "finding", "reasoning_chain", "decision"
     entity: str | None = None  # Primary subject entity (GLiNER-extracted). Used as cannot-link constraint in dream merge.
+    entity_residual: np.ndarray | None = None  # Entity-position hidden state (layer 14, 1024-dim). For entity-aware reranking.
 
 
 # Layer-aware importance seed map.

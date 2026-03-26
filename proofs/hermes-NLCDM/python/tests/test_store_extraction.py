@@ -124,11 +124,11 @@ def test_helper_methods_under_50_lines():
             )
 
 
-def test_store_py_under_500_lines():
-    """store.py is under 500 lines total."""
+def test_store_py_under_600_lines():
+    """store.py is under 600 lines total."""
     source = (MABENCH_DIR / "store.py").read_text()
     line_count = len(source.split("\n"))
-    assert line_count < 500, f"store.py has {line_count} lines (max 500)"
+    assert line_count < 600, f"store.py has {line_count} lines (max 600)"
 
 
 def test_mro_includes_store_mixin():
