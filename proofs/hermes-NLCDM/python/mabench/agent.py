@@ -56,6 +56,7 @@ from mabench.store import FactStore
 from mabench.query import QueryEngine
 from mabench.query_pipeline import QueryPipeline
 from mabench.iterative_query import IterativeQuery
+from mabench.entity_reranker import EntityReranker
 
 
 # Default V1 orchestrator params (validated in test_engine.py)
@@ -205,6 +206,10 @@ class HermesAgent:
         # -- 4. Leaf modules (no cross-module deps) -----------------------
         rebel = RebelKG() if self._rebel_kg_flag else None
         outgester = Outgester(self._llm_cfg)
+        ent_reranker = (EntityReranker(
+            self._scorer,
+            nlp=getattr(self._ingestion, "_nlp", None),
+        ) if self._retrieval_cfg.entity_rerank else None)
 
         # -- 5. Tier 1: entity ops + retriever ----------------------------
         entity_ops = EntityOps(
@@ -220,6 +225,8 @@ class HermesAgent:
             cr_config=self._cr_cfg,
             dedup_config=self._dedup_cfg,
             belief_config=self._belief_cfg,
+            nlp=getattr(self._ingestion, "_nlp", None),
+            entity_reranker=ent_reranker,
         )
 
         # -- 6. Tier 2: conflict resolver ---------------------------------
@@ -240,7 +247,7 @@ class HermesAgent:
             supersession=self._store_cfg.supersession,
             cooc_boost=self._store_cfg.cooc_boost,
             dream_interval=self._store_cfg.dream_interval,
-            entity_rerank=self._retrieval_cfg.entity_rerank,
+            entity_reranker=ent_reranker,
         )
 
         # -- 8. Tier 4: query engine + pipeline (circular dep) ------------

@@ -32,7 +32,6 @@ class _PrepareResult:
     embeddings: np.ndarray
     rebel_triples_batch: list[list[dict]] | None
     primary_entities: list[str | None]
-    entity_residuals: list[np.ndarray | None] | None = None
 
 
 class FactStore:
@@ -50,7 +49,7 @@ class FactStore:
         bm25_index=None, triadic=None, chain_cache=None,
         belief_index=None, entity_accumulator=None,
         supersession: bool = False, cooc_boost: bool = False,
-        dream_interval: int = 0, entity_rerank: bool = False,
+        dream_interval: int = 0, entity_reranker=None,
     ) -> None:
         self._engine = engine
         self._scorer = scorer
@@ -67,7 +66,7 @@ class FactStore:
         self._supersession = supersession
         self._cooc_boost = cooc_boost
         self._dream_interval = dream_interval
-        self._entity_rerank = entity_rerank
+        self._entity_reranker = entity_reranker
         self._store_count = 0
 
     # -- Attribute resolution: standalone vs mixin fallback ---------------
@@ -161,23 +160,6 @@ class FactStore:
         return self._rebel_kg_add(h, r, t)  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
-    # Entity extraction helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _extract_primary_entity(fact) -> str | None:
-        """Extract primary entity from a SegmentedFact.
-
-        Tries spaCy NER entities first (from ingestion pipeline),
-        then falls back to the first triple subject.
-        """
-        if fact.entities:
-            return fact.entities[0]
-        if fact.triples:
-            return fact.triples[0][0]
-        return None
-
-    # ------------------------------------------------------------------
     # Public API: _store and decomposed helpers
     # ------------------------------------------------------------------
 
@@ -217,27 +199,6 @@ class FactStore:
         primary_entities: list[str | None] = [None] * len(fact_texts)
         all_entities: list[list] = [[] for _ in fact_texts]
 
-        # Entity-position residuals for entity reranking.
-        entity_residuals: list[np.ndarray | None] | None = None
-        if self._entity_rerank:
-            # Extract primary entity from spaCy NER (fact.entities) or triples
-            batch_entities = []
-            batch_texts = []
-            batch_indices = []
-            for i, fact in enumerate(result.facts):
-                ent = self._extract_primary_entity(fact)
-                if ent is not None:
-                    batch_entities.append(ent)
-                    batch_texts.append(fact.text)
-                    batch_indices.append(i)
-            entity_residuals = [None] * len(fact_texts)
-            if batch_texts:
-                residuals = self._scorer.embed_entity_position_batch(
-                    batch_texts, batch_entities,
-                )
-                for j, idx in enumerate(batch_indices):
-                    entity_residuals[idx] = residuals[j]
-
         # Build entity index with insertion offset.
         base_idx = len(self._resolve_engine.memory_store)
         for i, ents in enumerate(all_entities):
@@ -253,7 +214,6 @@ class FactStore:
             embeddings=embeddings,
             rebel_triples_batch=rebel_triples_batch,
             primary_entities=primary_entities,
-            entity_residuals=entity_residuals,
         )
 
     def _store_single_fact(
@@ -267,21 +227,17 @@ class FactStore:
         """Process one fact: supersession check, store, index, count."""
         superseded_idx, superseded_text = self._store_check_supersession(fact)
 
-        # Entity-position residual for this fact (None if not enabled)
-        ent_res = (
-            prep.entity_residuals[fi]
-            if prep.entity_residuals is not None
-            else None
-        )
-
         if superseded_idx is not None:
             ms_idx = self._store_replace_entry(
                 fact, emb, superseded_idx, superseded_text,
-                entity_residual=ent_res,
             )
         else:
-            ms_idx = self._store_new_entry(fact, emb, entity,
-                                           entity_residual=ent_res)
+            ms_idx = self._store_new_entry(fact, emb, entity)
+
+        # Entity reranker annotation (isolated entity residual)
+        if self._entity_reranker is not None:
+            entry = self._resolve_engine.memory_store[ms_idx]
+            self._entity_reranker.annotate_entry(entry, fact)
 
         self._store_update_indices(
             fi, fact, ms_idx, prep.rebel_triples_batch
@@ -339,7 +295,6 @@ class FactStore:
         emb: np.ndarray,
         superseded_idx: int,
         superseded_text: str,
-        entity_residual: np.ndarray | None = None,
     ) -> int:
         """Replace a superseded entry in-place.
 
@@ -359,8 +314,6 @@ class FactStore:
         engine.replace_entry(
             superseded_idx, fact.text, emb, recency=float(self._store_count)
         )
-        if entity_residual is not None:
-            engine.memory_store[superseded_idx].entity_residual = entity_residual
         ms_idx = superseded_idx
         # Update reverse lookup.
         del self._resolve_text_to_store_idx[superseded_text]
@@ -383,7 +336,6 @@ class FactStore:
         fact: SegmentedFact,
         emb: np.ndarray,
         entity: str | None,
-        entity_residual: np.ndarray | None = None,
     ) -> int:
         """Store a new fact (no supersession).
 
@@ -398,8 +350,6 @@ class FactStore:
             recency=float(self._store_count),
             entity=entity,
         )
-        if entity_residual is not None:
-            self._resolve_engine.memory_store[ms_idx].entity_residual = entity_residual
         self._resolve_text_to_store_idx[fact.text] = ms_idx
         return ms_idx
 

@@ -127,6 +127,42 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
 
     _ENTITY_LAYER = 14  # Mid-network layer — best Cohen's d in discrimination test
 
+    def embed_entity_isolated(
+        self, entity_text: str, *, layer: int | None = None,
+    ) -> np.ndarray:
+        """Embed entity text in isolation (NOT in context).
+
+        Tokenizes just the entity name alone, runs forward pass with
+        output_hidden_states=True, extracts hidden state at the specified
+        transformer layer, averaged over all entity tokens.
+
+        In-context entity residuals suffer from template context bleed
+        (0.006 gap within-template). Isolated entity residuals achieve
+        0.134 gap — validated in residual_discrimination_v2.py.
+
+        Returns a normalized 1024-dim vector.
+        """
+        self._ensure_model()
+        import torch
+
+        target_layer = layer if layer is not None else self._ENTITY_LAYER
+
+        inputs = self._tokenizer(
+            [entity_text], return_tensors="pt", padding=True,
+            truncation=True, max_length=64,
+        )
+        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+        with torch.no_grad():
+            outputs = self._model(**inputs, output_hidden_states=True)
+
+        hidden = outputs.hidden_states[target_layer][0]  # (seq, d_hidden)
+        mask = inputs["attention_mask"][0].unsqueeze(-1).float()
+        pooled = (hidden * mask).sum(dim=0) / mask.sum(dim=0).clamp(min=1e-9)
+
+        vec = pooled.cpu().numpy().astype(np.float64)
+        norm = np.linalg.norm(vec)
+        return vec / (norm + 1e-12)
+
     def embed_entity_position(
         self, text: str, entity: str, *, layer: int | None = None,
     ) -> np.ndarray:
