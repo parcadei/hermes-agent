@@ -140,10 +140,12 @@ def _load_context(agent: HermesAgent, path: Path, context_idx: int) -> bool:
     # Optional infrastructure
     if "triadic" in state and agent.store._triadic is not None:
         agent.store._triadic = state["triadic"]
-        # Also update query_engine's reference
         agent.query_engine._triadic = state["triadic"]
+        agent.pipeline._triadic = state["triadic"]
     if "belief_index" in state and agent.store._belief_index is not None:
         agent.store._belief_index = state["belief_index"]
+        agent.pipeline._belief_index = state["belief_index"]
+        agent.retriever._belief_index = state["belief_index"]
     if "entity_accumulator" in state and agent.store._entity_accumulator is not None:
         agent.store._entity_accumulator = state["entity_accumulator"]
 
@@ -156,11 +158,13 @@ def _load_context(agent: HermesAgent, path: Path, context_idx: int) -> bool:
         ])
         agent.store._bm25_index = fresh_bm25
         agent.query_engine._bm25_index = fresh_bm25
+        agent.pipeline._bm25_index = fresh_bm25
 
     # Chain cache
     if agent.store._chain_cache is not None and "chain_cache" in state:
         agent.store._chain_cache = state["chain_cache"]
         agent.query_engine._chain_cache = state["chain_cache"]
+        agent.pipeline._chain_cache = state["chain_cache"]
 
     # Reload embedding disk cache
     agent._scorer._load_disk_cache()
@@ -231,9 +235,7 @@ def parse_args():
     parser.add_argument("--entity_first", action="store_true")
     parser.add_argument("--entity_first_aggressive", action="store_true")
     parser.add_argument("--entity_rerank", action="store_true",
-                        help="Entity-position residual reranking (arXiv:2603.19664)")
-    parser.add_argument("--entity_rerank_alpha", type=float, default=0.3,
-                        help="Blend weight: (1-α)*cosine + α*entity_residual")
+                        help="Entity-position residual reranking with multiplicative gating (arXiv:2603.19664)")
 
     # Cache
     parser.add_argument("--no_cache", action="store_true")
@@ -263,7 +265,6 @@ def _build_agent(args) -> HermesAgent:
         ppr_weight=args.ppr_weight,
         ppr_damping=args.ppr_damping,
         entity_rerank=args.entity_rerank,
-        entity_rerank_alpha=args.entity_rerank_alpha,
     )
     cr = CRConfig(
         enabled=args.conflict_resolution,
@@ -344,15 +345,33 @@ def main():
     output_dir = Path(agent_config["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_model = args.model.replace("/", "_")
-    prefix = "composed"
-    if args.cooc_boost:
-        prefix += "_cooc"
-    output_file = output_dir / f"{prefix}_{dataset_config['sub_dataset']}_{safe_model}.json"
-    trace_file = output_dir / f"{prefix}_{dataset_config['sub_dataset']}_{safe_model}_traces.jsonl"
 
-    # Truncate trace file at start of run (avoid stale appended data)
-    if trace_file.exists():
-        trace_file.unlink()
+    # Build config tag for unique filenames
+    config_parts = []
+    if args.cooc_boost:
+        config_parts.append("cooc")
+    if args.decompose_query:
+        config_parts.append("decomp")
+    if args.conflict_resolution:
+        config_parts.append("cr")
+    if args.cr_per_hop:
+        config_parts.append("perhop")
+    if args.bm25_hops:
+        config_parts.append("bm25h")
+    if args.triadic:
+        config_parts.append("tri")
+    if args.entity_rerank:
+        config_parts.append("entrank")
+    if args.chunk_size > 0:
+        config_parts.append(f"cs{args.chunk_size}")
+    config_tag = "_".join(config_parts) if config_parts else "baseline"
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    sub_dataset = dataset_config['sub_dataset']
+    run_name = f"{timestamp}_{config_tag}_{sub_dataset}_{safe_model}"
+
+    output_file = output_dir / f"{run_name}.json"
+    trace_file = output_dir / f"{run_name}_traces.jsonl"
 
     # Print config summary
     print(f"Agent: HermesAgent (composed)")

@@ -389,13 +389,15 @@ class QueryPipeline:
         sq_chunks_raw: list[list[dict]],
         bare_question: str,
         question: str,
+        hop_state: dict | None = None,
     ) -> tuple[list[str], dict[str, dict]]:
         """Post-retrieval: metadata, V1, triadic, coverage, CR, belief, supersession.
 
         Returns (merged_chunks, metadata_by_key).
         """
-        # Build metadata lookup
-        metadata_by_key = self._build_metadata_lookup(v2_texts, sq_chunks_raw)
+        # Build metadata lookup from all retrieval results
+        all_results = hop_state.get("_all_v2_results", []) if hop_state else []
+        metadata_by_key = self._build_metadata_lookup(all_results, sq_chunks_raw)
 
         # Merge + V1 + triadic + coverage
         merged_chunks = self._merge_and_expand(
@@ -408,14 +410,15 @@ class QueryPipeline:
 
     def _build_metadata_lookup(
         self,
-        v2_texts: list[str],
+        all_results: list[dict],
         sq_chunks_raw: list[list[dict]],
     ) -> dict[str, dict]:
         """Build text-key to result-dict metadata lookup."""
         metadata_by_key: dict[str, dict] = {}
-        # _all_v2_results is set during _query_final_retrieval on hop_state
-        # but we need the metadata from the actual results passed through
-        # We reconstruct from what we have: the raw results contain metadata
+        for r in all_results:
+            k = r["text"].strip()[:200]
+            if k not in metadata_by_key:
+                metadata_by_key[k] = r
         for sq_r in sq_chunks_raw:
             for r in sq_r:
                 k = r["text"].strip()[:200]
@@ -617,6 +620,7 @@ class QueryPipeline:
         Sub-queries use {answer_N} placeholders for chaining.
         Returns a list of sub-query template strings.
         """
+        self._last_decompose_question = question
         self._resolve_ensure_llm_client()
 
         prompt = (

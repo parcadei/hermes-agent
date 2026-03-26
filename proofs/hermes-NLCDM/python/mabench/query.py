@@ -263,10 +263,10 @@ class QueryEngine:
             return self._final_retrieval_fn(bare, question)
         return self._query_final_retrieval(bare, question)  # type: ignore[attr-defined]
 
-    def _resolve_query_post_process(self, v2, sq, bare, question):
+    def _resolve_query_post_process(self, v2, sq, bare, question, hop_state=None):
         if hasattr(self, "_post_process_fn") and self._post_process_fn is not None:
-            return self._post_process_fn(v2, sq, bare, question)
-        return self._query_post_process(v2, sq, bare, question)  # type: ignore[attr-defined]
+            return self._post_process_fn(v2, sq, bare, question, hop_state=hop_state)
+        return self._query_post_process(v2, sq, bare, question, hop_state=hop_state)  # type: ignore[attr-defined]
 
     def _resolve_query_generate(self, question, bare, merged, meta, hop_state, start):
         if hasattr(self, "_generate_fn") and self._generate_fn is not None:
@@ -347,7 +347,7 @@ class QueryEngine:
 
         # Phase 4: post-process (metadata, V1, triadic, coverage, CR, belief)
         merged_chunks, metadata_by_key = self._resolve_query_post_process(
-            v2_texts, sq_chunks_raw, bare_question, question,
+            v2_texts, sq_chunks_raw, bare_question, question, hop_state,
         )
 
         # Phase 5: format, generate, cache, return
