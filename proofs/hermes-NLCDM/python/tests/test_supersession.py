@@ -731,7 +731,7 @@ class TestQueryTimeCR:
 
         fake_extract = self._mock_nlp_pipe(agent, triple_map)
 
-        with patch("mabench.hermes_agent._extract_acl_triples", side_effect=fake_extract):
+        with patch("mabench.conflict_resolution._extract_acl_triples", side_effect=fake_extract):
             result = agent._query_time_cr(chunks)
 
         # Newer chunk (recency=200) survives, older removed
@@ -754,7 +754,7 @@ class TestQueryTimeCR:
 
         fake_extract = self._mock_nlp_pipe(agent, triple_map)
 
-        with patch("mabench.hermes_agent._extract_acl_triples", side_effect=fake_extract):
+        with patch("mabench.conflict_resolution._extract_acl_triples", side_effect=fake_extract):
             result = agent._query_time_cr(chunks)
 
         assert len(result) == 2
@@ -775,7 +775,7 @@ class TestQueryTimeCR:
 
         fake_extract = self._mock_nlp_pipe(agent, triple_map)
 
-        with patch("mabench.hermes_agent._extract_acl_triples", side_effect=fake_extract):
+        with patch("mabench.conflict_resolution._extract_acl_triples", side_effect=fake_extract):
             result = agent._query_time_cr(chunks)
 
         assert len(result) == 2
@@ -800,7 +800,7 @@ class TestQueryTimeCR:
 
         fake_extract = self._mock_nlp_pipe(agent, triple_map)
 
-        with patch("mabench.hermes_agent._extract_acl_triples", side_effect=fake_extract):
+        with patch("mabench.conflict_resolution._extract_acl_triples", side_effect=fake_extract):
             result = agent._query_time_cr(chunks)
 
         # Bridging fact preserved, old basketball removed, new football kept
@@ -840,7 +840,7 @@ class TestQueryTimeCR:
 
         fake_extract = self._mock_nlp_pipe(agent, triple_map)
 
-        with patch("mabench.hermes_agent._extract_acl_triples", side_effect=fake_extract):
+        with patch("mabench.conflict_resolution._extract_acl_triples", side_effect=fake_extract):
             result = agent._query_time_cr(chunks)
 
         # Only newest (rugby, rec=300) survives
@@ -883,7 +883,7 @@ class TestQueryTimeCR:
             self._call_count += 1
             return self._triple_map[self._triple_map_keys[idx]]
 
-        with patch("mabench.hermes_agent._extract_acl_triples", side_effect=fake_extract):
+        with patch("mabench.conflict_resolution._extract_acl_triples", side_effect=fake_extract):
             result = agent._query_time_cr(chunks)
 
         # No removal: entity gate blocks it (no shared NER)
