@@ -132,13 +132,17 @@ def test_store_py_under_500_lines():
 
 
 def test_mro_includes_store_mixin():
-    """MRO includes StoreMixin without diamond conflicts."""
+    """MRO includes FactStore (or its alias StoreMixin) without diamond conflicts."""
     from mabench.hermes_agent import HermesMemoryAgent
     from mabench.store import StoreMixin
     mro_names = [c.__name__ for c in HermesMemoryAgent.__mro__]
-    assert "StoreMixin" in mro_names
-    # StoreMixin should appear exactly once
-    assert mro_names.count("StoreMixin") == 1
+    # Class was renamed StoreMixin -> FactStore; alias preserves import compat
+    assert "StoreMixin" in mro_names or "FactStore" in mro_names, (
+        f"FactStore/StoreMixin not in MRO: {mro_names}"
+    )
+    # Should appear exactly once regardless of name
+    store_count = mro_names.count("StoreMixin") + mro_names.count("FactStore")
+    assert store_count == 1, f"Expected 1 store class in MRO, got {store_count}"
 
 
 def test_store_mixin_has_docstring():

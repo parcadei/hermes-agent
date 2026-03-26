@@ -1,13 +1,21 @@
 """Entity extraction and retrieval operations (GLiNER-based).
 
-Provides EntityMixin with methods for:
-- Lazy GLiNER model loading
-- Batch and single-text entity extraction
-- Query entity extraction (with regex fallback)
-- Entity-based text search via inverted index
-- Entity-first retrieval (narrow before cosine ranking)
-- Entity index rebuild from existing memory store
-- Entity graph expansion for multi-hop bridging
+Converted from mixin to standalone class with explicit dependencies.
+All self.* attribute access replaced with explicit config + instance fields.
+
+Migration notes for callers:
+  - EntityMixin is the primary class name (preserved for backward compat).
+  - EntityOps is a forward-compat alias.
+  - Mixin callers (hermes_agent.py) still work via MRO — the class name
+    keeps the import path and MRO entries stable.  HermesMemoryAgent.__init__
+    sets self.coupled_engine / self.retrieve_num / self._gliner_entity_index
+    / etc. directly; the property bridges fall back to those when _cfg is
+    absent.
+  - Standalone usage:
+      from mabench.entity import EntityOps
+      from mabench.configs import EntityConfig, EntityIndex
+      ops = EntityOps(engine, scorer, entity_index, retrieve_num=10)
+      entities = ops._extract_query_entities("What sport does Abbiati play?")
 """
 
 from __future__ import annotations
@@ -18,18 +26,73 @@ from collections import defaultdict
 
 import numpy as np
 
+from mabench.configs import EntityConfig, EntityIndex
+
 
 class EntityMixin:
-    """Mixin providing entity extraction, indexing, and retrieval methods.
+    """Standalone entity extraction, indexing, and retrieval.
 
-    Requires the host class to provide:
-    - self._gliner_model: GLiNER model instance or None/False sentinel
-    - self._gliner_labels: list of entity type labels
-    - self._gliner_entity_index: dict[str, set[int]] inverted index
-    - self.coupled_engine: engine with .memory_store attribute
-    - self.retrieve_num: int, max results to return
-    - self._embed_query(text): method returning query embedding vector
+    Can be used independently or composed into HermesMemoryAgent.
+
+    When used standalone, pass explicit deps to __init__.
+    When used as a mixin (no __init__ called), the host class sets
+    coupled_engine / retrieve_num / _gliner_entity_index directly.
     """
+
+    def __init__(
+        self,
+        engine,           # CoupledEngine with .memory_store: list[MemoryEntry]
+        scorer,           # EmbeddingRelevanceScorer with .embed(text) -> np.ndarray
+        entity_index: EntityIndex | None = None,
+        retrieve_num: int = 10,
+        config: EntityConfig | None = None,
+    ) -> None:
+        # _engine: CoupledEngine — .memory_store is list[MemoryEntry] with .text/.embedding/.recency
+        self._engine = engine
+        # _scorer: EmbeddingRelevanceScorer — .embed(text) returns np.ndarray of shape (dim,)
+        self._scorer = scorer
+        # _entity_index: EntityIndex — .index is dict[str, set[int]] mapping entity_name -> fact indices
+        self._entity_index = entity_index or EntityIndex()
+        # _retrieve_num: int — max results to return from retrieval methods
+        self._retrieve_num = retrieve_num
+        # _cfg: EntityConfig — labels, retrieval flags
+        self._cfg = config or EntityConfig()
+
+        # Bridge: _gliner_entity_index points to the same dict as entity_index.index
+        # so that both standalone and mixin paths read/write the same data.
+        self._gliner_entity_index = self._entity_index.index
+
+        self._gliner_model = None   # GLiNER model or False sentinel
+        self._gliner_labels = list(self._cfg.labels)
+
+    # ------------------------------------------------------------------
+    # Property bridges: new names <-> old mixin names
+    # When used as a mixin (no __init__), host class sets coupled_engine
+    # and retrieve_num directly. These properties provide both read and
+    # write access under both old and new attribute names.
+    # ------------------------------------------------------------------
+
+    @property
+    def coupled_engine(self):
+        """Bridge: coupled_engine -> _engine for backward compat."""
+        return self._engine
+
+    @coupled_engine.setter
+    def coupled_engine(self, value):
+        self._engine = value
+
+    @property
+    def retrieve_num(self):
+        """Bridge: retrieve_num -> _retrieve_num for backward compat."""
+        return self._retrieve_num
+
+    @retrieve_num.setter
+    def retrieve_num(self, value):
+        self._retrieve_num = value
+
+    # ------------------------------------------------------------------
+    # Entity extraction methods
+    # ------------------------------------------------------------------
 
     def _ensure_gliner(self):
         """Lazy-load GLiNER entity extractor."""
@@ -109,6 +172,10 @@ class EntityMixin:
                 entities.append(word)
         return entities
 
+    # ------------------------------------------------------------------
+    # Entity index search and retrieval
+    # ------------------------------------------------------------------
+
     def _entity_text_search(self, query: str, top_k: int = 10) -> list[dict]:
         """Find facts by entity name match using GLiNER entity index.
 
@@ -125,7 +192,7 @@ class EntityMixin:
             return []
 
         # Look up each query entity in the inverted index
-        store = self.coupled_engine.memory_store
+        store = self._engine.memory_store
         fact_scores: dict[int, int] = {}  # fact_idx -> match count
         for ent_text in query_entities:
             key = ent_text.lower().strip()
@@ -168,7 +235,7 @@ class EntityMixin:
         if not query_entities:
             return None
 
-        store = self.coupled_engine.memory_store
+        store = self._engine.memory_store
         # Union of fact indices across all extracted entities
         matched_indices: set[int] = set()
         for ent_text in query_entities:
@@ -180,7 +247,12 @@ class EntityMixin:
             return None
 
         # Cosine-rank within the entity's fact subset
-        q_emb = self._embed_query(query)
+        # In mixin mode, _embed_query comes from RetrievalMixin via MRO.
+        # In standalone mode, fall back to the injected scorer.
+        if hasattr(self, "_scorer") and self._scorer is not None:
+            q_emb = self._scorer.embed(query)
+        else:
+            q_emb = self._embed_query(query)
         scored: list[tuple[float, int]] = []
         for idx in matched_indices:
             if idx >= len(store):
@@ -199,7 +271,7 @@ class EntityMixin:
         scored.sort(key=lambda x: -x[0])
 
         results = []
-        for sim, idx in scored[: self.retrieve_num]:
+        for sim, idx in scored[: self._retrieve_num]:
             entry = store[idx]
             results.append({
                 "text": entry.text,
@@ -216,7 +288,7 @@ class EntityMixin:
         Runs GLiNER batch extraction on all facts (~24 min for 17K facts on GPU).
         Returns the number of unique entities indexed.
         """
-        store = self.coupled_engine.memory_store
+        store = self._engine.memory_store
         n = len(store)
         if n == 0:
             return 0
@@ -227,6 +299,9 @@ class EntityMixin:
             return 0
 
         self._gliner_entity_index = defaultdict(set)
+        # Sync back to EntityIndex container if present
+        if hasattr(self, "_entity_index"):
+            self._entity_index.index = self._gliner_entity_index
         labels = self._gliner_labels
 
         for start in range(0, n, batch_size):
@@ -247,6 +322,10 @@ class EntityMixin:
 
         return len(self._gliner_entity_index)
 
+    # ------------------------------------------------------------------
+    # Entity graph expansion
+    # ------------------------------------------------------------------
+
     def _entity_graph_expand(
         self, seed_facts: list[str], top_k: int = 5
     ) -> list[dict]:
@@ -262,7 +341,7 @@ class EntityMixin:
         if not self._gliner_entity_index:
             return []
 
-        store = self.coupled_engine.memory_store
+        store = self._engine.memory_store
         seed_set = set(seed_facts)
 
         # Find all entities mentioned in seed facts
@@ -301,3 +380,7 @@ class EntityMixin:
                     "source": "entity_graph",
                 })
         return results
+
+
+# Forward-compat alias for new standalone usage pattern.
+EntityOps = EntityMixin

@@ -1,14 +1,17 @@
-"""Discriminative tests for ConflictResolutionMixin extraction.
+"""Discriminative tests for ConflictResolver (formerly ConflictResolutionMixin).
 
 Validates that:
 1. conflict_resolution.py exports _get_subtree_text, _extract_acl_triples,
-   and ConflictResolutionMixin
-2. ConflictResolutionMixin has all 4 methods: _query_time_cr,
+   ConflictResolver (primary), and ConflictResolutionMixin (backward-compat alias)
+2. ConflictResolver has all 4 methods: _query_time_cr,
    _pairwise_cosine_dedup, _resolve_conflicts, _coverage_audit
-3. HermesMemoryAgent inherits from ConflictResolutionMixin
-4. _extract_acl_triples is re-exported from hermes_agent for backward compat
-5. Module-level _cr_log logger exists in conflict_resolution.py
-6. _get_subtree_text and _extract_acl_triples are module-level functions
+3. ConflictResolver has __init__ accepting engine, scorer, ingestion, etc.
+4. ConflictResolver has _resolve_* properties for attribute resolution
+5. ConflictResolutionMixin is ConflictResolver (alias, same object)
+6. HermesMemoryAgent inherits from ConflictResolutionMixin
+7. _extract_acl_triples is re-exported from hermes_agent for backward compat
+8. Module-level _cr_log logger exists in conflict_resolution.py
+9. _get_subtree_text and _extract_acl_triples are module-level functions
    (not methods)
 
 All tests run on CPU. No GPU, no external models, no LLM calls.
@@ -204,3 +207,225 @@ class TestNoFunctionsLeftOnAgent:
         lines = source.split("\n")
         def_lines = [l for l in lines if l.strip().startswith("def _extract_acl_triples")]
         assert len(def_lines) == 0, f"_extract_acl_triples still defined in hermes_agent: {def_lines}"
+
+
+# -----------------------------------------------------------------------
+# Phase 2 tests: ConflictResolver standalone class
+# -----------------------------------------------------------------------
+
+
+class TestConflictResolverClass:
+    """Verify ConflictResolver is the primary class with __init__."""
+
+    def test_conflict_resolver_importable(self):
+        """ConflictResolver must be importable from conflict_resolution."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        assert isinstance(ConflictResolver, type)
+
+    def test_mixin_alias_is_same_object(self):
+        """ConflictResolutionMixin must be the same class as ConflictResolver."""
+        from mabench.conflict_resolution import ConflictResolver, ConflictResolutionMixin
+
+        assert ConflictResolutionMixin is ConflictResolver
+
+    def test_has_init(self):
+        """ConflictResolver must define __init__."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        assert "__init__" in ConflictResolver.__dict__
+
+    def test_init_signature(self):
+        """__init__ must accept engine, scorer, ingestion, supersession_state,
+        cr_entity_gate, cosine_dedup_threshold, decompose_fn, retrieve_fn."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        sig = inspect.signature(ConflictResolver.__init__)
+        params = list(sig.parameters.keys())
+        assert "self" in params
+        assert "engine" in params
+        assert "scorer" in params
+        assert "ingestion" in params
+        assert "supersession_state" in params
+        assert "cr_entity_gate" in params
+        assert "cosine_dedup_threshold" in params
+        assert "decompose_fn" in params
+        assert "retrieve_fn" in params
+
+
+class TestConflictResolverStandalone:
+    """Verify ConflictResolver can be instantiated standalone (no mixin host)."""
+
+    def test_instantiate_with_none_args(self):
+        """ConflictResolver() with all-None args must not raise."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        cr = ConflictResolver(
+            engine=None,
+            scorer=None,
+            ingestion=None,
+            supersession_state=None,
+        )
+        assert cr is not None
+
+    def test_stores_engine(self):
+        """_engine attribute must be set from constructor."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        sentinel = object()
+        cr = ConflictResolver(engine=sentinel, scorer=None, ingestion=None)
+        assert cr._engine is sentinel
+
+    def test_stores_scorer(self):
+        """_scorer attribute must be set from constructor."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        sentinel = object()
+        cr = ConflictResolver(engine=None, scorer=sentinel, ingestion=None)
+        assert cr._scorer is sentinel
+
+    def test_stores_ingestion(self):
+        """_ingestion attribute must be set from constructor."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        sentinel = object()
+        cr = ConflictResolver(engine=None, scorer=None, ingestion=sentinel)
+        assert cr._ingestion is sentinel
+
+    def test_stores_supersession_state(self):
+        """_supersession attribute must be set from constructor."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        sentinel = object()
+        cr = ConflictResolver(
+            engine=None, scorer=None, ingestion=None,
+            supersession_state=sentinel,
+        )
+        assert cr._supersession is sentinel
+
+    def test_default_cr_entity_gate(self):
+        """cr_entity_gate defaults to False."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        cr = ConflictResolver(engine=None, scorer=None, ingestion=None)
+        assert cr._cr_entity_gate is False
+
+    def test_default_cosine_dedup_threshold(self):
+        """cosine_dedup_threshold defaults to 0.95."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        cr = ConflictResolver(engine=None, scorer=None, ingestion=None)
+        assert cr._cosine_dedup_threshold == 0.95
+
+    def test_stores_decompose_fn(self):
+        """decompose_fn callback must be stored."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        fn = lambda q: [q]
+        cr = ConflictResolver(
+            engine=None, scorer=None, ingestion=None, decompose_fn=fn,
+        )
+        assert cr._decompose_fn is fn
+
+    def test_stores_retrieve_fn(self):
+        """retrieve_fn callback must be stored."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        fn = lambda q: []
+        cr = ConflictResolver(
+            engine=None, scorer=None, ingestion=None, retrieve_fn=fn,
+        )
+        assert cr._retrieve_fn is fn
+
+
+class TestResolveProperties:
+    """Verify _resolve_* properties for dual-mode attribute resolution."""
+
+    def test_resolve_engine_standalone(self):
+        """_resolve_engine must return _engine in standalone mode."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        sentinel = object()
+        cr = ConflictResolver(engine=sentinel, scorer=None, ingestion=None)
+        assert cr._resolve_engine is sentinel
+
+    def test_resolve_supersession_graph_standalone(self):
+        """_resolve_supersession_graph must return supersession_state.supersession_graph."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        class FakeState:
+            supersession_graph = {"old": "new"}
+            supersedes = {}
+
+        cr = ConflictResolver(
+            engine=None, scorer=None, ingestion=None,
+            supersession_state=FakeState(),
+        )
+        assert cr._resolve_supersession_graph == {"old": "new"}
+
+    def test_resolve_supersedes_standalone(self):
+        """_resolve_supersedes must return supersession_state.supersedes."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        class FakeState:
+            supersession_graph = {}
+            supersedes = {"new": {"old1", "old2"}}
+
+        cr = ConflictResolver(
+            engine=None, scorer=None, ingestion=None,
+            supersession_state=FakeState(),
+        )
+        assert cr._resolve_supersedes == {"new": {"old1", "old2"}}
+
+    def test_resolve_supersession_graph_no_state(self):
+        """Without supersession_state, _resolve_supersession_graph returns empty dict."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        cr = ConflictResolver(engine=None, scorer=None, ingestion=None)
+        assert cr._resolve_supersession_graph == {}
+
+    def test_resolve_supersedes_no_state(self):
+        """Without supersession_state, _resolve_supersedes returns empty dict."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        cr = ConflictResolver(engine=None, scorer=None, ingestion=None)
+        assert cr._resolve_supersedes == {}
+
+    def test_resolve_engine_mixin_fallback(self):
+        """In mixin mode (no _engine set via __init__), _resolve_engine
+        falls back to self.coupled_engine."""
+        from mabench.conflict_resolution import ConflictResolver
+
+        class FakeHost(ConflictResolver):
+            def __init__(self):
+                # Do NOT call super().__init__ — simulates mixin mode
+                self.coupled_engine = "host_engine"
+
+        host = FakeHost()
+        # _engine was never set, so _resolve_engine falls back to coupled_engine
+        assert host._resolve_engine == "host_engine"
+
+
+class TestMethodsOnConflictResolver:
+    """All 4 methods must be defined on ConflictResolver.__dict__
+    (not inherited from elsewhere)."""
+
+    def test_query_time_cr_on_resolver(self):
+        from mabench.conflict_resolution import ConflictResolver
+
+        assert "_query_time_cr" in ConflictResolver.__dict__
+
+    def test_pairwise_cosine_dedup_on_resolver(self):
+        from mabench.conflict_resolution import ConflictResolver
+
+        assert "_pairwise_cosine_dedup" in ConflictResolver.__dict__
+
+    def test_resolve_conflicts_on_resolver(self):
+        from mabench.conflict_resolution import ConflictResolver
+
+        assert "_resolve_conflicts" in ConflictResolver.__dict__
+
+    def test_coverage_audit_on_resolver(self):
+        from mabench.conflict_resolution import ConflictResolver
+
+        assert "_coverage_audit" in ConflictResolver.__dict__

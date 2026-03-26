@@ -4,9 +4,13 @@ Module-level functions:
   _get_subtree_text  — spaCy token subtree text helper
   _extract_acl_triples — ACL-aware triple extraction from spaCy doc
 
-Mixin class:
-  ConflictResolutionMixin — query-time CR, cosine dedup, graph-based
-  conflict resolution, and coverage audit methods for HermesMemoryAgent.
+Standalone class:
+  ConflictResolver — query-time CR, cosine dedup, graph-based
+  conflict resolution, and coverage audit.  Can be used independently
+  or composed into HermesMemoryAgent.
+
+Backward-compat alias:
+  ConflictResolutionMixin = ConflictResolver
 """
 
 from __future__ import annotations
@@ -153,12 +157,14 @@ def _extract_acl_triples(doc) -> list[tuple[str, str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# ConflictResolutionMixin
+# ConflictResolver (formerly ConflictResolutionMixin)
 # ---------------------------------------------------------------------------
 
 
-class ConflictResolutionMixin:
-    """Mixin for query-time conflict resolution and deduplication.
+class ConflictResolver:
+    """Standalone query-time conflict resolution and deduplication.
+
+    Can be used independently or composed into HermesMemoryAgent.
 
     Provides:
       _query_time_cr        — triple-based conflict resolution on retrieved facts
@@ -166,11 +172,66 @@ class ConflictResolutionMixin:
       _resolve_conflicts    — supersession-graph-based conflict resolution
       _coverage_audit       — decomposition-based coverage gap detection
 
-    Attributes accessed via self (defined on HermesMemoryAgent):
-      coupled_engine, _ingestion, _scorer, _cr_entity_gate,
-      _cosine_dedup_threshold, _supersession_graph, _supersedes,
-      _decompose_query, _retrieve_v2
+    Standalone usage::
+
+        cr = ConflictResolver(engine=coupled_engine, scorer=scorer, ingestion=pipeline)
+        filtered = cr._query_time_cr(chunks)
+
+    Mixin usage (backward compat):
+      HermesMemoryAgent inherits from ConflictResolutionMixin (alias).
+      The _resolve_* properties fall back to self.coupled_engine /
+      self._supersession_graph / self._supersedes when __init__ was not called.
     """
+
+    def __init__(
+        self,
+        engine=None,
+        scorer=None,
+        ingestion=None,
+        supersession_state=None,
+        cr_entity_gate: bool = False,
+        cosine_dedup_threshold: float = 0.95,
+        decompose_fn=None,
+        retrieve_fn=None,
+    ) -> None:
+        # _engine: CoupledEngine with .memory_store: list[MemoryEntry]
+        self._engine = engine
+        # _scorer: EmbeddingRelevanceScorer with .embed(text), .embed_batch(texts)
+        self._scorer = scorer
+        # _ingestion: IngestionPipeline with ._nlp (spaCy Language pipeline)
+        self._ingestion = ingestion
+        # _supersession: SupersessionState with .supersession_graph, .supersedes
+        self._supersession = supersession_state
+        self._cr_entity_gate = cr_entity_gate
+        self._cosine_dedup_threshold = cosine_dedup_threshold
+        # Callbacks to break circular deps with QueryPipeline / Retriever
+        self._decompose_fn = decompose_fn
+        self._retrieve_fn = retrieve_fn
+
+    # ------------------------------------------------------------------
+    # Attribute resolution: standalone config or mixin-mode fallback
+    # ------------------------------------------------------------------
+
+    @property
+    def _resolve_engine(self):
+        """CoupledEngine -- from __init__ or host class self.coupled_engine."""
+        if hasattr(self, "_engine") and self._engine is not None:
+            return self._engine
+        return self.coupled_engine  # type: ignore[attr-defined]
+
+    @property
+    def _resolve_supersession_graph(self) -> dict:
+        """old_text -> new_text supersession graph."""
+        if hasattr(self, "_supersession") and self._supersession is not None:
+            return self._supersession.supersession_graph
+        return getattr(self, "_supersession_graph", {})
+
+    @property
+    def _resolve_supersedes(self) -> dict:
+        """new_text -> {old_text, ...} reverse supersession map."""
+        if hasattr(self, "_supersession") and self._supersession is not None:
+            return self._supersession.supersedes
+        return getattr(self, "_supersedes", {})
 
     def _query_time_cr(self, chunks: list[str]) -> list[str]:
         """Query-time conflict resolution on retrieved facts.
@@ -196,7 +257,7 @@ class ConflictResolutionMixin:
 
         # Build text->recency lookup from memory store
         text_to_recency: dict[str, float] = {}
-        for m in self.coupled_engine.memory_store:
+        for m in self._resolve_engine.memory_store:
             text_to_recency[m.text] = m.recency
 
         # Extract triples and NER for each chunk
@@ -266,7 +327,7 @@ class ConflictResolutionMixin:
         # Build text->(embedding, recency) from memory store
         text_to_emb: dict[str, np.ndarray] = {}
         text_to_rec: dict[str, float] = {}
-        for m in self.coupled_engine.memory_store:
+        for m in self._resolve_engine.memory_store:
             text_to_emb[m.text] = m.embedding
             text_to_rec[m.text] = m.recency
 
@@ -350,7 +411,7 @@ class ConflictResolutionMixin:
         import logging
 
         _cr_log = logging.getLogger("conflict_res")
-        _cr_log.info("_resolve_conflicts: %d chunks, graph=%d edges", len(chunks), len(self._supersession_graph))
+        _cr_log.info("_resolve_conflicts: %d chunks, graph=%d edges", len(chunks), len(self._resolve_supersession_graph))
 
         retrieved_set = set(chunks)
         to_remove: set[str] = set()
@@ -358,11 +419,11 @@ class ConflictResolutionMixin:
         # 2a: Triple-based -- use supersession graph
         for chunk in chunks:
             # Is this chunk superseded by something also in the retrieved set?
-            newer = self._supersession_graph.get(chunk)
+            newer = self._resolve_supersession_graph.get(chunk)
             if newer and newer in retrieved_set:
                 to_remove.add(chunk)
             # Does this chunk supersede something in the set?
-            for older in self._supersedes.get(chunk, ()):
+            for older in self._resolve_supersedes.get(chunk, ()):
                 if older in retrieved_set:
                     to_remove.add(older)
 
@@ -391,7 +452,13 @@ class ConflictResolutionMixin:
            cosine > threshold -- if not, do a targeted retrieval.
         4. Return additional texts to append (may be empty).
         """
-        subqueries = self._decompose_query(bare_question)
+        # Resolve decompose callable: callback > mixin fallback
+        if hasattr(self, "_decompose_fn") and self._decompose_fn is not None:
+            decompose = self._decompose_fn
+        else:
+            decompose = self._decompose_query  # type: ignore[attr-defined]
+
+        subqueries = decompose(bare_question)
         if len(subqueries) <= 1:
             return []  # single-hop, nothing to audit
 
@@ -402,6 +469,12 @@ class ConflictResolutionMixin:
         coverage_threshold = 0.35
         gap_texts: list[str] = []
         seen = set(t.strip()[:200] for t in v2_texts)
+
+        # Resolve retrieve callable: callback > mixin fallback
+        if hasattr(self, "_retrieve_fn") and self._retrieve_fn is not None:
+            retrieve = self._retrieve_fn
+        else:
+            retrieve = self._retrieve_v2  # type: ignore[attr-defined]
 
         for sq_idx, (sq, sq_emb) in enumerate(zip(subqueries, sq_embs)):
             # Check if any existing chunk covers this sub-query
@@ -414,7 +487,7 @@ class ConflictResolutionMixin:
                 continue  # sub-query is covered
 
             # Gap found -- targeted retrieval for this sub-query
-            sq_results = self._retrieve_v2(sq)
+            sq_results = retrieve(sq)
             for r in sq_results[:3]:  # inject at most 3 gap-fillers
                 key = r["text"].strip()[:200]
                 if key not in seen:
@@ -422,3 +495,9 @@ class ConflictResolutionMixin:
                     gap_texts.append(r["text"])
 
         return gap_texts
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat alias: hermes_agent.py imports ConflictResolutionMixin
+# ---------------------------------------------------------------------------
+ConflictResolutionMixin = ConflictResolver

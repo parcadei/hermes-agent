@@ -1,16 +1,19 @@
-"""Tests for RetrievalMixin extraction to mabench.retrieval.
+"""Tests for Retriever (formerly RetrievalMixin) in mabench.retrieval.
 
 Verifies:
-1. RetrievalMixin can be imported from mabench.retrieval
-2. All expected methods exist on RetrievalMixin
-3. HermesMemoryAgent inherits from RetrievalMixin
-4. RetrievalMixin appears in HermesMemoryAgent's MRO
-5. Methods have correct signatures (same as original)
-6. mabench.retrieval does NOT contain HermesMemoryAgent
-7. Methods NOT defined directly on HermesMemoryAgent.__dict__
-8. _compute_effective_k helper exists (decomposed from _retrieve_candidates)
-9. Return type annotations preserved
-10. EntityMixin can call _embed_query via MRO (cross-mixin dependency)
+1. RetrievalMixin can be imported from mabench.retrieval (backward compat alias)
+2. Retriever can be imported from mabench.retrieval (new name)
+3. All expected methods exist on Retriever / RetrievalMixin
+4. HermesMemoryAgent inherits from RetrievalMixin (i.e. Retriever)
+5. Retriever or RetrievalMixin appears in HermesMemoryAgent's MRO
+6. Methods have correct signatures (same as original)
+7. mabench.retrieval does NOT contain HermesMemoryAgent
+8. Methods NOT defined directly on HermesMemoryAgent.__dict__
+9. _compute_effective_k helper exists (decomposed from _retrieve_candidates)
+10. Return type annotations preserved
+11. EntityMixin can call _embed_query via MRO (cross-mixin dependency)
+12. Standalone Retriever can be instantiated with explicit deps + config
+13. _resolve_* properties use config in standalone mode, fallback in mixin mode
 """
 
 from __future__ import annotations
@@ -68,12 +71,12 @@ def test_hermes_agent_inherits_retrieval_mixin():
 
 
 def test_retrieval_mixin_in_mro():
-    """RetrievalMixin appears in HermesMemoryAgent's MRO."""
+    """Retriever (or RetrievalMixin) appears in HermesMemoryAgent's MRO."""
     from mabench.retrieval import RetrievalMixin
     from mabench.hermes_agent import HermesMemoryAgent
     mro_names = [cls.__name__ for cls in HermesMemoryAgent.__mro__]
-    assert "RetrievalMixin" in mro_names, (
-        f"RetrievalMixin not in MRO: {mro_names}"
+    assert "RetrievalMixin" in mro_names or "Retriever" in mro_names, (
+        f"Neither RetrievalMixin nor Retriever in MRO: {mro_names}"
     )
 
 
@@ -287,3 +290,219 @@ def test_retrieval_methods_under_50_lines():
         assert len(source_lines) <= 50, (
             f"{method_name} has {len(source_lines)} lines (max 50)"
         )
+
+
+# ===========================================================================
+# Test Group 8: Retriever class (new standalone name)
+# ===========================================================================
+
+
+def test_import_retriever():
+    """Retriever can be imported from mabench.retrieval."""
+    from mabench.retrieval import Retriever
+    assert Retriever is not None
+
+
+def test_retrieval_mixin_is_retriever_alias():
+    """RetrievalMixin is an alias for Retriever."""
+    from mabench.retrieval import Retriever, RetrievalMixin
+    assert RetrievalMixin is Retriever
+
+
+def test_retriever_has_init():
+    """Retriever has an __init__ method defined on itself."""
+    from mabench.retrieval import Retriever
+    assert "__init__" in Retriever.__dict__, (
+        "Retriever should define its own __init__"
+    )
+
+
+def test_retriever_init_signature():
+    """Retriever.__init__ accepts engine, scorer, belief_index, and config objects."""
+    from mabench.retrieval import Retriever
+    sig = inspect.signature(Retriever.__init__)
+    params = list(sig.parameters.keys())
+    assert "self" in params
+    assert "engine" in params
+    assert "scorer" in params
+    assert "belief_index" in params
+    assert "config" in params
+    assert "cr_config" in params
+    assert "dedup_config" in params
+    assert "belief_config" in params
+
+
+def test_retriever_init_defaults_to_none():
+    """All config params in __init__ default to None."""
+    from mabench.retrieval import Retriever
+    sig = inspect.signature(Retriever.__init__)
+    for name in ("config", "cr_config", "dedup_config", "belief_config",
+                 "belief_index"):
+        p = sig.parameters[name]
+        assert p.default is None, (
+            f"{name} should default to None, got {p.default}"
+        )
+
+
+# ===========================================================================
+# Test Group 9: Standalone instantiation with config
+# ===========================================================================
+
+
+class _FakeScorer:
+    """Minimal scorer stub for standalone Retriever tests."""
+    def embed(self, text: str):
+        import numpy as np
+        return np.zeros(8)
+
+
+class _FakeEngine:
+    """Minimal engine stub for standalone Retriever tests."""
+    memory_store = []
+
+    def query(self, embedding, top_k):
+        return [{"text": "fact1", "score": 0.9}]
+
+
+def test_retriever_standalone_instantiation():
+    """Retriever can be instantiated with explicit deps and default configs."""
+    from mabench.retrieval import Retriever
+    r = Retriever(engine=_FakeEngine(), scorer=_FakeScorer())
+    assert r._engine is not None
+    assert r._scorer is not None
+    assert r._belief_index is None
+
+
+def test_retriever_standalone_with_explicit_config():
+    """Retriever uses the provided RetrievalConfig."""
+    from mabench.retrieval import Retriever
+    from mabench.configs import RetrievalConfig
+    cfg = RetrievalConfig(retrieve_num=20, cooc_boost=True)
+    r = Retriever(engine=_FakeEngine(), scorer=_FakeScorer(), config=cfg)
+    assert r._cfg.retrieve_num == 20
+    assert r._cfg.cooc_boost is True
+
+
+def test_retriever_standalone_embed_query():
+    """Standalone Retriever._embed_query delegates to scorer.embed()."""
+    from mabench.retrieval import Retriever
+    r = Retriever(engine=_FakeEngine(), scorer=_FakeScorer())
+    emb = r._embed_query("test query")
+    assert emb is not None
+    assert len(emb) == 8
+
+
+def test_retriever_standalone_compute_effective_k_no_cr():
+    """Standalone Retriever._compute_effective_k returns base k when no CR."""
+    from mabench.retrieval import Retriever
+    from mabench.configs import RetrievalConfig, CRConfig
+    r = Retriever(
+        engine=_FakeEngine(),
+        scorer=_FakeScorer(),
+        config=RetrievalConfig(retrieve_num=10),
+        cr_config=CRConfig(enabled=False),
+    )
+    assert r._compute_effective_k(10) == 10
+
+
+def test_retriever_standalone_compute_effective_k_with_cr():
+    """Standalone Retriever._compute_effective_k applies CR overfetch."""
+    from mabench.retrieval import Retriever
+    from mabench.configs import RetrievalConfig, CRConfig
+    r = Retriever(
+        engine=_FakeEngine(),
+        scorer=_FakeScorer(),
+        config=RetrievalConfig(retrieve_num=10),
+        cr_config=CRConfig(enabled=True, overfetch=3),
+    )
+    assert r._compute_effective_k(10) == 30
+
+
+def test_retriever_standalone_retrieve_candidates():
+    """Standalone Retriever._retrieve_candidates calls engine.query."""
+    import numpy as np
+    from mabench.retrieval import Retriever
+    r = Retriever(engine=_FakeEngine(), scorer=_FakeScorer())
+    results = r._retrieve_candidates(np.zeros(8), top_k=10)
+    assert len(results) == 1
+    assert results[0]["text"] == "fact1"
+
+
+def test_retriever_standalone_retrieve_v2():
+    """Standalone Retriever._retrieve_v2 runs full pipeline."""
+    from mabench.retrieval import Retriever
+    r = Retriever(engine=_FakeEngine(), scorer=_FakeScorer())
+    results = r._retrieve_v2("test query")
+    assert len(results) == 1
+
+
+# ===========================================================================
+# Test Group 10: _resolve_* properties (config vs mixin fallback)
+# ===========================================================================
+
+
+def test_resolve_properties_exist():
+    """Retriever has _resolve_* properties for all config-derived attributes."""
+    from mabench.retrieval import Retriever
+    expected_resolvers = [
+        "_resolve_retrieve_num",
+        "_resolve_conflict_resolution",
+        "_resolve_cosine_dedup",
+        "_resolve_cr_overfetch",
+        "_resolve_belief_overfetch",
+        "_resolve_engine",
+        "_resolve_belief_index",
+        "_resolve_scorer",
+        "_resolve_transfer",
+        "_resolve_coretrieval",
+        "_resolve_cooc_boost",
+        "_resolve_ppr",
+        "_resolve_hybrid",
+        "_resolve_associative",
+        "_resolve_sparse",
+        "_resolve_transfer_k",
+        "_resolve_coretrieval_bonus",
+        "_resolve_coretrieval_min_count",
+        "_resolve_cooc_weight",
+        "_resolve_cooc_gate_threshold",
+        "_resolve_ppr_weight",
+        "_resolve_ppr_damping",
+        "_resolve_bm25_weight",
+        "_resolve_dream_weight",
+    ]
+    for prop_name in expected_resolvers:
+        assert hasattr(Retriever, prop_name), (
+            f"Missing resolver property: {prop_name}"
+        )
+
+
+def test_resolve_retrieve_num_standalone():
+    """_resolve_retrieve_num reads from config in standalone mode."""
+    from mabench.retrieval import Retriever
+    from mabench.configs import RetrievalConfig
+    r = Retriever(
+        engine=_FakeEngine(),
+        scorer=_FakeScorer(),
+        config=RetrievalConfig(retrieve_num=42),
+    )
+    assert r._resolve_retrieve_num == 42
+
+
+def test_resolve_conflict_resolution_standalone():
+    """_resolve_conflict_resolution reads from CRConfig in standalone mode."""
+    from mabench.retrieval import Retriever
+    from mabench.configs import CRConfig
+    r = Retriever(
+        engine=_FakeEngine(),
+        scorer=_FakeScorer(),
+        cr_config=CRConfig(enabled=True),
+    )
+    assert r._resolve_conflict_resolution is True
+
+
+def test_resolve_engine_standalone():
+    """_resolve_engine returns the injected engine in standalone mode."""
+    from mabench.retrieval import Retriever
+    eng = _FakeEngine()
+    r = Retriever(engine=eng, scorer=_FakeScorer())
+    assert r._resolve_engine is eng

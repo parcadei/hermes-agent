@@ -65,12 +65,13 @@ def test_hermes_agent_inherits_rebel_kg_mixin():
 
 
 def test_rebel_kg_mixin_in_mro():
-    """RebelKGMixin appears in HermesMemoryAgent's MRO."""
+    """RebelKG (or its alias RebelKGMixin) appears in HermesMemoryAgent's MRO."""
     from mabench.rebel import RebelKGMixin
     from mabench.hermes_agent import HermesMemoryAgent
     mro_names = [cls.__name__ for cls in HermesMemoryAgent.__mro__]
-    assert "RebelKGMixin" in mro_names, (
-        f"RebelKGMixin not in MRO: {mro_names}"
+    # Class was renamed RebelKGMixin -> RebelKG; alias preserves import compat
+    assert "RebelKGMixin" in mro_names or "RebelKG" in mro_names, (
+        f"RebelKG/RebelKGMixin not in MRO: {mro_names}"
     )
 
 

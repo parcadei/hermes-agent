@@ -1,7 +1,23 @@
-"""Answer formatting and LLM generation.
+"""Answer formatting and LLM generation — standalone module.
 
-Extracts _format_outgestion and _generate_answer from HermesMemoryAgent
-into a mixin for cleaner separation of outgestion concerns.
+Converted from OutgestionMixin to standalone Outgester class.
+All self.* attribute access replaced with explicit config + instance fields.
+
+Migration notes for callers:
+  - OutgestionMixin is a backward-compat alias for Outgester.
+  - Mixin callers (hermes_agent.py) still work via MRO — the alias
+    keeps the import path stable.  HermesMemoryAgent.__init__ sets
+    self.model / self.temperature / self._max_gen_tokens / etc. directly;
+    the _resolve_* properties fall back to those when _cfg is absent.
+  - Direct callers (interactive_query.py calling agent._generate_answer)
+    continue to work because hermes_agent.py inherits OutgestionMixin
+    which is now Outgester.
+  - Standalone usage:
+      from mabench.outgestion import Outgester
+      from mabench.configs import LLMConfig
+      og = Outgester(LLMConfig(model="gpt-4o-mini"))
+      ctx, instr = og.format_outgestion(chunks, metadata_by_key)
+      answer, in_tok, out_tok, gen_time = og.generate_answer(q, ctx, instr)
 """
 
 from __future__ import annotations
@@ -9,11 +25,129 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 
+from mabench.configs import LLMConfig
 
-class OutgestionMixin:
-    """Mixin for formatting retrieval results and generating LLM answers."""
 
-    def _format_outgestion(
+class Outgester:
+    """Formats retrieval results and generates LLM answers.
+
+    Standalone replacement for the former OutgestionMixin.  Takes an
+    explicit LLMConfig instead of reading scattered self.* attributes.
+
+    When used as a mixin (no __init__ call), falls back to reading the
+    old self.model / self.temperature / self._max_gen_tokens attributes
+    set by the host class.
+    """
+
+    def __init__(
+        self,
+        llm_config: LLMConfig,
+        conflict_resolution: bool = False,
+        temporal_context: bool = False,
+        contradiction_context: bool = False,
+        contradiction_sim_threshold: float = 0.85,
+    ) -> None:
+        # _cfg: LLMConfig(model="gpt-4o-mini", temperature=0.0, max_gen_tokens=64)
+        self._cfg = llm_config
+        # _client: OpenAI | None — lazy-initialized on first generate_answer call
+        self._client = None
+        self._conflict_resolution = conflict_resolution
+        self._temporal_context = temporal_context
+        self._contradiction_context = contradiction_context
+        self._contradiction_sim_threshold = contradiction_sim_threshold
+
+    # ------------------------------------------------------------------
+    # Attribute resolution: new _cfg-based or old self.* fallback
+    # ------------------------------------------------------------------
+
+    @property
+    def _resolve_model(self) -> str:
+        """LLM model name — from _cfg or host class self.model."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.model
+        return self.model  # type: ignore[attr-defined]
+
+    @property
+    def _resolve_temperature(self) -> float:
+        """LLM temperature — from _cfg or host class self.temperature."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.temperature
+        return self.temperature  # type: ignore[attr-defined]
+
+    @property
+    def _resolve_max_gen_tokens(self) -> int:
+        """Max generation tokens — from _cfg or host class self._max_gen_tokens."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.max_gen_tokens
+        return self._max_gen_tokens  # type: ignore[attr-defined]
+
+    @property
+    def _resolve_conflict_resolution(self) -> bool:
+        """Conflict resolution flag — from _conflict_resolution or host class."""
+        if hasattr(self, "_conflict_resolution"):
+            return self._conflict_resolution
+        return getattr(self, "conflict_resolution", False)
+
+    @property
+    def _resolve_temporal_context(self) -> bool:
+        """Temporal context flag — from _temporal_context or host class."""
+        if hasattr(self, "_temporal_context"):
+            return self._temporal_context
+        return getattr(self, "temporal_context", False)
+
+    @property
+    def _resolve_contradiction_context(self) -> bool:
+        """Contradiction context flag — from _contradiction_context or host class."""
+        if hasattr(self, "_contradiction_context"):
+            return self._contradiction_context
+        return getattr(self, "contradiction_context", False)
+
+    @property
+    def _resolve_contradiction_sim_threshold(self) -> float:
+        """Contradiction similarity threshold — from instance or host class."""
+        if hasattr(self, "_contradiction_sim_threshold"):
+            return self._contradiction_sim_threshold
+        return getattr(self, "contradiction_sim_threshold", 0.85)
+
+    @property
+    def _resolve_client(self):
+        """OpenAI client — from _client or host class _llm_client."""
+        if hasattr(self, "_client"):
+            return self._client
+        return self._llm_client  # type: ignore[attr-defined]
+
+    @_resolve_client.setter
+    def _resolve_client(self, value) -> None:
+        if hasattr(self, "_client"):
+            self._client = value
+        else:
+            self._llm_client = value  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------
+    # Lazy OpenAI client
+    # ------------------------------------------------------------------
+
+    def _ensure_client(self) -> None:
+        """Initialize OpenAI client on first use (OpenRouter endpoint)."""
+        if self._resolve_client is not None:
+            return
+        import os
+
+        from openai import OpenAI
+
+        self._resolve_client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=os.environ["OPENROUTER_API_KEY"],
+        )
+
+    # Backward-compat alias for mixin callers that call self._ensure_llm_client()
+    _ensure_llm_client = _ensure_client
+
+    # ------------------------------------------------------------------
+    # Public API (formerly _format_outgestion / _generate_answer)
+    # ------------------------------------------------------------------
+
+    def format_outgestion(
         self,
         chunks: list[str],
         metadata_by_key: dict[str, dict],
@@ -34,10 +168,10 @@ class OutgestionMixin:
         # Layer 3 (newest-first sort) DISABLED -- eval showed it disrupts the
         # relevance ranking built by cosine+cooc+triadic, causing ~5 regressions.
         # Just return flat text preserving retrieval order.
-        if getattr(self, "conflict_resolution", False):
+        if self._resolve_conflict_resolution:
             return "\n\n".join(chunks), ""
 
-        if not getattr(self, "temporal_context", False):
+        if not self._resolve_temporal_context:
             # Baseline: flat text, no metadata
             return "\n\n".join(chunks), ""
 
@@ -59,10 +193,10 @@ class OutgestionMixin:
         # semantically similar (cosine > threshold) but have different
         # recency values. Cross-reference BOTH with [CONFLICT] tags --
         # surface the conflict, never remove content.
-        contradiction_threshold = getattr(self, "contradiction_sim_threshold", 0.85)
+        contradiction_threshold = self._resolve_contradiction_sim_threshold
         conflict_pairs: dict[int, list[int]] = defaultdict(list)
 
-        if getattr(self, "contradiction_context", False):
+        if self._resolve_contradiction_context:
             import numpy as np
 
             n_ann = len(annotated_full)
@@ -112,14 +246,14 @@ class OutgestionMixin:
             )
         return "\n\n".join(lines), instructions
 
-    def _generate_answer(
+    def generate_answer(
         self,
         question: str,
         context: str,
         extra_system_instructions: str = "",
     ) -> tuple[str, int, int, float]:
         """Call LLM to generate an answer from retrieved context."""
-        self._ensure_llm_client()
+        self._ensure_client()
 
         system_msg = (
             "You are a helpful assistant that answers questions from a knowledge pool. Give a very concise answer."
@@ -131,17 +265,42 @@ class OutgestionMixin:
         user_msg = f"[Knowledge Pool]\n{context}\n\n{question}\nAnswer:"
 
         start = time.time()
-        response = self._llm_client.chat.completions.create(
-            model=self.model,
+        response = self._resolve_client.chat.completions.create(
+            model=self._resolve_model,
             messages=[
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
             ],
-            temperature=self.temperature,
-            max_tokens=max(self._max_gen_tokens, 16),
+            temperature=self._resolve_temperature,
+            max_tokens=max(self._resolve_max_gen_tokens, 16),
         )
         gen_time = time.time() - start
 
         output = response.choices[0].message.content or ""
         usage = response.usage
         return output, usage.prompt_tokens, usage.completion_tokens, gen_time
+
+    # ------------------------------------------------------------------
+    # Backward-compat underscore aliases (used by mixin callers via MRO)
+    # ------------------------------------------------------------------
+
+    def _format_outgestion(
+        self,
+        chunks: list[str],
+        metadata_by_key: dict[str, dict],
+    ) -> tuple[str, str]:
+        """Alias for format_outgestion — keeps mixin callers working."""
+        return self.format_outgestion(chunks, metadata_by_key)
+
+    def _generate_answer(
+        self,
+        question: str,
+        context: str,
+        extra_system_instructions: str = "",
+    ) -> tuple[str, int, int, float]:
+        """Alias for generate_answer — keeps mixin callers working."""
+        return self.generate_answer(question, context, extra_system_instructions)
+
+
+# Backward-compat alias so `from mabench.outgestion import OutgestionMixin` works.
+OutgestionMixin = Outgester

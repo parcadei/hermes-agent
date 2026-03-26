@@ -1,19 +1,15 @@
-"""Ingestion store pipeline for HermesMemoryAgent.
+"""Ingestion store pipeline — standalone FactStore.
 
-Extracts _store and its decomposed helpers from HermesMemoryAgent into a
-mixin. The main entry point _store orchestrates: segmentation, embedding,
-triple extraction, supersession, engine storage, index updates, and
-post-chunk bookkeeping (FAISS rebuild, synonym dict, entity graph,
-belief propagation, dream cycle).
-
-Each helper method has a single responsibility and stays under 50 lines.
+_resolve_* properties support both standalone (explicit __init__) and
+mixin mode (attributes set by HermesMemoryAgent.__init__).
+StoreMixin is a backward-compat alias for FactStore.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -38,35 +34,133 @@ class _PrepareResult:
     primary_entities: list[str | None]
 
 
-class StoreMixin:
-    """Mixin providing the _store ingestion pipeline and its helpers.
+class FactStore:
+    """Standalone ingestion store pipeline.
 
-    Requires the host class to provide:
-    - self._ingestion: IngestionPipeline instance
-    - self._scorer: EmbeddingRelevanceScorer with embed_batch()
-    - self.coupled_engine: CoupledEngine with memory_store, store(),
-      replace_entry(), rebuild_faiss_if_dirty(), flush_session(), dream()
-    - self.orchestrator: MemoryOrchestrator (V1 store)
-    - self.cooc_boost_retrieval: bool
-    - self.supersession: bool
-    - self._store_count: int
-    - self._triple_index: defaultdict(list)
-    - self._text_to_store_idx: dict[str, int]
-    - self._fact_entities: dict[str, tuple]
-    - self._superseded_texts: set
-    - self._supersession_graph: dict
-    - self._supersedes: defaultdict(set)
-    - self._supersession_log: list
-    - self._gliner_entity_index: defaultdict(set)
-    - self._belief_index: BeliefIndex or None
-    - self._bm25_index: BM25Index or None
-    - self._triadic: TriadicMemory or None
-    - self._chain_cache: ChainCache or None
-    - self.dream_interval: int
-    - self._entity_accumulator: _MutableEntityGraph
-    - self._rebel_extract_batch(): method from RebelKGMixin
-    - self._rebel_kg_add(): method from RebelKGMixin
+    Orchestrates: segment -> embed -> extract triples -> per-fact store ->
+    post-chunk ops (FAISS rebuild, synonym dict, entity graph, belief, dream).
+    When used as a mixin (no __init__ call), _resolve_* properties fall
+    back to reading the old self.* attributes set by the host class.
     """
+
+    def __init__(
+        self, engine, scorer, ingestion, orchestrator, *,
+        supersession_state=None, entity_index=None, rebel=None,
+        bm25_index=None, triadic=None, chain_cache=None,
+        belief_index=None, entity_accumulator=None,
+        supersession: bool = False, cooc_boost: bool = False,
+        dream_interval: int = 0,
+    ) -> None:
+        self._engine = engine
+        self._scorer = scorer
+        self._ingestion = ingestion
+        self._orchestrator = orchestrator
+        self._supersession_state = supersession_state
+        self._entity_idx = entity_index
+        self._rebel = rebel
+        self._bm25_index = bm25_index
+        self._triadic = triadic
+        self._chain_cache = chain_cache
+        self._belief_index = belief_index
+        self._entity_accumulator = entity_accumulator
+        self._supersession = supersession
+        self._cooc_boost = cooc_boost
+        self._dream_interval = dream_interval
+        self._store_count = 0
+
+    # -- Attribute resolution: standalone vs mixin fallback ---------------
+
+    def _ss(self, attr: str):
+        """Read a SupersessionState field, falling back to host class attr."""
+        ss = getattr(self, "_supersession_state", None)
+        if ss is not None:
+            return getattr(ss, attr)
+        return getattr(self, f"_{attr}")  # e.g. self._triple_index
+
+    @property
+    def _resolve_engine(self):
+        if hasattr(self, "_engine"):
+            return self._engine
+        return self.coupled_engine  # type: ignore[attr-defined]
+
+    @property
+    def _resolve_orchestrator(self):
+        if hasattr(self, "_orchestrator"):
+            return self._orchestrator
+        return self.orchestrator  # type: ignore[attr-defined]
+
+    @property
+    def _resolve_supersession(self) -> bool:
+        if hasattr(self, "_supersession"):
+            return self._supersession
+        return getattr(self, "supersession", False)
+
+    @property
+    def _resolve_cooc_boost(self) -> bool:
+        if hasattr(self, "_cooc_boost"):
+            return self._cooc_boost
+        return getattr(self, "cooc_boost_retrieval", False)
+
+    @property
+    def _resolve_dream_interval(self) -> int:
+        if hasattr(self, "_dream_interval"):
+            return self._dream_interval
+        return getattr(self, "dream_interval", 0)
+
+    @property
+    def _resolve_triple_index(self):
+        return self._ss("triple_index")
+
+    @property
+    def _resolve_text_to_store_idx(self):
+        return self._ss("text_to_store_idx")
+
+    @property
+    def _resolve_fact_entities(self):
+        return self._ss("fact_entities")
+
+    @property
+    def _resolve_superseded_texts(self):
+        return self._ss("superseded_texts")
+
+    @property
+    def _resolve_supersession_graph(self):
+        return self._ss("supersession_graph")
+
+    @property
+    def _resolve_supersedes(self):
+        return self._ss("supersedes")
+
+    @property
+    def _resolve_supersession_log(self):
+        return self._ss("supersession_log")
+
+    @property
+    def _resolve_gliner_entity_index(self):
+        ei = getattr(self, "_entity_idx", None)
+        if ei is not None:
+            return ei.index
+        return self._gliner_entity_index  # type: ignore[attr-defined]
+
+    @property
+    def _resolve_rebel_kg(self):
+        if hasattr(self, "_rebel"):
+            return self._rebel._kg if self._rebel is not None else None
+        return getattr(self, "_rebel_kg", None)
+
+    def _resolve_rebel_extract_batch(self, texts):
+        if hasattr(self, "_rebel") and self._rebel is not None:
+            return self._rebel.extract_batch(texts)
+        return self._rebel_extract_batch(texts)  # type: ignore[attr-defined]
+
+    def _resolve_rebel_kg_add(self, h, r, t):
+        if hasattr(self, "_rebel") and self._rebel is not None:
+            return self._rebel.add_triple(h, r, t)
+        return self._rebel_kg_add(h, r, t)  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------
+    # Public API: _store and decomposed helpers
+    # ------------------------------------------------------------------
 
     def _store(self, text: str) -> str:
         """Store text through ingestion pipeline + V1 + V2 layers.
@@ -88,34 +182,30 @@ class StoreMixin:
         return "Memorized"
 
     def _store_prepare(self, text: str) -> _PrepareResult:
-        """Segment text, embed facts, extract REBEL triples.
-
-        Returns a _PrepareResult bundling all pre-computed data
-        for the per-fact loop.
-        """
+        """Segment text, embed facts, extract REBEL triples."""
         result = self._ingestion.segment(text)
         fact_texts = [f.text for f in result.facts]
 
         rebel_triples_batch: list[list[dict]] | None = None
-        run_rebel = getattr(self, "_rebel_kg", None) is not None
+        run_rebel = self._resolve_rebel_kg is not None
 
         # Embed first, then REBEL sequentially (shared GPU).
         embeddings = self._scorer.embed_batch(fact_texts)
         if run_rebel:
-            rebel_triples_batch = self._rebel_extract_batch(fact_texts)
+            rebel_triples_batch = self._resolve_rebel_extract_batch(fact_texts)
 
-        # GLiNER entity extraction skipped — consumers disabled.
+        # GLiNER entity extraction skipped -- consumers disabled.
         primary_entities: list[str | None] = [None] * len(fact_texts)
         all_entities: list[list] = [[] for _ in fact_texts]
 
         # Build entity index with insertion offset.
-        base_idx = len(self.coupled_engine.memory_store)
+        base_idx = len(self._resolve_engine.memory_store)
         for i, ents in enumerate(all_entities):
             fact_idx = base_idx + i
             for ent in ents:
                 key = ent["text"].lower().strip()
                 if len(key) > 1:
-                    self._gliner_entity_index[key].add(fact_idx)
+                    self._resolve_gliner_entity_index[key].add(fact_idx)
 
         return _PrepareResult(
             result=result,
@@ -158,26 +248,26 @@ class StoreMixin:
         Returns (superseded_idx, superseded_text) or (None, None).
         Uses triple-based (S,P) matching with entity substring gate.
         """
-        if not self.supersession or not fact.triples:
+        if not self._resolve_supersession or not fact.triples:
             return None, None
 
         new_entities = (
             set(e.lower() for e in fact.entities) if fact.entities else set()
         )
-        self._fact_entities[fact.text] = fact.entities
+        self._resolve_fact_entities[fact.text] = fact.entities
 
         for subj, pred, obj in fact.triples:
             key = (subj.lower().strip(), pred.lower().strip())
             new_obj = obj.lower().strip()
             if not key[0] or not key[1]:
                 continue
-            for existing_obj, existing_text in self._triple_index[key]:
+            for existing_obj, existing_text in self._resolve_triple_index[key]:
                 if existing_obj == new_obj:
                     continue
                 # Entity gate: substring matching.
                 old_ents = [
                     e.lower()
-                    for e in self._fact_entities.get(existing_text, ())
+                    for e in self._resolve_fact_entities.get(existing_text, ())
                 ]
                 existing_lower = existing_text.lower()
                 fact_lower = fact.text.lower()
@@ -188,7 +278,7 @@ class StoreMixin:
                 )
                 if not shared:
                     continue
-                old_idx = self._text_to_store_idx.get(existing_text)
+                old_idx = self._resolve_text_to_store_idx.get(existing_text)
                 if old_idx is not None:
                     return old_idx, existing_text
         return None, None
@@ -206,26 +296,27 @@ class StoreMixin:
         reverse lookup, supersession graph, chain cache, and belief.
         Returns the store index.
         """
-        old_entry = self.coupled_engine.memory_store[superseded_idx]
-        self._supersession_log.append({
+        engine = self._resolve_engine
+        old_entry = engine.memory_store[superseded_idx]
+        self._resolve_supersession_log.append({
             "old_text": old_entry.text,
             "new_text": fact.text,
             "old_recency": old_entry.recency,
             "new_recency": float(self._store_count),
             "timestamp": time.time(),
         })
-        self.coupled_engine.replace_entry(
+        engine.replace_entry(
             superseded_idx, fact.text, emb, recency=float(self._store_count)
         )
         ms_idx = superseded_idx
         # Update reverse lookup.
-        del self._text_to_store_idx[superseded_text]
-        self._text_to_store_idx[fact.text] = ms_idx
+        del self._resolve_text_to_store_idx[superseded_text]
+        self._resolve_text_to_store_idx[fact.text] = ms_idx
         # Track superseded text for query-time safety net.
-        self._superseded_texts.add(superseded_text)
+        self._resolve_superseded_texts.add(superseded_text)
         # Supersession graph for query-time CR.
-        self._supersession_graph[superseded_text] = fact.text
-        self._supersedes[fact.text].add(superseded_text)
+        self._resolve_supersession_graph[superseded_text] = fact.text
+        self._resolve_supersedes[fact.text].add(superseded_text)
         # Chain cache invalidation.
         if getattr(self, "_chain_cache", None) is not None:
             self._chain_cache.invalidate_fact(superseded_text)
@@ -245,15 +336,15 @@ class StoreMixin:
         Stores via V1 orchestrator (when cooc_boost inactive) and
         V2 coupled engine. Returns the store index.
         """
-        if not self.cooc_boost_retrieval:
-            self.orchestrator.store(content=fact.text, embedding=emb)
-        ms_idx = self.coupled_engine.store(
+        if not self._resolve_cooc_boost:
+            self._resolve_orchestrator.store(content=fact.text, embedding=emb)
+        ms_idx = self._resolve_engine.store(
             text=fact.text,
             embedding=emb,
             recency=float(self._store_count),
             entity=entity,
         )
-        self._text_to_store_idx[fact.text] = ms_idx
+        self._resolve_text_to_store_idx[fact.text] = ms_idx
         return ms_idx
 
     def _store_update_indices(
@@ -273,7 +364,7 @@ class StoreMixin:
         # REBEL KG.
         if rebel_triples_batch is not None and fi < len(rebel_triples_batch):
             for triple in rebel_triples_batch[fi]:
-                self._rebel_kg_add(
+                self._resolve_rebel_kg_add(
                     triple["head"], triple["relation"], triple["tail"]
                 )
         # Belief index.
@@ -291,20 +382,20 @@ class StoreMixin:
         """
         if not fact.triples:
             return
-        if fact.text not in self._fact_entities:
-            self._fact_entities[fact.text] = fact.entities
+        if fact.text not in self._resolve_fact_entities:
+            self._resolve_fact_entities[fact.text] = fact.entities
         for subj, pred, obj in fact.triples:
             key = (subj.lower().strip(), pred.lower().strip())
             new_obj = obj.lower().strip()
             if not key[0] or not key[1]:
                 continue
             if superseded_text is not None:
-                self._triple_index[key] = [
+                self._resolve_triple_index[key] = [
                     (o, t)
-                    for o, t in self._triple_index[key]
+                    for o, t in self._resolve_triple_index[key]
                     if t != superseded_text
                 ]
-            self._triple_index[key].append((new_obj, fact.text))
+            self._resolve_triple_index[key].append((new_obj, fact.text))
 
     def _store_detect_belief_conflicts(self, fact: SegmentedFact) -> None:
         """Detect conflicts for belief index when supersession is off.
@@ -313,26 +404,26 @@ class StoreMixin:
         triple index for (S,P) matches with different objects and
         fire belief.on_conflict for each pair.
         """
-        if self.supersession or not self._belief_index or not fact.triples:
+        if self._resolve_supersession or not self._belief_index or not fact.triples:
             return
 
         new_entities = (
             set(e.lower() for e in fact.entities) if fact.entities else set()
         )
-        if fact.text not in self._fact_entities:
-            self._fact_entities[fact.text] = fact.entities
+        if fact.text not in self._resolve_fact_entities:
+            self._resolve_fact_entities[fact.text] = fact.entities
 
         for subj, pred, obj in fact.triples:
             key = (subj.lower().strip(), pred.lower().strip())
             new_obj = obj.lower().strip()
             if not key[0] or not key[1]:
                 continue
-            for existing_obj, existing_text in self._triple_index[key]:
+            for existing_obj, existing_text in self._resolve_triple_index[key]:
                 if existing_obj == new_obj:
                     continue
                 old_ents = [
                     e.lower()
-                    for e in self._fact_entities.get(existing_text, ())
+                    for e in self._resolve_fact_entities.get(existing_text, ())
                 ]
                 existing_lower = existing_text.lower()
                 fact_lower = fact.text.lower()
@@ -351,8 +442,10 @@ class StoreMixin:
         accumulation, belief propagation, session flush, supersession
         diagnostics, and dream cycle.
         """
+        engine = self._resolve_engine
+
         # Deferred FAISS rebuild: one per chunk.
-        self.coupled_engine.rebuild_faiss_if_dirty()
+        engine.rebuild_faiss_if_dirty()
 
         # Synonym dict for triadic.
         if getattr(self, "_triadic", None) is not None:
@@ -370,19 +463,19 @@ class StoreMixin:
         if self._belief_index is not None and hasattr(self, "_entity_accumulator"):
             self._belief_index.propagate(
                 self._entity_accumulator,
-                self.coupled_engine.memory_store,
+                engine.memory_store,
             )
 
         # Flush Hebbian session buffer.
         if (
-            hasattr(self.coupled_engine, "_session_buffer")
-            and len(getattr(self.coupled_engine, "_session_buffer", [])) > 0
+            hasattr(engine, "_session_buffer")
+            and len(getattr(engine, "_session_buffer", [])) > 0
         ):
-            self.coupled_engine.flush_session()
+            engine.flush_session()
 
         # Supersession diagnostics: log every 50 stores.
         if (
-            self.supersession
+            self._resolve_supersession
             and self._store_count % 50 == 0
             and self._store_count > 0
         ):
@@ -390,12 +483,16 @@ class StoreMixin:
                 "STATS after %d stores: %d unique (S,P) keys, "
                 "%d superseded texts, %d graph edges, %d total triples",
                 self._store_count,
-                len(self._triple_index),
-                len(self._superseded_texts),
-                len(self._supersession_graph),
-                sum(len(v) for v in self._triple_index.values()),
+                len(self._resolve_triple_index),
+                len(self._resolve_superseded_texts),
+                len(self._resolve_supersession_graph),
+                sum(len(v) for v in self._resolve_triple_index.values()),
             )
 
         # Dream cycle.
-        if self.dream_interval > 0 and self._store_count % self.dream_interval == 0:
-            self.coupled_engine.dream()
+        if self._resolve_dream_interval > 0 and self._store_count % self._resolve_dream_interval == 0:
+            engine.dream()
+
+
+# Backward-compat alias: code importing StoreMixin still works
+StoreMixin = FactStore

@@ -1,46 +1,220 @@
-"""Iterative multi-hop query pipeline for HermesMemoryAgent.
+"""Iterative multi-hop query pipeline — standalone module.
 
-Provides IterativeQueryMixin with _iterative_query and its decomposed helpers:
-- _iterative_hop: single hop (retrieve, triadic expand, judge)
-- _iterative_judge: LLM judge for iterative query
-- _build_iterative_chain_summary: format reasoning chain for judge
-- _parse_iterative_judge: parse ANSWER_READY / LEARNED+NEED response
-- _iterative_finalize: post-process and generate final answer
+Converted from IterativeQueryMixin to standalone IterativeQuery class.
+IterativeQueryMixin is a backward-compat alias. Mixin callers still work
+via MRO; the _resolve_* properties fall back to host-class self.* attrs.
+
+Standalone usage:
+    iq = IterativeQuery(engine=e, scorer=s, retriever=r, outgester=o,
+                        llm_config=LLMConfig(model="gpt-4o-mini"))
+    result = iq._iterative_query("Question: What sport...\\nAnswer:")
 """
 
 from __future__ import annotations
 
 import time
 
+from mabench.configs import CRConfig, LLMConfig, RetrievalConfig
 
-class IterativeQueryMixin:
-    """Mixin providing iterative multi-hop retrieval with LLM-in-the-loop termination.
 
-    Requires the host class to provide:
-    - self._scorer: EmbeddingRelevanceScorer with .embed(text)
-    - self.coupled_engine: engine with memory_store
-    - self._llm_client: OpenAI client (lazily initialised)
-    - self._ensure_llm_client(): method to init LLM client
-    - self.model: str, LLM model name
-    - self.temperature: float
-    - self.iterative_max_hops: int
-    - self.retrieve_num: int
-    - self.conflict_resolution: bool
-    - self.supersession: bool
-    - self._superseded_texts: set
-    - self._belief_index: BeliefIndex or None
-    - self._retrieve_v2(query): from RetrievalMixin
-    - self._resolve_conflicts(chunks, metadata): from ConflictResolutionMixin
-    - self._format_outgestion(chunks, metadata): from OutgestionMixin
-    - self._generate_answer(question, context, ...): from OutgestionMixin
-    - self._extract_question(prompt): from QueryMixin (staticmethod)
+class IterativeQuery:
+    """Standalone iterative multi-hop query with LLM-in-the-loop termination.
+
+    Can be used independently or composed into HermesMemoryAgent.
+
+    Usage::
+
+        iq = IterativeQuery(
+            engine=coupled_engine,
+            scorer=scorer,
+            retriever=retriever,
+            outgester=outgester,
+            llm_config=LLMConfig(model="gpt-4o-mini"),
+        )
+        result = iq._iterative_query("Question: What sport...\\nAnswer:")
     """
+
+    def __init__(
+        self,
+        engine=None,
+        scorer=None,
+        retriever=None,
+        conflict_resolver=None,
+        outgester=None,
+        triadic=None,
+        belief_index=None,
+        llm_config: LLMConfig | None = None,
+        retrieval_config: RetrievalConfig | None = None,
+        cr_config: CRConfig | None = None,
+        iterative_max_hops: int = 3,
+        supersession: bool = False,
+        superseded_texts=None,
+    ) -> None:
+        # _engine: CoupledEngine with .memory_store
+        self._engine = engine
+        # _scorer: EmbeddingRelevanceScorer with .embed(text)
+        self._scorer = scorer
+        # _retriever: Retriever with ._retrieve_v2(query)
+        self._retriever = retriever
+        # _conflict_resolver: ConflictResolver with ._resolve_conflicts(chunks, meta)
+        self._conflict_resolver = conflict_resolver
+        # _outgester: Outgester with .format_outgestion / .generate_answer
+        self._outgester = outgester
+        # _triadic: TriadicMemory with .expand(texts, top_k=k) or None
+        self._triadic = triadic
+        # _belief_index: BeliefIndex with .is_excluded(text) or None
+        self._belief_index = belief_index
+        # _llm_config: LLMConfig(model, temperature, max_gen_tokens)
+        self._llm_config = llm_config or LLMConfig()
+        # _retrieval_cfg: RetrievalConfig(retrieve_num=10, ...)
+        self._retrieval_cfg = retrieval_config or RetrievalConfig()
+        # _cr_cfg: CRConfig(enabled=False, ...)
+        self._cr_cfg = cr_config or CRConfig()
+        # _iterative_max_hops: max multi-hop iterations
+        self._iterative_max_hops = iterative_max_hops
+        # _supersession_flag: whether supersession filtering is enabled
+        self._supersession_flag = supersession
+        # _superseded_texts: set of fact texts that have been superseded
+        self._superseded_texts = superseded_texts or set()
+        # _client: OpenAI client (lazy-init)
+        self._client = None
+        # _triadic_expand_k: number of triadic expansion results
+        self._triadic_expand_k = 5
+
+    # ------------------------------------------------------------------
+    # Attribute resolution: new config or old self.* fallback
+    # ------------------------------------------------------------------
+
+    @property
+    def _resolve_engine(self):
+        """CoupledEngine -- from __init__ or host class self.coupled_engine."""
+        if hasattr(self, "_engine") and self._engine is not None:
+            return self._engine
+        return self.coupled_engine  # type: ignore[attr-defined]
+
+    @property
+    def _resolve_iterative_max_hops(self) -> int:
+        """Max hops -- from __init__ or host class self.iterative_max_hops."""
+        if hasattr(self, "_iterative_max_hops"):
+            return self._iterative_max_hops
+        return getattr(self, "iterative_max_hops", 3)  # type: ignore[return-value]
+
+    @property
+    def _resolve_retrieve_num(self) -> int:
+        """Retrieve count -- from config or host class self.retrieve_num."""
+        if hasattr(self, "_retrieval_cfg") and self._retrieval_cfg is not None:
+            return self._retrieval_cfg.retrieve_num
+        return getattr(self, "retrieve_num", 10)  # type: ignore[return-value]
+
+    @property
+    def _resolve_conflict_resolution(self) -> bool:
+        """CR enabled -- from config or host class self.conflict_resolution."""
+        if hasattr(self, "_cr_cfg") and self._cr_cfg is not None:
+            return self._cr_cfg.enabled
+        return getattr(self, "conflict_resolution", False)  # type: ignore[return-value]
+
+    @property
+    def _resolve_supersession(self) -> bool:
+        """Supersession enabled -- from __init__ or host class self.supersession."""
+        if hasattr(self, "_supersession_flag"):
+            return self._supersession_flag
+        return getattr(self, "supersession", False)  # type: ignore[return-value]
+
+    @property
+    def _resolve_model(self) -> str:
+        """LLM model name -- from config or host class self.model."""
+        if hasattr(self, "_llm_config") and self._llm_config is not None:
+            return self._llm_config.model
+        return self.model  # type: ignore[attr-defined]
+
+    @property
+    def _resolve_temperature(self) -> float:
+        """LLM temperature -- from config or host class self.temperature."""
+        if hasattr(self, "_llm_config") and self._llm_config is not None:
+            return self._llm_config.temperature
+        return self.temperature  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------
+    # Cross-module call resolution
+    # ------------------------------------------------------------------
+
+    def _resolve_retrieve_v2(self, query):
+        """Retrieve facts -- from injected Retriever or host class self._retrieve_v2."""
+        if hasattr(self, "_retriever") and self._retriever is not None:
+            return self._retriever._retrieve_v2(query)
+        return self._retrieve_v2(query)  # type: ignore[attr-defined]
+
+    def _resolve_resolve_conflicts(self, chunks, metadata):
+        """CR filter -- from injected ConflictResolver or host class self._resolve_conflicts."""
+        if hasattr(self, "_conflict_resolver") and self._conflict_resolver is not None:
+            return self._conflict_resolver._resolve_conflicts(chunks, metadata)
+        return self._resolve_conflicts(chunks, metadata)  # type: ignore[attr-defined]
+
+    def _resolve_format_outgestion(self, chunks, metadata):
+        """Format output -- from injected Outgester or host class self._format_outgestion."""
+        if hasattr(self, "_outgester") and self._outgester is not None:
+            return self._outgester.format_outgestion(chunks, metadata)
+        return self._format_outgestion(chunks, metadata)  # type: ignore[attr-defined]
+
+    def _resolve_generate_answer(self, question, context, **kwargs):
+        """Generate answer -- from injected Outgester or host class self._generate_answer."""
+        if hasattr(self, "_outgester") and self._outgester is not None:
+            return self._outgester.generate_answer(question, context, **kwargs)
+        return self._generate_answer(question, context, **kwargs)  # type: ignore[attr-defined]
+
+    def _resolve_ensure_llm_client(self):
+        """Ensure LLM client is initialized -- standalone or host class."""
+        if hasattr(self, "_client"):
+            if self._client is not None:
+                return
+            import os
+
+            from openai import OpenAI
+
+            self._client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+            )
+        else:
+            self._ensure_llm_client()  # type: ignore[attr-defined]
+
+    @property
+    def _resolve_llm_client(self):
+        """OpenAI client -- from standalone or host class self._llm_client."""
+        if hasattr(self, "_client") and self._client is not None:
+            return self._client
+        # Mixin mode: host class sets self._llm_client directly
+        return getattr(self, "_llm_client", self._client)
+
+    # ------------------------------------------------------------------
+    # Static helper (no deps)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_question(prompt: str) -> str:
+        """Extract the bare question from a MABench prompt.
+
+        The prompt looks like:
+          "Pretend you are a knowledge management system. ... Question: ... Answer:"
+        We extract just the text after the last "Question:" and before "Answer:".
+        Falls back to the full prompt if the pattern isn't found.
+        """
+        q_start = prompt.rfind("Question:")
+        if q_start >= 0:
+            q_end = prompt.rfind("\nAnswer:")
+            if q_end > q_start:
+                return prompt[q_start + len("Question:") : q_end].strip()
+        return prompt
+
+    # ------------------------------------------------------------------
+    # Core methods (unchanged logic, self.X -> self._resolve_X)
+    # ------------------------------------------------------------------
 
     def _iterative_query(self, question: str) -> dict:
         """Iterative multi-hop retrieval with LLM-in-the-loop termination."""
         query_start = time.time()
         bare_question = self._extract_question(question)
-        self._ensure_llm_client()
+        self._resolve_ensure_llm_client()
 
         all_chunks: list[str] = []
         all_results: list[dict] = []
@@ -49,7 +223,7 @@ class IterativeQueryMixin:
         current_query = bare_question
         hops_taken = 0
 
-        for hop in range(self.iterative_max_hops):
+        for hop in range(self._resolve_iterative_max_hops):
             hop_result = self._iterative_hop(
                 bare_question, current_query, hop,
                 all_chunks, all_results, seen, evidence_chain,
@@ -78,12 +252,13 @@ class IterativeQueryMixin:
 
         Returns the next entity to search, or None if done/error.
         """
-        results = self._retrieve_v2(current_query)
+        results = self._resolve_retrieve_v2(current_query)
 
         # Triadic expansion
         hop_texts = [r["text"] for r in results]
-        if getattr(self, "_triadic", None) is not None and hop_texts:
-            triadic_texts = self._triadic.expand(
+        triadic = getattr(self, "_triadic", None)
+        if triadic is not None and hop_texts:
+            triadic_texts = triadic.expand(
                 hop_texts, top_k=self._triadic_expand_k,
             )
             for t in triadic_texts:
@@ -103,7 +278,7 @@ class IterativeQueryMixin:
                 hop_new_chunks.append(r["text"])
 
         # Last hop: no judge
-        if hop >= self.iterative_max_hops - 1:
+        if hop >= self._resolve_iterative_max_hops - 1:
             evidence_chain.append({
                 "query": current_query,
                 "found": hop_new_chunks[:3],
@@ -130,8 +305,8 @@ class IterativeQueryMixin:
         context_for_judge = "\n".join(all_chunks)
 
         try:
-            judge_response = self._llm_client.chat.completions.create(
-                model=self.model,
+            judge_response = self._resolve_llm_client.chat.completions.create(
+                model=self._resolve_model,
                 messages=[
                     {
                         "role": "system",
@@ -267,26 +442,26 @@ class IterativeQueryMixin:
                 metadata_by_key[k] = r
 
         # Fact currency filtering
-        if self.conflict_resolution:
-            all_chunks = self._resolve_conflicts(all_chunks, metadata_by_key)
+        if self._resolve_conflict_resolution:
+            all_chunks = self._resolve_resolve_conflicts(all_chunks, metadata_by_key)
         elif self._belief_index is not None:
             all_chunks = [
                 c for c in all_chunks
                 if not self._belief_index.is_excluded(c)
             ]
-        elif self.supersession and self._superseded_texts:
+        elif self._resolve_supersession and self._superseded_texts:
             all_chunks = [
                 c for c in all_chunks
                 if c not in self._superseded_texts
             ]
 
-        final_chunks = all_chunks[: self.retrieve_num]
-        memory_context, outgestion_instructions = self._format_outgestion(
+        final_chunks = all_chunks[: self._resolve_retrieve_num]
+        memory_context, outgestion_instructions = self._resolve_format_outgestion(
             final_chunks, metadata_by_key,
         )
         memory_time = time.time() - query_start
 
-        answer, input_tokens, output_tokens, gen_time = self._generate_answer(
+        answer, input_tokens, output_tokens, gen_time = self._resolve_generate_answer(
             question, memory_context,
             extra_system_instructions=outgestion_instructions,
         )
@@ -300,3 +475,7 @@ class IterativeQueryMixin:
             "query_time_len": query_time,
             "hops": hops_taken,
         }
+
+
+# Backward-compat alias: old imports still work
+IterativeQueryMixin = IterativeQuery

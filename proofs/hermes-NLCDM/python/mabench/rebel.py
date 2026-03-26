@@ -1,6 +1,6 @@
 """REBEL knowledge graph extraction and traversal.
 
-Provides RebelKGMixin with methods for:
+Provides RebelKG with methods for:
 - Lazy REBEL model loading (Babelscape/rebel-large, 350M params)
 - REBEL decoder output parsing into (head, relation, tail) triples
 - Batch triple extraction from text
@@ -16,45 +16,115 @@ import logging
 _cr_log = logging.getLogger("conflict_res")
 
 
-class RebelKGMixin:
-    """Mixin providing REBEL-based KG extraction and graph hop methods.
+class RebelKG:
+    """Standalone REBEL-based KG extraction and graph hop.
 
-    Requires the host class to provide:
-    - self._rebel_kg: dict[str, dict[str, list[str]]] or None
-    - self._rebel_kg_reverse: dict[str, dict[str, list[str]]] or None
-    - self._rebel_model: model instance, None, or False sentinel
-    - self._rebel_tokenizer: tokenizer instance or None
-    - self._rebel_device: str or None
+    Can be used independently or composed into HermesMemoryAgent.
+
+    Usage::
+
+        kg = RebelKG()
+        kg.add_triple("Albert Einstein", "place of birth", "Ulm")
+        answer = kg.hop("Where was Albert Einstein born?")
+        # answer == "Ulm"
     """
 
-    def _ensure_rebel(self):
+    def __init__(self) -> None:
+        # kg: subject_lower -> relation_lower -> [original-case objects]
+        # e.g. {"christian abbiati": {"sport": ["association football"]}}
+        self._kg: dict[str, dict[str, list[str]]] = {}
+
+        # kg_reverse: object_lower -> relation_lower -> [original-case subjects]
+        # e.g. {"association football": {"sport": ["Christian Abbiati"]}}
+        self._kg_reverse: dict[str, dict[str, list[str]]] = {}
+
+        self._model = None   # transformers seq2seq model or False sentinel
+        self._tokenizer = None
+        self._device: str | None = None  # "cuda" or "cpu"
+
+    # ------------------------------------------------------------------
+    # Backward-compat property bridges: old _rebel_* attr names -> new names
+    # ------------------------------------------------------------------
+
+    @property
+    def _rebel_kg(self) -> dict[str, dict[str, list[str]]]:
+        return self._kg
+
+    @_rebel_kg.setter
+    def _rebel_kg(self, value: dict[str, dict[str, list[str]]]) -> None:
+        self._kg = value
+
+    @property
+    def _rebel_kg_reverse(self) -> dict[str, dict[str, list[str]]]:
+        return self._kg_reverse
+
+    @_rebel_kg_reverse.setter
+    def _rebel_kg_reverse(self, value: dict[str, dict[str, list[str]]]) -> None:
+        self._kg_reverse = value
+
+    @property
+    def _rebel_model(self):
+        return self._model
+
+    @_rebel_model.setter
+    def _rebel_model(self, value) -> None:
+        self._model = value
+
+    @property
+    def _rebel_tokenizer(self):
+        return self._tokenizer
+
+    @_rebel_tokenizer.setter
+    def _rebel_tokenizer(self, value) -> None:
+        self._tokenizer = value
+
+    @property
+    def _rebel_device(self) -> str | None:
+        return self._device
+
+    @_rebel_device.setter
+    def _rebel_device(self, value: str | None) -> None:
+        self._device = value
+
+    # ------------------------------------------------------------------
+    # Model loading
+    # ------------------------------------------------------------------
+
+    def ensure_model(self) -> None:
         """Lazy-load REBEL model (Babelscape/rebel-large, 350M params)."""
-        if getattr(self, "_rebel_model", None) is not None:
+        if self._model is not None:
             return
         try:
             import torch
             from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
-            self._rebel_device = "cuda" if torch.cuda.is_available() else "cpu"
-            self._rebel_tokenizer = AutoTokenizer.from_pretrained(
+            self._device = "cuda" if torch.cuda.is_available() else "cpu"
+            self._tokenizer = AutoTokenizer.from_pretrained(
                 "Babelscape/rebel-large"
             )
-            self._rebel_model = AutoModelForSeq2SeqLM.from_pretrained(
+            self._model = AutoModelForSeq2SeqLM.from_pretrained(
                 "Babelscape/rebel-large",
-                device_map={"": self._rebel_device},
+                device_map={"": self._device},
             )
-            self._rebel_model.eval()
+            self._model.eval()
             logging.getLogger(__name__).info(
-                "REBEL loaded (rebel-large) on %s", self._rebel_device
+                "REBEL loaded (rebel-large) on %s", self._device
             )
         except Exception as e:
             logging.getLogger(__name__).warning(
                 "REBEL load failed: %s — KG extraction disabled", e
             )
-            self._rebel_model = False  # sentinel: tried and failed
+            self._model = False  # sentinel: tried and failed
+
+    # Backward-compat alias
+    _ensure_rebel = ensure_model
+
+    # ------------------------------------------------------------------
+    # Output parsing
+    # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_rebel_output(decoded: str) -> list[dict]:
+    def parse_output(decoded: str) -> list[dict]:
         """Parse REBEL decoder output into (head, relation, tail) dicts.
 
         REBEL encodes: <triplet> subject <subj> relation <obj> object
@@ -78,13 +148,20 @@ class RebelKGMixin:
                     )
         return triplets
 
-    def _rebel_extract_batch(self, texts: list[str]) -> list[list[dict]]:
+    # Backward-compat alias
+    _parse_rebel_output = staticmethod(parse_output.__func__)
+
+    # ------------------------------------------------------------------
+    # Batch extraction
+    # ------------------------------------------------------------------
+
+    def extract_batch(self, texts: list[str]) -> list[list[dict]]:
         """Extract triples from a batch of texts using REBEL.
 
         Returns a list of triple-lists, one per input text.
         """
-        self._ensure_rebel()
-        if not self._rebel_model:
+        self.ensure_model()
+        if not self._model:
             return [[] for _ in texts]
 
         import torch
@@ -93,28 +170,35 @@ class RebelKGMixin:
         batch_size = 16
         for start in range(0, len(texts), batch_size):
             batch = texts[start : start + batch_size]
-            inputs = self._rebel_tokenizer(
+            inputs = self._tokenizer(
                 batch,
                 return_tensors="pt",
                 max_length=128,
                 truncation=True,
                 padding=True,
             )
-            inputs = {k: v.to(self._rebel_device) for k, v in inputs.items()}
+            inputs = {k: v.to(self._device) for k, v in inputs.items()}
             with torch.no_grad():
-                outputs = self._rebel_model.generate(
+                outputs = self._model.generate(
                     **inputs, max_length=128, num_beams=1
                 )
-            decoded = self._rebel_tokenizer.batch_decode(
+            decoded = self._tokenizer.batch_decode(
                 outputs, skip_special_tokens=False
             )
             for dec in decoded:
-                all_triples.append(self._parse_rebel_output(dec))
+                all_triples.append(self.parse_output(dec))
 
         return all_triples
 
-    def _rebel_kg_add(self, head: str, relation: str, tail: str) -> None:
-        """Add a triple to the REBEL KG (forward + reverse index)."""
+    # Backward-compat alias
+    _rebel_extract_batch = extract_batch
+
+    # ------------------------------------------------------------------
+    # Triple insertion
+    # ------------------------------------------------------------------
+
+    def add_triple(self, head: str, relation: str, tail: str) -> None:
+        """Add a triple to the KG (forward + reverse index)."""
         h = head.lower().strip()
         r = relation.lower().strip()
         t_key = tail.lower().strip()
@@ -122,22 +206,28 @@ class RebelKGMixin:
             return
 
         # Forward: subject -> relation -> [objects]
-        if h not in self._rebel_kg:
-            self._rebel_kg[h] = {}
-        if r not in self._rebel_kg[h]:
-            self._rebel_kg[h][r] = []
-        if tail.strip() not in self._rebel_kg[h][r]:
-            self._rebel_kg[h][r].append(tail.strip())
+        if h not in self._kg:
+            self._kg[h] = {}
+        if r not in self._kg[h]:
+            self._kg[h][r] = []
+        if tail.strip() not in self._kg[h][r]:
+            self._kg[h][r].append(tail.strip())
 
         # Reverse: object -> relation -> [subjects]
-        if t_key not in self._rebel_kg_reverse:
-            self._rebel_kg_reverse[t_key] = {}
-        if r not in self._rebel_kg_reverse[t_key]:
-            self._rebel_kg_reverse[t_key][r] = []
-        if head.strip() not in self._rebel_kg_reverse[t_key][r]:
-            self._rebel_kg_reverse[t_key][r].append(head.strip())
+        if t_key not in self._kg_reverse:
+            self._kg_reverse[t_key] = {}
+        if r not in self._kg_reverse[t_key]:
+            self._kg_reverse[t_key][r] = []
+        if head.strip() not in self._kg_reverse[t_key][r]:
+            self._kg_reverse[t_key][r].append(head.strip())
 
+    # Backward-compat alias
+    _rebel_kg_add = add_triple
+
+    # ------------------------------------------------------------------
     # Relation keyword matching for KG query-time hop
+    # ------------------------------------------------------------------
+
     _KG_STOP_WORDS = frozenset({
         "what", "is", "the", "of", "a", "an", "did", "does", "was", "were",
         "where", "who", "which", "how", "do", "has", "had", "that", "this",
@@ -156,30 +246,41 @@ class RebelKGMixin:
         "capital": "capital",
     }
 
-    def _rebel_kg_hop(self, sub_query: str) -> str | None:
-        """Try to answer a sub-query via REBEL KG graph traversal.
+    # ------------------------------------------------------------------
+    # Graph hop
+    # ------------------------------------------------------------------
+
+    def hop(self, sub_query: str) -> str | None:
+        """Try to answer a sub-query via KG graph traversal.
 
         1. Find KG entities that appear in the sub-query (longest first).
         2. For each, find relations whose keywords overlap the sub-query.
         3. Return the object/subject if a clear match is found.
         4. Return None to fall through to retrieval+LLM.
         """
-        if not self._rebel_kg:
+        if not self._kg:
             return None
 
         sq_lower = sub_query.lower()
-        candidates = self._kg_hop_find_candidates(sq_lower)
+        candidates = self._find_candidates(sq_lower)
         if not candidates:
             return None
 
         # Prefer longest entity match (most specific)
         candidates.sort(key=lambda c: len(c[0]), reverse=True)
 
-        q_tokens = self._kg_hop_tokenize_query(sq_lower)
+        q_tokens = self._tokenize_query(sq_lower)
 
-        return self._kg_hop_match_relation(sq_lower, candidates, q_tokens)
+        return self._match_relation(sq_lower, candidates, q_tokens)
 
-    def _kg_hop_find_candidates(
+    # Backward-compat alias
+    _rebel_kg_hop = hop
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _find_candidates(
         self, sq_lower: str,
     ) -> list[tuple[str, dict, bool]]:
         """Find KG entities that appear in the sub-query text.
@@ -187,15 +288,15 @@ class RebelKGMixin:
         Returns (entity_key, relations_dict, is_reverse) tuples.
         """
         candidates: list[tuple[str, dict, bool]] = []
-        for entity_key, rels in self._rebel_kg.items():
+        for entity_key, rels in self._kg.items():
             if entity_key in sq_lower:
                 candidates.append((entity_key, rels, False))
-        for entity_key, rels in self._rebel_kg_reverse.items():
+        for entity_key, rels in self._kg_reverse.items():
             if entity_key in sq_lower:
                 candidates.append((entity_key, rels, True))
         return candidates
 
-    def _kg_hop_tokenize_query(self, sq_lower: str) -> set[str]:
+    def _tokenize_query(self, sq_lower: str) -> set[str]:
         """Tokenize query, remove stop words, and add stemmed variants."""
         q_tokens: set[str] = set()
         for w in sq_lower.split():
@@ -209,7 +310,7 @@ class RebelKGMixin:
                 stemmed.add(self._KG_STEM_MAP[t])
         return stemmed
 
-    def _kg_hop_match_relation(
+    def _match_relation(
         self,
         sq_lower: str,
         candidates: list[tuple[str, dict, bool]],
@@ -246,3 +347,16 @@ class RebelKGMixin:
                 return answer
 
         return None
+
+    # ------------------------------------------------------------------
+    # State management
+    # ------------------------------------------------------------------
+
+    def reset(self) -> None:
+        """Clear all KG state (triples). Preserves loaded model."""
+        self._kg = {}
+        self._kg_reverse = {}
+
+
+# Backward-compat alias: code importing RebelKGMixin still works
+RebelKGMixin = RebelKG
