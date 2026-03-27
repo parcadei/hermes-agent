@@ -40,7 +40,8 @@ from dream_ops import DreamParams
 from mabench.agent import HermesAgent
 from mabench.configs import (
     RetrievalConfig, CRConfig, DecomposeConfig, StoreConfig,
-    LLMConfig, BeliefConfig, EntityConfig, DedupConfig,
+    LLMConfig, BeliefConfig, EntityConfig, DedupConfig, KGConfig,
+    GLiNER2Config,
 )
 from mabench.eval_cache import cache_dir, list_caches
 from utils.eval_other_utils import metrics_summarization
@@ -90,6 +91,15 @@ def _save_context(agent: HermesAgent, path: Path, context_idx: int) -> None:
     cc = agent.store._chain_cache
     if cc is not None:
         state["chain_cache"] = cc
+    kg = agent.knowledge_graph
+    if kg is not None:
+        state["knowledge_graph"] = kg
+    he = agent.hyperedge
+    if he is not None:
+        state["hyperedge"] = he
+    g2 = agent.gliner2_extractor
+    if g2 is not None:
+        state["gliner2_extractor"] = g2
 
     state_file = ctx_dir / "state.pkl"
     with open(state_file, "wb") as f:
@@ -166,6 +176,24 @@ def _load_context(agent: HermesAgent, path: Path, context_idx: int) -> bool:
         agent.query_engine._chain_cache = state["chain_cache"]
         agent.pipeline._chain_cache = state["chain_cache"]
 
+    # Knowledge graph
+    if agent.store._knowledge_graph is not None and "knowledge_graph" in state:
+        agent.store._knowledge_graph = state["knowledge_graph"]
+        agent.query_engine._knowledge_graph = state["knowledge_graph"]
+        agent.pipeline._knowledge_graph = state["knowledge_graph"]
+        agent.knowledge_graph = state["knowledge_graph"]
+
+    # Hyperedge intersection
+    if agent.hyperedge is not None and "hyperedge" in state:
+        agent.query_engine._hyperedge = state["hyperedge"]
+        agent.pipeline._hyperedge = state["hyperedge"]
+        agent.hyperedge = state["hyperedge"]
+
+    # GLiNER2 extractor (pickle-safe: model excluded, lazy-reloaded)
+    if agent.store._gliner2_extractor is not None and "gliner2_extractor" in state:
+        agent.store._gliner2_extractor = state["gliner2_extractor"]
+        agent.gliner2_extractor = state["gliner2_extractor"]
+
     # Reload embedding disk cache
     agent._scorer._load_disk_cache()
 
@@ -237,6 +265,31 @@ def parse_args():
     parser.add_argument("--entity_rerank", action="store_true",
                         help="Entity-position residual reranking with multiplicative gating (arXiv:2603.19664)")
 
+    # Hyperedge intersection
+    parser.add_argument("--hyperedge", action="store_true",
+                        help="Enable hyperedge intersection in decompose hops")
+    parser.add_argument("--hyperedge_penalty", type=float, default=0.1,
+                        help="Penalty for non-matching facts (0.0=hard filter, 1.0=no effect)")
+    parser.add_argument("--hyperedge_min_candidates", type=int, default=3,
+                        help="Minimum entity matches to activate penalty")
+
+    # Knowledge graph (rustworkx PPR)
+    parser.add_argument("--knowledge_graph", action="store_true",
+                        help="Enable rustworkx KG + PPR retrieval")
+    parser.add_argument("--kg_damping", type=float, default=0.85,
+                        help="PPR damping factor (0=short hops, 1=deep exploration)")
+    parser.add_argument("--kg_ppr_top_k", type=int, default=20,
+                        help="Number of top PPR nodes to retrieve")
+
+    # GLiNER2 triple extraction
+    parser.add_argument("--gliner2", action="store_true",
+                        help="Enable GLiNER2 dense triple extraction for KG")
+    parser.add_argument("--gliner2_threshold", type=float, default=0.5,
+                        help="GLiNER2 confidence threshold (0.3=broad, 0.7=precise)")
+    parser.add_argument("--gliner2_model", type=str,
+                        default="fastino/gliner2-base-v1",
+                        help="GLiNER2 model name")
+
     # Cache
     parser.add_argument("--no_cache", action="store_true")
     parser.add_argument("--refresh_cache", action="store_true")
@@ -265,6 +318,9 @@ def _build_agent(args) -> HermesAgent:
         ppr_weight=args.ppr_weight,
         ppr_damping=args.ppr_damping,
         entity_rerank=args.entity_rerank,
+        hyperedge_intersection=args.hyperedge,
+        hyperedge_penalty=args.hyperedge_penalty,
+        hyperedge_min_candidates=args.hyperedge_min_candidates,
     )
     cr = CRConfig(
         enabled=args.conflict_resolution,
@@ -293,6 +349,16 @@ def _build_agent(args) -> HermesAgent:
         enabled=args.cosine_dedup,
         threshold=args.cosine_dedup_threshold,
     )
+    kg_cfg = KGConfig(
+        enabled=args.knowledge_graph,
+        damping=args.kg_damping,
+        ppr_top_k=args.kg_ppr_top_k,
+    )
+    gliner2_cfg = GLiNER2Config(
+        enabled=args.gliner2,
+        model_name=args.gliner2_model,
+        threshold=args.gliner2_threshold,
+    )
 
     return HermesAgent(
         dim=1024,
@@ -306,6 +372,8 @@ def _build_agent(args) -> HermesAgent:
         llm=llm_cfg,
         entity=entity,
         dedup=dedup,
+        kg=kg_cfg,
+        gliner2=gliner2_cfg,
         bm25_hops=args.bm25_hops,
         chain_cache=args.chain_cache,
         rebel_kg=args.rebel_kg,
@@ -362,6 +430,12 @@ def main():
         config_parts.append("tri")
     if args.entity_rerank:
         config_parts.append("entrank")
+    if args.hyperedge:
+        config_parts.append("hedge")
+    if args.knowledge_graph:
+        config_parts.append("kg")
+    if args.gliner2:
+        config_parts.append("gliner2")
     if args.chunk_size > 0:
         config_parts.append(f"cs{args.chunk_size}")
     config_tag = "_".join(config_parts) if config_parts else "baseline"

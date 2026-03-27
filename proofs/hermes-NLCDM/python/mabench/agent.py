@@ -38,8 +38,8 @@ from dream_ops import DreamParams
 
 from mabench.configs import (
     RetrievalConfig, CRConfig, DecomposeConfig, StoreConfig,
-    LLMConfig, BeliefConfig, EntityConfig, DedupConfig,
-    SupersessionState, EntityIndex,
+    LLMConfig, BeliefConfig, EntityConfig, DedupConfig, KGConfig,
+    GLiNER2Config, SupersessionState, EntityIndex,
 )
 from mabench.ingestion import IngestionPipeline, IngestionConfig, _MutableEntityGraph
 from mabench.scoring import EmbeddingRelevanceScorer
@@ -57,6 +57,9 @@ from mabench.query import QueryEngine
 from mabench.query_pipeline import QueryPipeline
 from mabench.iterative_query import IterativeQuery
 from mabench.entity_reranker import EntityReranker
+from mabench.hyperedge_intersection import HyperedgeIntersection
+from mabench.knowledge_graph import KnowledgeGraph
+from mabench.gliner2_extractor import GLiNER2Extractor
 
 
 # Default V1 orchestrator params (validated in test_engine.py)
@@ -97,6 +100,8 @@ class HermesAgent:
         belief: BeliefConfig | None = None,
         entity: EntityConfig | None = None,
         dedup: DedupConfig | None = None,
+        kg: KGConfig | None = None,
+        gliner2: GLiNER2Config | None = None,
         # Infrastructure flags
         bm25_hops: bool = False,
         chain_cache: bool = False,
@@ -117,6 +122,8 @@ class HermesAgent:
         self._belief_cfg = belief or BeliefConfig()
         self._entity_cfg = entity or EntityConfig()
         self._dedup_cfg = dedup or DedupConfig()
+        self._kg_cfg = kg or KGConfig()
+        self._gliner2_cfg = gliner2 or GLiNER2Config()
 
         # Engine params (saved for reset)
         self._dim = dim
@@ -211,6 +218,27 @@ class HermesAgent:
             nlp=getattr(self._ingestion, "_nlp", None),
         ) if self._retrieval_cfg.entity_rerank else None)
 
+        # HyperedgeIntersection: entity-constrained reranking in decompose hops
+        hyperedge = (HyperedgeIntersection(
+            entity_index=ei.index,
+            penalty=self._retrieval_cfg.hyperedge_penalty,
+            min_candidates=self._retrieval_cfg.hyperedge_min_candidates,
+        ) if self._retrieval_cfg.hyperedge_intersection else None)
+
+        # KnowledgeGraph: rustworkx PPR graph for multi-hop retrieval
+        knowledge_graph = (KnowledgeGraph(
+            damping=self._kg_cfg.damping,
+            ppr_top_k=self._kg_cfg.ppr_top_k,
+            max_facts_per_node=self._kg_cfg.max_facts_per_node,
+        ) if self._kg_cfg.enabled else None)
+
+        # GLiNER2 triple extraction (dense triples for KG + supersession)
+        gliner2_extractor = (GLiNER2Extractor(
+            model_name=self._gliner2_cfg.model_name,
+            threshold=self._gliner2_cfg.threshold,
+            batch_size=self._gliner2_cfg.batch_size,
+        ) if self._gliner2_cfg.enabled else None)
+
         # -- 5. Tier 1: entity ops + retriever ----------------------------
         entity_ops = EntityOps(
             self.engine, self._scorer,
@@ -248,6 +276,8 @@ class HermesAgent:
             cooc_boost=self._store_cfg.cooc_boost,
             dream_interval=self._store_cfg.dream_interval,
             entity_reranker=ent_reranker,
+            knowledge_graph=knowledge_graph,
+            gliner2_extractor=gliner2_extractor,
         )
 
         # -- 8. Tier 4: query engine + pipeline (circular dep) ------------
@@ -261,6 +291,7 @@ class HermesAgent:
             llm_config=self._llm_cfg, retrieval_config=self._retrieval_cfg,
             cr_config=self._cr_cfg, decompose_config=self._decompose_cfg,
             entity_config=self._entity_cfg, dedup_config=self._dedup_cfg,
+            hyperedge=hyperedge, knowledge_graph=knowledge_graph,
         )
         # Create QueryPipeline with hop callback from QueryEngine
         self.pipeline = QueryPipeline(
@@ -274,6 +305,7 @@ class HermesAgent:
             decompose_config=self._decompose_cfg, dedup_config=self._dedup_cfg,
             llm_config=self._llm_cfg,
             hop_executor_fn=self.query_engine._query_run_hop,
+            hyperedge=hyperedge, knowledge_graph=knowledge_graph,
         )
         # Wire QueryEngine -> QueryPipeline callbacks (breaks circular dep)
         self.query_engine._final_retrieval_fn = self.pipeline._query_final_retrieval
@@ -301,6 +333,9 @@ class HermesAgent:
         self.entity_ops = entity_ops
         self.rebel = rebel
         self.outgester = outgester
+        self.hyperedge = hyperedge
+        self.knowledge_graph = knowledge_graph
+        self.gliner2_extractor = gliner2_extractor
 
     # -----------------------------------------------------------------
     # Public API (MABench-compatible)

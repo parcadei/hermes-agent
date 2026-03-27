@@ -70,6 +70,9 @@ class QueryEngine:
         decompose_config=None,    # DecomposeConfig
         entity_config=None,       # EntityConfig
         dedup_config=None,        # DedupConfig
+        # Optional graph/hyperedge modules
+        hyperedge=None,            # HyperedgeIntersection or None
+        knowledge_graph=None,      # KnowledgeGraph or None
         # Callbacks for cross-module deps (QueryPipeline methods)
         final_retrieval_fn=None,  # callable for _query_final_retrieval
         post_process_fn=None,     # callable for _query_post_process
@@ -93,6 +96,8 @@ class QueryEngine:
         self._decompose_cfg = decompose_config
         self._entity_cfg = entity_config
         self._dedup_cfg = dedup_config
+        self._hyperedge = hyperedge
+        self._knowledge_graph = knowledge_graph
         # Callbacks
         self._final_retrieval_fn = final_retrieval_fn
         self._post_process_fn = post_process_fn
@@ -397,6 +402,9 @@ class QueryEngine:
         for key, val in answers.items():
             sq = sq.replace(key, val)
 
+        # Determine previous hop's intermediate answer (for hyperedge + KG PPR)
+        prev_hop_answer = answers.get(f"{{answer_{hop_idx}}}") if hop_idx > 0 else None
+
         # REBEL KG fast lane
         rebel_kg = self._resolve_rebel_kg_attr
         if rebel_kg is not None:
@@ -409,6 +417,46 @@ class QueryEngine:
 
         # Retrieve + retry loop
         sq_all_texts, sq_all_results, entity_first_hit = self._query_hop_retrieve(sq)
+
+        # KnowledgeGraph PPR retrieval: merge graph-discovered facts into results
+        kg_module = getattr(self, "_knowledge_graph", None)
+        if kg_module is not None and prev_hop_answer is not None:
+            ppr_results = kg_module.ppr_retrieve_from_hop(
+                intermediate_answer=prev_hop_answer,
+                sub_query=sq,
+            )
+            if ppr_results:
+                engine = self._resolve_engine
+                store = engine.memory_store
+                sq_seen = {t.strip()[:200] for t in sq_all_texts}
+                for fact_idx, ppr_score in ppr_results:
+                    if fact_idx < len(store):
+                        text = store[fact_idx].text
+                        tkey = text.strip()[:200]
+                        if tkey not in sq_seen:
+                            sq_seen.add(tkey)
+                            sq_all_texts.append(text)
+                            sq_all_results.append({
+                                "text": text, "score": ppr_score,
+                            })
+
+        # Hyperedge intersection: penalize facts not mentioning the intermediate entity
+        hyperedge = getattr(self, "_hyperedge", None)
+        if hyperedge is not None and prev_hop_answer is not None and sq_all_results:
+            import numpy as np
+            scores = np.array([r.get("score", 0.0) for r in sq_all_results])
+            store_size = len(self._resolve_engine.memory_store)
+            adjusted, _matched = hyperedge.rerank_with_fuzzy_match(
+                prev_hop_answer, scores, store_size,
+            )
+            # Re-sort results by adjusted scores
+            paired = sorted(
+                zip(adjusted.tolist(), sq_all_texts, sq_all_results),
+                key=lambda x: -x[0],
+            )
+            sq_all_texts = [t for _, t, _ in paired]
+            sq_all_results = [r for _, _, r in paired]
+
         pre_cr_texts = list(sq_all_texts)
 
         # Per-hop CR / dedup / belief

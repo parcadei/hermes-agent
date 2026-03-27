@@ -44,6 +44,10 @@ class RetrievalConfig:
     # entity_rerank: bool — rerank candidates by entity-position residual similarity
     entity_rerank: bool = False
     entity_rerank_alpha: float = 0.3  # blend weight: (1-α)*cosine + α*entity_residual
+    # hyperedge: entity-constrained reranking within decompose hops
+    hyperedge_intersection: bool = False
+    hyperedge_penalty: float = 0.1     # penalty for non-matching facts (0=hard filter, 1=no effect)
+    hyperedge_min_candidates: int = 3  # minimum entity matches to activate penalty
 
 
 @dataclass(frozen=True)
@@ -121,6 +125,27 @@ class DedupConfig:
 
     enabled: bool = False
     threshold: float = 0.95
+
+
+@dataclass(frozen=True)
+class KGConfig:
+    """Knowledge graph (rustworkx PPR) settings."""
+
+    # enabled: bool — master switch for KG graph + PPR retrieval
+    enabled: bool = False
+    damping: float = 0.85         # PPR damping factor (0=short hops, 1=deep exploration)
+    ppr_top_k: int = 20           # number of top PPR nodes to retrieve
+    max_facts_per_node: int = 50  # max fact indices stored per graph node
+
+
+@dataclass(frozen=True)
+class GLiNER2Config:
+    """GLiNER2 triple extraction settings."""
+
+    enabled: bool = False
+    model_name: str = "fastino/gliner2-base-v1"
+    threshold: float = 0.5
+    batch_size: int = 8
 
 
 # ---------------------------------------------------------------------------

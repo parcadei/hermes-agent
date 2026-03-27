@@ -55,6 +55,9 @@ class QueryPipeline:
         decompose_config=None,     # DecomposeConfig
         dedup_config=None,         # DedupConfig
         llm_config=None,           # LLMConfig
+        # Optional graph/hyperedge modules
+        hyperedge=None,            # HyperedgeIntersection or None
+        knowledge_graph=None,      # KnowledgeGraph or None
         # Callbacks
         hop_executor_fn=None,      # callable for _query_run_hop (from QueryEngine)
     ) -> None:
@@ -74,6 +77,8 @@ class QueryPipeline:
         self._decompose_cfg = decompose_config
         self._dedup_cfg = dedup_config
         self._llm_cfg = llm_config
+        self._hyperedge = hyperedge
+        self._knowledge_graph = knowledge_graph
         self._hop_executor_fn = hop_executor_fn
         # Lazy LLM client
         self._client = None

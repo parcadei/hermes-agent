@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -32,6 +32,7 @@ class _PrepareResult:
     embeddings: np.ndarray
     rebel_triples_batch: list[list[dict]] | None
     primary_entities: list[str | None]
+    gliner2_triples_batch: list[list[tuple[str, str, str]]] | None = None
 
 
 class FactStore:
@@ -50,6 +51,7 @@ class FactStore:
         belief_index=None, entity_accumulator=None,
         supersession: bool = False, cooc_boost: bool = False,
         dream_interval: int = 0, entity_reranker=None,
+        knowledge_graph=None, gliner2_extractor=None,
     ) -> None:
         self._engine = engine
         self._scorer = scorer
@@ -67,6 +69,8 @@ class FactStore:
         self._cooc_boost = cooc_boost
         self._dream_interval = dream_interval
         self._entity_reranker = entity_reranker
+        self._knowledge_graph = knowledge_graph
+        self._gliner2_extractor = gliner2_extractor
         self._store_count = 0
 
     # -- Attribute resolution: standalone vs mixin fallback ---------------
@@ -208,12 +212,20 @@ class FactStore:
                 if len(key) > 1:
                     self._resolve_gliner_entity_index[key].add(fact_idx)
 
+        # GLiNER2 triple extraction (dense triples for KG + supersession).
+        gliner2_triples_batch = None
+        if self._gliner2_extractor is not None:
+            gliner2_triples_batch = self._gliner2_extractor.extract_batch(
+                fact_texts
+            )
+
         return _PrepareResult(
             result=result,
             fact_texts=fact_texts,
             embeddings=embeddings,
             rebel_triples_batch=rebel_triples_batch,
             primary_entities=primary_entities,
+            gliner2_triples_batch=gliner2_triples_batch,
         )
 
     def _store_single_fact(
@@ -225,6 +237,14 @@ class FactStore:
         prep: _PrepareResult,
     ) -> None:
         """Process one fact: supersession check, store, index, count."""
+        # Merge GLiNER2 triples with spaCy triples (union, deduped).
+        if (prep.gliner2_triples_batch is not None
+                and fi < len(prep.gliner2_triples_batch)):
+            g2_triples = prep.gliner2_triples_batch[fi]
+            if g2_triples:
+                combined = tuple(set(fact.triples) | set(g2_triples))
+                fact = replace(fact, triples=combined)
+
         superseded_idx, superseded_text = self._store_check_supersession(fact)
 
         if superseded_idx is not None:
@@ -376,6 +396,12 @@ class FactStore:
         # Belief index.
         if self._belief_index is not None:
             self._belief_index.register_fact(fact.text)
+        # Knowledge graph: add fact's triples as graph edges.
+        if self._knowledge_graph is not None and fact.triples:
+            self._knowledge_graph.add_fact(
+                fact.text, ms_idx, list(fact.triples),
+                recency=float(self._store_count),
+            )
 
     def _store_update_triple_index(
         self,
@@ -385,6 +411,7 @@ class FactStore:
         """Update the (subject, predicate) -> [(object, text)] index.
 
         Removes superseded entries and appends the new fact's triples.
+        Also updates the knowledge graph when supersession occurs.
         """
         if not fact.triples:
             return
@@ -395,6 +422,19 @@ class FactStore:
             new_obj = obj.lower().strip()
             if not key[0] or not key[1]:
                 continue
+            # Knowledge graph: supersede old triple if present.
+            if superseded_text is not None and self._knowledge_graph is not None:
+                for old_obj, old_text in self._resolve_triple_index[key]:
+                    if old_text == superseded_text:
+                        ms_idx = self._resolve_text_to_store_idx.get(fact.text)
+                        if ms_idx is not None:
+                            self._knowledge_graph.supersede(
+                                old_triple=(subj, pred, old_obj),
+                                new_triple=(subj, pred, obj),
+                                new_fact_index=ms_idx,
+                                new_recency=float(self._store_count),
+                            )
+                        break
             if superseded_text is not None:
                 self._resolve_triple_index[key] = [
                     (o, t)
