@@ -328,7 +328,50 @@ class QueryEngine:
             pred_matches.sort(key=lambda x: -x[0])
             return pred_matches[0][2]  # best predicate match's object
 
-        # No predicate substring match -- return None to fall through to retrieval
+        # No predicate substring match — fall back to cosine similarity.
+        # Embed the sub-question, compare against each predicate's fact text.
+        # This handles predicate splits where the LLM extracts different
+        # predicate names for the same relation (e.g. "type of music" vs
+        # "plays", "head of government" vs "head of government of").
+        return self._predicate_cosine_fallback(sq_lower, best_preds)
+
+    def _predicate_cosine_fallback(
+        self,
+        sq_lower: str,
+        pred_dict: dict[str, tuple[str, str]],
+        threshold: float = 0.35,
+    ) -> str | None:
+        """Pick the best predicate by cosine similarity between query and fact.
+
+        When substring matching fails (e.g. query says "literary genre" but
+        predicates are "type of music" / "plays"), embed the sub-question and
+        each predicate's fact text, return the highest-cosine predicate's
+        object if it exceeds the threshold.
+
+        This is O(k) where k = number of predicates for the matched subject,
+        typically 5-15.  Embeddings are cached by the scorer.
+        """
+        import numpy as np
+
+        scorer = getattr(self, "_scorer", None) or getattr(self, "_resolve_scorer", None)
+        if scorer is None or not hasattr(scorer, "embed"):
+            return None
+
+        q_emb = scorer.embed(sq_lower)
+        q_norm = q_emb / (np.linalg.norm(q_emb) + 1e-10)
+
+        best_score = -1.0
+        best_obj = None
+        for pred, (obj, fact_text) in pred_dict.items():
+            f_emb = scorer.embed(fact_text)
+            f_norm = f_emb / (np.linalg.norm(f_emb) + 1e-10)
+            score = float(np.dot(q_norm, f_norm))
+            if score > best_score:
+                best_score = score
+                best_obj = obj
+
+        if best_score >= threshold:
+            return best_obj
         return None
 
     def _graph_walk_resolve(

@@ -488,31 +488,15 @@ class FactStore:
                     recency=float(self._store_count),
                 )
 
-    # Predicate synonym map: merge LLM-extracted predicate variants
-    # that refer to the same semantic relation.  When the LLM extracts
-    # "married to" from one fact and "spouse" from another, they must
-    # share a single subject_index key so supersession works correctly.
-    _PREDICATE_SYNONYMS: dict[str, str] = {
-        "married to": "spouse",
-        "plays position": "plays",
-        "affiliated with": "religion",
-        "headquarters location": "headquarters",
-        "headquarters city": "headquarters",
-        "director of": "director",
-        "performed by": "performer",
-        "produced": "produced by",
-        "producer": "produced by",
-        "born in": "birthplace",
-        "died in": "death place",
-        "created in": "country of origin",
-        "works in": "occupation",
-        "field of work": "occupation",
-    }
-
     @classmethod
     def _normalize_pred(cls, pred: str) -> str:
-        """Normalize a predicate to its canonical form."""
-        return cls._PREDICATE_SYNONYMS.get(pred, pred)
+        """Normalize a predicate (identity — all variants stored as-is).
+
+        Predicate disambiguation is handled at QUERY time by cosine
+        similarity fallback in QueryEngine._predicate_cosine_fallback,
+        not at ingestion time via hardcoded synonym maps.
+        """
+        return pred
 
     def _store_update_triple_index(
         self,
@@ -524,12 +508,13 @@ class FactStore:
         Removes superseded entries and appends the new fact's triples.
         Also updates the knowledge graph when supersession occurs.
 
-        Two key mechanisms for robust KG coverage:
-        1. Predicate normalization — merges synonym predicates (e.g.
-           "married to" and "spouse") so supersession works correctly.
-        2. Bidirectional subject_index — indexes both (S,P)->O and
-           (O,P)->S so triples are findable regardless of whether the
-           LLM put the entity as subject or object.
+        Bidirectional subject_index — indexes both (S,P)->O and
+        (O,P)->S so triples are findable regardless of whether the
+        LLM put the entity as subject or object.
+
+        Predicate variants (e.g. "type of music" vs "plays") are stored
+        as-is; disambiguation is handled at query time by cosine
+        similarity fallback in QueryEngine._predicate_cosine_fallback.
         """
         if not fact.triples:
             return
