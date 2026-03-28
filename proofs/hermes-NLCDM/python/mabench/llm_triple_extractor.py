@@ -19,9 +19,16 @@ Usage::
 
     extractor = LLMTripleExtractor(base_url="http://localhost:8000/v1")
 
-    # Single text
+    # Single text — factual mode (default, for template sentences)
     triples = extractor.extract("The capital of France is Paris.")
     # [("France", "capital", "Paris")]
+
+    # Conversation mode — for chat turns (possessions, preferences, events)
+    triples = extractor.extract(
+        "I have a 20-gallon tank with 10 neon tetras.",
+        mode="conversation",
+    )
+    # [("20-gallon tank", "contains", "10 neon tetras")]
 
     # Batch
     batch = extractor.extract_batch(["The capital of France is Paris.", ...])
@@ -96,6 +103,62 @@ EXTRACTION_PROMPT = (
     'Text: "{text}"'
 )
 
+CONVERSATION_EXTRACTION_PROMPT = (
+    "Extract knowledge from a conversation turn as (subject, predicate, object) triples.\n\n"
+    "Rules:\n"
+    "- Extract facts about what the user has, owns, prefers, did, or plans to do\n"
+    "- Extract facts from assistant responses: recommendations, information provided\n"
+    "- Preserve entity names exactly as they appear in the text\n"
+    "- Include quantities when mentioned "
+    '(e.g. "10 neon tetras" not just "neon tetras")\n'
+    "- Predicate must be a short relation label "
+    '(e.g. "contains" not "currently has inside of it")\n'
+    "- One turn can produce many triples — extract ALL facts\n"
+    "- Only extract facts explicitly stated in the text\n"
+    "- Return an empty triples list for greetings or acknowledgments "
+    "with no factual content\n\n"
+    "Examples:\n\n"
+    'Text: "I\'m thinking of adding some live plants to my new 20-gallon tank, '
+    "which currently has 10 neon tetras, 5 golden honey gouramis, "
+    'and a small pleco catfish."\n'
+    'Output: [("20-gallon tank", "contains", "10 neon tetras"), '
+    '("20-gallon tank", "contains", "5 golden honey gouramis"), '
+    '("20-gallon tank", "contains", "pleco catfish"), '
+    '("20-gallon tank", "status", "new")]\n\n'
+    'Text: "I really prefer Python over JavaScript for backend work, '
+    "and I've been using VS Code as my primary editor for about "
+    '3 years now."\n'
+    'Output: [("Python", "preferred over", "JavaScript"), '
+    '("VS Code", "role", "primary editor"), '
+    '("VS Code", "usage duration", "3 years")]\n\n'
+    'Text: "I\'m planning a trip to Miami and I want to redeem my Delta SkyMiles '
+    "for a free trip. I just got back from a red-eye flight on JetBlue "
+    'from San Francisco to Boston."\n'
+    'Output: [("Miami", "planned activity", "trip"), '
+    '("Delta SkyMiles", "intended use", "free trip"), '
+    '("JetBlue", "route", "San Francisco to Boston"), '
+    '("JetBlue flight", "type", "red-eye")]\n\n'
+    'Text: "Based on your tank setup, I\'d recommend Java fern and Anubias nana '
+    "as beginner-friendly plants. They don't need CO2 injection and "
+    'your gouramis will appreciate the hiding spots."\n'
+    'Output: [("Java fern", "recommended for", "tank setup"), '
+    '("Anubias nana", "recommended for", "tank setup"), '
+    '("Java fern", "requires", "no CO2 injection"), '
+    '("Anubias nana", "requires", "no CO2 injection")]\n\n'
+    'Text: "Hi! Can you help me with something?"\n'
+    "Output: []\n\n"
+    'Text: "So I have a 75-gallon reef tank in my living room with 2 clownfish '
+    'and 3 blue-green chromis, plus a clean-up crew of 5 hermit crabs."\n'
+    'Output: [("75-gallon reef tank", "location", "living room"), '
+    '("75-gallon reef tank", "contains", "2 clownfish"), '
+    '("75-gallon reef tank", "contains", "3 blue-green chromis"), '
+    '("75-gallon reef tank", "contains", "5 hermit crabs")]\n\n'
+    "Now extract triples from:\n\n"
+    'Text: "{text}"'
+)
+
+_VALID_MODES = {"factual", "conversation"}
+
 
 def _ground_triple(
     subject: str, predicate: str, obj: str, source_text: str,
@@ -150,22 +213,50 @@ class LLMTripleExtractor:
     # Public API
     # ------------------------------------------------------------------
 
-    def extract(self, text: str) -> list[tuple[str, str, str]]:
-        """Extract (subject, predicate, object) triples from a single text."""
-        results = self._call_llm([text])
+    def extract(
+        self, text: str, *, mode: str = "factual",
+    ) -> list[tuple[str, str, str]]:
+        """Extract (subject, predicate, object) triples from a single text.
+
+        Args:
+            text: The source text to extract triples from.
+            mode: Extraction mode. ``"factual"`` uses the FactConsolidation
+                prompt for template sentences. ``"conversation"`` uses a
+                prompt tuned for chat turns (possessions, preferences,
+                events, quantities).
+
+        Raises:
+            ValueError: If *mode* is not one of the valid modes.
+        """
+        if mode not in _VALID_MODES:
+            raise ValueError(
+                f"mode must be one of {_VALID_MODES!r}, got {mode!r}"
+            )
+        results = self._call_llm([text], mode=mode)
         return results[0] if results else []
 
     def extract_batch(
-        self, texts: list[str],
+        self, texts: list[str], *, mode: str = "factual",
     ) -> list[list[tuple[str, str, str]]]:
         """Extract triples from a batch of texts.
 
         Calls the LLM once per text (vLLM handles batching internally
         via continuous batching when requests arrive concurrently).
+
+        Args:
+            texts: List of source texts.
+            mode: Extraction mode (see :meth:`extract`).
+
+        Raises:
+            ValueError: If *mode* is not one of the valid modes.
         """
+        if mode not in _VALID_MODES:
+            raise ValueError(
+                f"mode must be one of {_VALID_MODES!r}, got {mode!r}"
+            )
         if not texts:
             return []
-        return self._call_llm(texts)
+        return self._call_llm(texts, mode=mode)
 
     @property
     def stats(self) -> dict[str, int]:
@@ -176,23 +267,42 @@ class LLMTripleExtractor:
     # ------------------------------------------------------------------
 
     def _ensure_client(self) -> None:
-        """Lazy-init the OpenAI client."""
+        """Lazy-init the OpenAI client and auto-detect model if needed."""
         if self._client is not None:
             return
         from openai import OpenAI
 
-        _log.info(
-            "Connecting to vLLM at %s (model=%s)",
-            self._base_url, self._model,
-        )
         self._client = OpenAI(
             base_url=self._base_url,
             api_key=self._api_key,
         )
 
-    def _call_llm_single(self, text: str) -> dict:
-        """Call vLLM for a single text. Returns parsed JSON or None on error."""
-        prompt = EXTRACTION_PROMPT.format(text=text)
+        # Auto-detect model from vLLM server when using default placeholder
+        if self._model == "qwen3-triple-extractor":
+            try:
+                models = self._client.models.list()
+                if models.data:
+                    self._model = models.data[0].id
+                    _log.info("Auto-detected model: %s", self._model)
+            except Exception:
+                pass  # keep default, will fail on first extraction
+
+        _log.info(
+            "Connecting to vLLM at %s (model=%s)",
+            self._base_url, self._model,
+        )
+
+    def _call_llm_single(self, text: str, *, mode: str = "factual") -> dict:
+        """Call vLLM for a single text. Returns parsed JSON or None on error.
+
+        Args:
+            text: Source text to extract from.
+            mode: ``"factual"`` or ``"conversation"`` — selects the prompt.
+        """
+        if mode == "conversation":
+            prompt = CONVERSATION_EXTRACTION_PROMPT.format(text=text)
+        else:
+            prompt = EXTRACTION_PROMPT.format(text=text)
         try:
             response = self._client.chat.completions.create(
                 model=self._model,
@@ -205,7 +315,18 @@ class LLMTripleExtractor:
                 },
                 response_format=RESPONSE_FORMAT,
             )
-            return json.loads(response.choices[0].message.content)
+            content = response.choices[0].message.content or ""
+            # Strip thinking tags if model ignores enable_thinking=False
+            if "<think>" in content:
+                idx = content.rfind("</think>")
+                if idx >= 0:
+                    content = content[idx + len("</think>"):].strip()
+            # Find JSON object in content (may have non-JSON prefix/suffix)
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start >= 0 and end > start:
+                content = content[start:end]
+            return json.loads(content)
         except Exception:
             _log.warning("LLM extraction failed for text: %s...", text[:80], exc_info=True)
             return None
@@ -236,24 +357,32 @@ class LLMTripleExtractor:
         return grounded
 
     def _call_llm(
-        self, texts: list[str],
+        self, texts: list[str], *, mode: str = "factual",
     ) -> list[list[tuple[str, str, str]]]:
         """Call vLLM concurrently for all texts, then ground triples.
 
         Uses ThreadPoolExecutor so vLLM's continuous batching processes
         requests in parallel on the GPU. Typically 5-10x faster than
         sequential calls for batches of 10-20 sentences.
+
+        Args:
+            texts: Source texts to extract from.
+            mode: ``"factual"`` or ``"conversation"`` — forwarded to
+                :meth:`_call_llm_single`.
         """
         self._ensure_client()
         if not texts:
             return []
 
         from concurrent.futures import ThreadPoolExecutor
+        from functools import partial
+
+        call_fn = partial(self._call_llm_single, mode=mode)
 
         # Send all requests concurrently — vLLM batches them on the GPU
         t0 = time.perf_counter()
         with ThreadPoolExecutor(max_workers=min(len(texts), 16)) as pool:
-            parsed_results = list(pool.map(self._call_llm_single, texts))
+            parsed_results = list(pool.map(call_fn, texts))
         elapsed = time.perf_counter() - t0
 
         _log.info(
