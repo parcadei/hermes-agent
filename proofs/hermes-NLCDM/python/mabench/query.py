@@ -73,6 +73,8 @@ class QueryEngine:
         # Optional graph/hyperedge modules
         hyperedge=None,            # HyperedgeIntersection or None
         knowledge_graph=None,      # KnowledgeGraph or None
+        cooc_kg=None,              # CoocKG or None
+        supersession_state=None,   # SupersessionState (holds _triple_index)
         # Callbacks for cross-module deps (QueryPipeline methods)
         final_retrieval_fn=None,  # callable for _query_final_retrieval
         post_process_fn=None,     # callable for _query_post_process
@@ -98,6 +100,8 @@ class QueryEngine:
         self._dedup_cfg = dedup_config
         self._hyperedge = hyperedge
         self._knowledge_graph = knowledge_graph
+        self._cooc_kg = cooc_kg
+        self._supersession_state = supersession_state
         # Callbacks
         self._final_retrieval_fn = final_retrieval_fn
         self._post_process_fn = post_process_fn
@@ -261,6 +265,346 @@ class QueryEngine:
             return self._rebel._rebel_kg_hop(sq)
         return self._rebel_kg_hop(sq)  # type: ignore[attr-defined]
 
+    @property
+    def _resolve_triple_index(self):
+        if self._supersession_state is not None:
+            return self._supersession_state.triple_index
+        # Mixin fallback
+        return getattr(self, "_triple_index", {})
+
+    @property
+    def _resolve_subject_index(self):
+        if self._supersession_state is not None:
+            return self._supersession_state.subject_index
+        return getattr(self, "_subject_index", {})
+
+    def _resolve_triple_index_kg_hop(self, sub_question: str) -> str | None:
+        """Resolve a decompose hop via subject-based KG lookup.
+
+        Instead of matching both subject AND predicate as substrings,
+        matches ONLY the subject entity, then returns ALL predicates
+        as structured context.  For entities with few predicates (<= 1),
+        returns the single fact so the decompose LLM can pick the right one.
+        For multi-predicate entities, attempts predicate substring matching
+        in the question text; falls through to retrieval if no predicate
+        matches.
+
+        Falls back to _resolve_triple_index_kg_hop_legacy when subject_index
+        is empty but triple_index is populated.
+        """
+        subject_index = self._resolve_subject_index
+        if not subject_index:
+            # Fallback to legacy when subject_index not populated
+            return self._resolve_triple_index_kg_hop_legacy(sub_question)
+
+        sq_lower = sub_question.lower()
+
+        # Find subject entities that appear in the question
+        candidates: list[tuple[int, str, dict[str, tuple[str, str]]]] = []
+        for subj, pred_dict in subject_index.items():
+            if len(subj) >= 3 and subj in sq_lower:
+                candidates.append((len(subj), subj, pred_dict))
+
+        if not candidates:
+            return None
+
+        # Sort by subject length descending (prefer longest/most specific match)
+        candidates.sort(key=lambda x: -x[0])
+        best_subj, best_preds = candidates[0][1], candidates[0][2]
+
+        # If only one predicate, return it directly
+        if len(best_preds) == 1:
+            obj, _text = next(iter(best_preds.values()))
+            return obj
+
+        # Multiple predicates: try to match predicate in question text
+        # This handles the easy cases where predicate IS in the question
+        pred_matches: list[tuple[int, str, str]] = []
+        for pred, (obj, text) in best_preds.items():
+            if len(pred) >= 3 and pred in sq_lower:
+                pred_matches.append((len(pred), pred, obj))
+
+        if pred_matches:
+            pred_matches.sort(key=lambda x: -x[0])
+            return pred_matches[0][2]  # best predicate match's object
+
+        # No predicate substring match -- return None to fall through to retrieval
+        return None
+
+    def _graph_walk_resolve(
+        self, bare_question: str, subqueries: list[str], max_hops: int = 4,
+    ) -> dict | None:
+        """Try to answer a multi-hop question by walking the KG subgraph.
+
+        1. Find anchor entity from the first sub-query
+        2. BFS from anchor through subject_index (up to max_hops)
+        3. Build all reachable paths
+        4. Ask LLM to pick the right path and extract the final answer
+
+        Returns a hop_state dict if successful, None to fall through.
+        """
+        subject_index = self._resolve_subject_index
+        if not subject_index or not subqueries:
+            return None
+
+        # Find anchor entity from first sub-query (longest substring match)
+        sq0_lower = subqueries[0].lower()
+        # Substitute any answer placeholders that exist
+        for key in ["{answer_1}", "{answer_2}", "{answer_3}", "{answer_4}"]:
+            sq0_lower = sq0_lower.replace(key, "")
+
+        anchor = None
+        anchor_len = 0
+        for subj in subject_index:
+            if len(subj) >= 3 and subj in sq0_lower and len(subj) > anchor_len:
+                anchor = subj
+                anchor_len = len(subj)
+
+        if not anchor:
+            return None
+
+        # BFS to build reachable subgraph
+        paths = []
+        queue = [(anchor, [], 0)]
+        visited = {anchor}
+        while queue:
+            entity, path, depth = queue.pop(0)
+            if entity not in subject_index:
+                continue
+            for pred, (obj, _text) in subject_index[entity].items():
+                new_path = path + [(entity, pred, obj)]
+                paths.append(new_path)
+                if depth + 1 < max_hops and obj in subject_index and obj not in visited:
+                    visited.add(obj)
+                    queue.append((obj, new_path, depth + 1))
+
+        if not paths:
+            return None
+
+        # Format subgraph as structured text for the LLM
+        lines = []
+        for p in paths:
+            chain = " → ".join(f"{s} --[{pr}]--> {o}" for s, pr, o in p)
+            lines.append(chain)
+
+        subgraph_text = "\n".join(lines)
+
+        # Ask LLM to answer from the subgraph
+        self._resolve_ensure_llm_client()
+        prompt = (
+            f"You are a fact lookup system. Below are all facts reachable from "
+            f'the entity "{anchor}" in a knowledge graph.\n\n'
+            f"Facts:\n{subgraph_text}\n\n"
+            f"Question: {bare_question}\n\n"
+            f"Using ONLY the facts above, trace the path that answers the "
+            f"question. Give ONLY the final answer entity, nothing else. "
+            f"If the facts don't contain enough information to answer, "
+            f"respond with exactly: INSUFFICIENT"
+        )
+
+        try:
+            response = self._resolve_llm_client.chat.completions.create(
+                model=self._resolve_model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.0,
+                max_tokens=50,
+            )
+            answer = response.choices[0].message.content.strip()
+        except Exception:
+            return None
+
+        if not answer or "INSUFFICIENT" in answer.upper():
+            return None
+
+        # Verify the answer appears in the subgraph (prevent hallucination)
+        answer_lower = answer.lower().strip().strip('"').strip("'")
+        found_in_graph = any(
+            answer_lower in p[-1][2].lower() or p[-1][2].lower() in answer_lower
+            for p in paths
+        )
+        if not found_in_graph:
+            return None
+
+        # Build evidence chain from the matching path
+        matching_path = None
+        for p in paths:
+            if answer_lower in p[-1][2].lower() or p[-1][2].lower() in answer_lower:
+                matching_path = p
+                break
+
+        evidence_chain = []
+        answers = {}
+        for i, (s, pr, o) in enumerate(matching_path or []):
+            evidence_chain.append({
+                "q": f"{s} → {pr}?",
+                "a": o,
+                "evidence": [f"[KG-WALK: {s} --[{pr}]--> {o}]"],
+            })
+            answers[f"{{answer_{i + 1}}}"] = o
+
+        return {
+            "subqueries": subqueries,
+            "answers": answers,
+            "evidence_chain": evidence_chain,
+            "final_kg_answer": answer_lower,
+            "seen_texts": set(),
+            "_all_v2_results": [],
+        }
+
+    def _resolve_triple_index_kg_hop_legacy(self, sub_question: str) -> str | None:
+        """Legacy: resolve a decompose hop via predicated KG (_triple_index).
+
+        Scans the triple index for (subject, predicate) keys where both
+        the subject and predicate appear as substrings in the question.
+        Returns the object value if found, None to fall through to retrieval.
+
+        Kept as fallback when subject_index is not yet populated.
+        """
+        triple_index = self._resolve_triple_index
+        if not triple_index:
+            return None
+
+        sq_lower = sub_question.lower()
+
+        # Build candidate (subject, predicate) pairs where both appear in question
+        candidates = []
+        for (subj, pred), entries in triple_index.items():
+            if not entries:
+                continue
+            if len(subj) >= 3 and len(pred) >= 3 and subj in sq_lower and pred in sq_lower:
+                # Score by combined length (prefer longer/more specific matches)
+                candidates.append((len(subj) + len(pred), subj, pred, entries))
+
+        if not candidates:
+            return None
+
+        # Sort by score descending (longest combined match wins)
+        candidates.sort(key=lambda x: -x[0])
+
+        # Return the object from the best match (last entry = newest due to append order)
+        best_entries = candidates[0][3]
+        return best_entries[-1][0]  # newest object value
+
+    def _resolve_cooc_kg_hop(self, sub_question: str) -> str | None:
+        """Try to resolve a decompose hop via CoocKG.
+
+        1. Find known KG entities that appear as substrings in the question.
+        2. Infer target type from question keyword patterns.
+        3. Try resolve_hop for each candidate entity (longest match first).
+        """
+        cooc_kg = self._cooc_kg
+        if cooc_kg is None:
+            return None
+
+        # Extract query entity: find entity names that appear in the question
+        # Use simple substring matching against known KG entities
+        sq_lower = sub_question.lower()
+        candidate_entities = []
+        for entity_name in cooc_kg.entity_types:
+            if entity_name in sq_lower:
+                candidate_entities.append(entity_name)
+
+        # Sort by length (prefer longer/more specific matches)
+        candidate_entities.sort(key=len, reverse=True)
+
+        # Infer target type from question keywords.
+        # If we can't determine a target type, fall through to LLM —
+        # untyped resolve_hop returns the top-1 neighbor regardless of type,
+        # which produces garbage answers (e.g. "johann strauss ii" for "religion?").
+        target_type = self._infer_target_type(sub_question)
+        if target_type is None:
+            return None
+
+        # Try each candidate entity
+        for entity in candidate_entities:
+            answer = cooc_kg.resolve_hop(entity, target_type=target_type)
+            if answer is not None:
+                return answer
+
+        return None
+
+    @staticmethod
+    def _infer_target_type(question: str) -> str | None:
+        """Infer the expected answer type from question structure.
+
+        Maps question keywords to GLiNER entity types (the 16 labels in
+        ``DEFAULT_ENTITY_LABELS``).  Returns None if no pattern matches.
+
+        Order matters: more specific patterns are checked first so that
+        e.g. "capital city" matches "city" before "location".
+        """
+        q = question.lower()
+        # Each entry: (keywords, entity_type)
+        # Ordered from most specific to most general.  Domain-specific types
+        # (animal, plant, food, disease, chemical, material) come BEFORE
+        # generic geographic types (country, location) to avoid false
+        # positives from substring overlaps (e.g. "national" matching
+        # "nation" -> country, "region" -> location).
+        TYPE_PATTERNS = [
+            # Work of art (check before generic words like "book")
+            (["painting", "sculpture", "novel", "poem", "song",
+              "album", "film", "movie", "show", "series",
+              "artwork", "composition", "symphony",
+              "notable work", "wrote", "written"], "work of art"),
+            # People (check before location/country to catch "who" and
+            # role-specific keywords like "author", "player", etc.)
+            (["who ", "player", "person", "author", "founder",
+              "president", "leader", "director", "scientist",
+              "artist", "musician", "actor", "writer",
+              "performer", "singer", "composer"], "person"),
+            # Animals (before country -- "national" substring)
+            (["animal", "species", "creature", "breed", "mammal",
+              "bird", "fish", "insect", "reptile"], "animal"),
+            # Plants (before location -- "region" substring)
+            (["plant", "flower", "tree", "herb", "crop", "grass",
+              "shrub", "vine", "moss", "fern", "flora"], "plant"),
+            # Diseases
+            (["disease", "illness", "condition", "syndrome",
+              "disorder", "infection", "virus", "pathogen",
+              "ailment", "malady"], "disease"),
+            # Chemicals
+            (["chemical", "element", "compound", "substance",
+              "molecule", "mineral", "metal", "alloy", "acid",
+              "reagent"], "chemical"),
+            # Food (before location -- "region" substring)
+            (["food", "dish", "cuisine", "meal", "recipe",
+              "ingredient", "beverage", "drink", "fruit",
+              "vegetable"], "food"),
+            # Materials
+            (["material", "fabric", "textile", "cloth", "fiber",
+              "polymer", "ceramic", "rubber", "leather",
+              "concrete", "steel", "wood"], "material"),
+            # Cities and capitals (check before "location")
+            (["capital", "city", "town", "municipality", "village",
+              "birthplace", "born in", "seat of government",
+              "headquarters"], "city"),
+            # Countries
+            (["country", "nation ", "homeland", "sovereignty"], "country"),
+            # Continents and locations
+            (["continent", "region", "area", "located", "where",
+              "place", "territory"], "location"),
+            # Organizations and teams
+            (["team", "club", "league", "company", "organization",
+              "employer", "agency", "institution", "corporation",
+              "university", "school", "education", "broadcaster",
+              "manufacturer", "created by", "produced by"], "organization"),
+            # Sports
+            (["sport", "game", "athletics"], "sport"),
+            # Languages
+            (["language", "tongue", "dialect"], "language"),
+            # Events
+            (["event", "competition", "tournament", "ceremony",
+              "festival", "conference", "war", "battle"], "event"),
+            # Products
+            (["product", "device", "gadget", "brand", "model",
+              "software", "app", "tool", "book"], "product"),
+        ]
+        for keywords, entity_type in TYPE_PATTERNS:
+            for kw in keywords:
+                if kw in q:
+                    return entity_type
+        return None
+
     # Pipeline callbacks: resolve via explicit fn or mixin fallback
 
     def _resolve_query_final_retrieval(self, bare, question):
@@ -404,6 +748,27 @@ class QueryEngine:
 
         # Determine previous hop's intermediate answer (for hyperedge + KG PPR)
         prev_hop_answer = answers.get(f"{{answer_{hop_idx}}}") if hop_idx > 0 else None
+
+        # LLM KG fast lane (predicated triple index, O(1) dict lookup)
+        kg_answer = self._resolve_triple_index_kg_hop(sq)
+        if kg_answer is not None:
+            return self._query_hop_kg(
+                sq, kg_answer, hop_idx, num_subqueries,
+                answers, evidence_chain, sq_chunks, sq_chunks_raw,
+            )
+
+        # CoocKG fast lane (type-filtered graph traversal, no LLM)
+        # DISABLED: 14% accuracy on real data (27/187 hops correct).
+        # Co-occurrence edges are too noisy for confident hop resolution.
+        # Needs: exact entity matching, NPMI threshold, top-1/top-2 gap check.
+        cooc_kg = None  # getattr(self, "_cooc_kg", None)
+        if cooc_kg is not None:
+            kg_answer = self._resolve_cooc_kg_hop(sq)
+            if kg_answer is not None:
+                return self._query_hop_kg(
+                    sq, kg_answer, hop_idx, num_subqueries,
+                    answers, evidence_chain, sq_chunks, sq_chunks_raw,
+                )
 
         # REBEL KG fast lane
         rebel_kg = self._resolve_rebel_kg_attr

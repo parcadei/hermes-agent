@@ -60,6 +60,7 @@ class QueryPipeline:
         knowledge_graph=None,      # KnowledgeGraph or None
         # Callbacks
         hop_executor_fn=None,      # callable for _query_run_hop (from QueryEngine)
+        graph_walk_fn=None,        # callable for _graph_walk_resolve (from QueryEngine)
     ) -> None:
         self._engine = engine
         self._scorer = scorer
@@ -80,6 +81,7 @@ class QueryPipeline:
         self._hyperedge = hyperedge
         self._knowledge_graph = knowledge_graph
         self._hop_executor_fn = hop_executor_fn
+        self._graph_walk_fn = graph_walk_fn
         # Lazy LLM client
         self._client = None
         # Query state (set per-query by QueryEngine)
@@ -279,6 +281,17 @@ class QueryPipeline:
         Returns (v2_texts, sq_chunks_raw, hop_state).
         """
         subqueries = self._decompose_query(bare_question)
+
+        # Graph walk: try to answer the full multi-hop question by traversing
+        # the KG subgraph from the anchor entity. If the complete path exists,
+        # this is deterministic and avoids cascade errors from independent hops.
+        gw_fn = getattr(self, "_graph_walk_fn", None)
+        if gw_fn is not None:
+            gw_result = gw_fn(bare_question, subqueries)
+            if gw_result is not None:
+                gw_result["_all_v2_results"] = []
+                return [], [], gw_result
+
         seen_texts: set[str] = set()
         answers: dict[str, str] = {}
         evidence_chain: list[dict] = []

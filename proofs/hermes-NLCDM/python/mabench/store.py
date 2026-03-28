@@ -33,6 +33,8 @@ class _PrepareResult:
     rebel_triples_batch: list[list[dict]] | None
     primary_entities: list[str | None]
     gliner2_triples_batch: list[list[tuple[str, str, str]]] | None = None
+    cooc_edges_batch: list[list[tuple[str, str, str]]] | None = None
+    relik_triples_batch: list[list[tuple[str, str, str]]] | None = None
 
 
 class FactStore:
@@ -52,6 +54,9 @@ class FactStore:
         supersession: bool = False, cooc_boost: bool = False,
         dream_interval: int = 0, entity_reranker=None,
         knowledge_graph=None, gliner2_extractor=None,
+        cooc_extractor=None,
+        relik_extractor=None,
+        cooc_kg=None,
     ) -> None:
         self._engine = engine
         self._scorer = scorer
@@ -71,6 +76,9 @@ class FactStore:
         self._entity_reranker = entity_reranker
         self._knowledge_graph = knowledge_graph
         self._gliner2_extractor = gliner2_extractor
+        self._cooc_extractor = cooc_extractor
+        self._relik_extractor = relik_extractor
+        self._cooc_kg = cooc_kg
         self._store_count = 0
 
     # -- Attribute resolution: standalone vs mixin fallback ---------------
@@ -141,6 +149,10 @@ class FactStore:
         return self._ss("supersession_log")
 
     @property
+    def _resolve_subject_index(self):
+        return self._ss("subject_index")
+
+    @property
     def _resolve_gliner_entity_index(self):
         ei = getattr(self, "_entity_idx", None)
         if ei is not None:
@@ -167,6 +179,14 @@ class FactStore:
     # Public API: _store and decomposed helpers
     # ------------------------------------------------------------------
 
+    def finalize_cooc_kg(self) -> None:
+        """Call after ingestion batch completes to compute NPMI weights.
+
+        Safe to call when no CoocKG is configured (no-op).
+        """
+        if self._cooc_kg is not None:
+            self._cooc_kg.compute_npmi()
+
     def _store(self, text: str) -> str:
         """Store text through ingestion pipeline + V1 + V2 layers.
 
@@ -187,7 +207,7 @@ class FactStore:
         return "Memorized"
 
     def _store_prepare(self, text: str) -> _PrepareResult:
-        """Segment text, embed facts, extract REBEL triples."""
+        """Segment text, embed facts, extract triples (REBEL + co-occurrence + GLiNER2)."""
         result = self._ingestion.segment(text)
         fact_texts = [f.text for f in result.facts]
 
@@ -199,23 +219,51 @@ class FactStore:
         if run_rebel:
             rebel_triples_batch = self._resolve_rebel_extract_batch(fact_texts)
 
-        # GLiNER entity extraction skipped -- consumers disabled.
+        # Entity extraction: co-occurrence extractor doubles as entity source.
         primary_entities: list[str | None] = [None] * len(fact_texts)
-        all_entities: list[list] = [[] for _ in fact_texts]
+        cooc_edges_batch = None
+        if self._cooc_extractor is not None:
+            if self._cooc_kg is not None:
+                # CoocKG path: sentence-window extraction feeds both the KG
+                # and the entity index in one pass.
+                spacy_docs = list(self._ingestion._nlp.pipe(fact_texts))
+                entities_batch = self._cooc_extractor.extract_and_feed_cooc_kg(
+                    fact_texts, self._cooc_kg, spacy_docs=spacy_docs,
+                )
+                # Still need co-occurrence edges for KnowledgeGraph + TriadicMemory
+                cooc_edges_batch = self._cooc_extractor.extract_batch(fact_texts)
+            else:
+                # No CoocKG: use original path
+                cooc_edges_batch = self._cooc_extractor.extract_batch(fact_texts)
+                entities_batch = self._cooc_extractor.extract_entities_batch(fact_texts)
+            # Populate entity index from extracted entities.
+            base_idx = len(self._resolve_engine.memory_store)
+            for i, ents in enumerate(entities_batch):
+                fact_idx = base_idx + i
+                for ent in ents:
+                    key = ent["text"].lower().strip()
+                    if len(key) > 1:
+                        self._resolve_gliner_entity_index[key].add(fact_idx)
+                # Primary entity: prefer person, fallback to highest score.
+                if ents:
+                    person_ents = [e for e in ents if e["label"] == "person"]
+                    best = person_ents[0] if person_ents else max(ents, key=lambda e: e["score"])
+                    primary_entities[i] = best["text"].strip()
+        else:
+            # No co-occurrence extractor: entity index stays empty.
+            base_idx = len(self._resolve_engine.memory_store)
 
-        # Build entity index with insertion offset.
-        base_idx = len(self._resolve_engine.memory_store)
-        for i, ents in enumerate(all_entities):
-            fact_idx = base_idx + i
-            for ent in ents:
-                key = ent["text"].lower().strip()
-                if len(key) > 1:
-                    self._resolve_gliner_entity_index[key].add(fact_idx)
-
-        # GLiNER2 triple extraction (dense triples for KG + supersession).
+        # GLiNER2 triple extraction (dense triples for supersession).
         gliner2_triples_batch = None
         if self._gliner2_extractor is not None:
             gliner2_triples_batch = self._gliner2_extractor.extract_batch(
+                fact_texts
+            )
+
+        # ReLiK v2 triple extraction (canonical Wikidata triples for supersession).
+        relik_triples_batch = None
+        if self._relik_extractor is not None:
+            relik_triples_batch = self._relik_extractor.extract_batch(
                 fact_texts
             )
 
@@ -226,6 +274,8 @@ class FactStore:
             rebel_triples_batch=rebel_triples_batch,
             primary_entities=primary_entities,
             gliner2_triples_batch=gliner2_triples_batch,
+            cooc_edges_batch=cooc_edges_batch,
+            relik_triples_batch=relik_triples_batch,
         )
 
     def _store_single_fact(
@@ -245,6 +295,14 @@ class FactStore:
                 combined = tuple(set(fact.triples) | set(g2_triples))
                 fact = replace(fact, triples=combined)
 
+        # Merge ReLiK v2 triples (canonical Wikidata predicates for supersession).
+        if (prep.relik_triples_batch is not None
+                and fi < len(prep.relik_triples_batch)):
+            relik_triples = prep.relik_triples_batch[fi]
+            if relik_triples:
+                combined = tuple(set(fact.triples) | set(relik_triples))
+                fact = replace(fact, triples=combined)
+
         superseded_idx, superseded_text = self._store_check_supersession(fact)
 
         if superseded_idx is not None:
@@ -260,7 +318,8 @@ class FactStore:
             self._entity_reranker.annotate_entry(entry, fact)
 
         self._store_update_indices(
-            fi, fact, ms_idx, prep.rebel_triples_batch
+            fi, fact, ms_idx, prep.rebel_triples_batch,
+            prep.cooc_edges_batch,
         )
         self._store_update_triple_index(fact, superseded_text)
         self._store_detect_belief_conflicts(fact)
@@ -379,29 +438,55 @@ class FactStore:
         fact: SegmentedFact,
         ms_idx: int,
         rebel_triples_batch: list[list[dict]] | None,
+        cooc_edges_batch: list[list[tuple[str, str, str]]] | None = None,
     ) -> None:
-        """Update BM25, triadic, REBEL KG, and belief indices."""
+        """Update BM25, triadic, REBEL KG, knowledge graph, and belief indices.
+
+        Co-occurrence edges (from fast-path bi-encoder NER) are routed to
+        KnowledgeGraph and TriadicMemory. These consumers don't need
+        predicates — they need entity adjacency.  spaCy/GLiNER2 triples
+        continue to feed supersession (handled in _store_update_triple_index).
+        """
         # BM25.
         if getattr(self, "_bm25_index", None) is not None:
             self._bm25_index.add(ms_idx, fact.text)
-        # Triadic.
+
+        # Determine which triples feed triadic and KG.
+        # Priority: co-occurrence edges (fast path) > spaCy/GLiNER2 triples (fallback).
+        cooc_edges = None
+        if cooc_edges_batch is not None and fi < len(cooc_edges_batch):
+            cooc_edges = cooc_edges_batch[fi]
+
+        # Triadic: co-occurrence edges if available, else spaCy triples.
         if getattr(self, "_triadic", None) is not None:
-            self._triadic.store_fact(fact.text, list(fact.triples))
+            if cooc_edges:
+                self._triadic.store_fact(fact.text, cooc_edges)
+            else:
+                self._triadic.store_fact(fact.text, list(fact.triples))
+
         # REBEL KG.
         if rebel_triples_batch is not None and fi < len(rebel_triples_batch):
             for triple in rebel_triples_batch[fi]:
                 self._resolve_rebel_kg_add(
                     triple["head"], triple["relation"], triple["tail"]
                 )
+
         # Belief index.
         if self._belief_index is not None:
             self._belief_index.register_fact(fact.text)
-        # Knowledge graph: add fact's triples as graph edges.
-        if self._knowledge_graph is not None and fact.triples:
-            self._knowledge_graph.add_fact(
-                fact.text, ms_idx, list(fact.triples),
-                recency=float(self._store_count),
-            )
+
+        # Knowledge graph: co-occurrence edges if available, else spaCy/GLiNER2 triples.
+        if self._knowledge_graph is not None:
+            if cooc_edges:
+                self._knowledge_graph.add_fact(
+                    fact.text, ms_idx, cooc_edges,
+                    recency=float(self._store_count),
+                )
+            elif fact.triples:
+                self._knowledge_graph.add_fact(
+                    fact.text, ms_idx, list(fact.triples),
+                    recency=float(self._store_count),
+                )
 
     def _store_update_triple_index(
         self,
@@ -442,6 +527,15 @@ class FactStore:
                     if t != superseded_text
                 ]
             self._resolve_triple_index[key].append((new_obj, fact.text))
+
+            # Update subject_index (subject -> {predicate: (newest_obj, text)})
+            # Newest-wins: overwrite previous entry for same (subj, pred).
+            subj_key = key[0]  # already lowered/stripped
+            pred_key = key[1]
+            si = self._resolve_subject_index
+            if subj_key not in si:
+                si[subj_key] = {}
+            si[subj_key][pred_key] = (new_obj, fact.text)
 
     def _store_detect_belief_conflicts(self, fact: SegmentedFact) -> None:
         """Detect conflicts for belief index when supersession is off.
@@ -492,6 +586,10 @@ class FactStore:
 
         # Deferred FAISS rebuild: one per chunk.
         engine.rebuild_faiss_if_dirty()
+
+        # Flush triadic tensor writes (buffered during per-fact loop).
+        if getattr(self, "_triadic", None) is not None:
+            self._triadic.flush()
 
         # Synonym dict for triadic.
         if getattr(self, "_triadic", None) is not None:

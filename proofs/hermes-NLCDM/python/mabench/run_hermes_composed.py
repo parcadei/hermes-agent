@@ -41,7 +41,7 @@ from mabench.agent import HermesAgent
 from mabench.configs import (
     RetrievalConfig, CRConfig, DecomposeConfig, StoreConfig,
     LLMConfig, BeliefConfig, EntityConfig, DedupConfig, KGConfig,
-    GLiNER2Config,
+    GLiNER2Config, CoocExtractionConfig, RelikConfig,
 )
 from mabench.eval_cache import cache_dir, list_caches
 from utils.eval_other_utils import metrics_summarization
@@ -69,6 +69,7 @@ def _save_context(agent: HermesAgent, path: Path, context_idx: int) -> None:
         "fact_entities": ss.fact_entities,
         "supersession_graph": ss.supersession_graph,
         "supersedes": {k: set(v) for k, v in ss.supersedes.items()},
+        "subject_index": dict(ss.subject_index),
         "gliner_entity_index": {k: set(v) for k, v in ei.index.items()},
     }
 
@@ -100,6 +101,15 @@ def _save_context(agent: HermesAgent, path: Path, context_idx: int) -> None:
     g2 = agent.gliner2_extractor
     if g2 is not None:
         state["gliner2_extractor"] = g2
+    cooc_ex = agent.cooc_extractor
+    if cooc_ex is not None:
+        state["cooc_extractor"] = cooc_ex
+    relik_ex = agent.relik_extractor
+    if relik_ex is not None:
+        state["relik_extractor"] = relik_ex
+    cooc_kg = agent.cooc_kg
+    if cooc_kg is not None:
+        state["cooc_kg"] = cooc_kg
 
     state_file = ctx_dir / "state.pkl"
     with open(state_file, "wb") as f:
@@ -142,6 +152,7 @@ def _load_context(agent: HermesAgent, path: Path, context_idx: int) -> bool:
     ss.supersession_graph = state.get("supersession_graph", {})
     raw = state.get("supersedes", {})
     ss.supersedes = defaultdict(set, {k: set(v) for k, v in raw.items()})
+    ss.subject_index = state.get("subject_index", {})
 
     # Entity index
     raw_idx = state.get("gliner_entity_index", {})
@@ -194,6 +205,25 @@ def _load_context(agent: HermesAgent, path: Path, context_idx: int) -> bool:
         agent.store._gliner2_extractor = state["gliner2_extractor"]
         agent.gliner2_extractor = state["gliner2_extractor"]
 
+    # Co-occurrence extractor (pickle-safe: model excluded, lazy-reloaded)
+    if agent.store._cooc_extractor is not None and "cooc_extractor" in state:
+        agent.store._cooc_extractor = state["cooc_extractor"]
+        agent.cooc_extractor = state["cooc_extractor"]
+
+    # ReLiK extractor (pickle-safe: model excluded, lazy-reloaded)
+    if agent.store._relik_extractor is not None and "relik_extractor" in state:
+        agent.store._relik_extractor = state["relik_extractor"]
+        agent.relik_extractor = state["relik_extractor"]
+
+    # CoocKG (pickle-safe: pure Python dicts)
+    if "cooc_kg" in state and agent.store._cooc_kg is not None:
+        agent.store._cooc_kg = state["cooc_kg"]
+        agent.query_engine._cooc_kg = state["cooc_kg"]
+        agent.cooc_kg = state["cooc_kg"]
+
+    # SupersessionState (holds _triple_index for query-time KG resolution)
+    agent.query_engine._supersession_state = agent._supersession_state
+
     # Reload embedding disk cache
     agent._scorer._load_disk_cache()
 
@@ -232,6 +262,10 @@ def parse_args():
     parser.add_argument("--dream_merge_threshold", type=float, default=0.90)
     parser.add_argument("--dream_explore_only", action="store_true")
 
+    # Store
+    parser.add_argument("--supersession", action="store_true",
+                        help="Enable (S,P) triple-based supersession at ingestion time")
+
     # Retrieval
     parser.add_argument("--cooc_boost", action="store_true")
     parser.add_argument("--cooc_weight", type=float, default=1.0)
@@ -265,6 +299,12 @@ def parse_args():
     parser.add_argument("--entity_rerank", action="store_true",
                         help="Entity-position residual reranking with multiplicative gating (arXiv:2603.19664)")
 
+    # Fisher-Rao scoring
+    parser.add_argument("--fisher_scoring", action="store_true",
+                        help="Replace cosine base similarity with Fisher-Rao inverse-variance weighted distance (arXiv:2603.14588v1)")
+    parser.add_argument("--fisher_temperature", type=float, default=1.0,
+                        help="Fisher-Rao temperature (lower = more discriminative, default 1.0)")
+
     # Hyperedge intersection
     parser.add_argument("--hyperedge", action="store_true",
                         help="Enable hyperedge intersection in decompose hops")
@@ -289,6 +329,30 @@ def parse_args():
     parser.add_argument("--gliner2_model", type=str,
                         default="fastino/gliner2-base-v1",
                         help="GLiNER2 model name")
+
+    # Co-occurrence extraction (fast path: bi-encoder NER → co-occurrence edges)
+    parser.add_argument("--cooc_extraction", action="store_true",
+                        help="Enable fast-path co-occurrence extraction for KG + triadic")
+    parser.add_argument("--cooc_extraction_threshold", type=float, default=0.3,
+                        help="NER confidence threshold for co-occurrence extractor")
+    parser.add_argument("--cooc_extraction_model", type=str,
+                        default="knowledgator/gliner-bi-edge-v2.0",
+                        help="GLiNER bi-encoder NER model for co-occurrence extraction")
+
+    # ReLiK v2 relation extraction (canonical Wikidata triples for supersession)
+    parser.add_argument("--relik", action="store_true",
+                        help="Enable ReLiK v2 triple extraction for supersession")
+    parser.add_argument("--relik_model", type=str,
+                        default="relik-ie/relik-relation-extraction-large",
+                        help="ReLiK model name")
+    parser.add_argument("--relik_min_confidence", type=float, default=0.5,
+                        help="ReLiK minimum confidence threshold")
+
+    # LLM triple extraction (vLLM server)
+    parser.add_argument("--llm_extraction_url", type=str, default=None,
+                        help="vLLM server URL for LLM triple extraction (e.g. http://localhost:8000/v1)")
+    parser.add_argument("--llm_extraction_model", type=str, default="qwen3-triple-extractor",
+                        help="Served model name for LLM triple extraction")
 
     # Cache
     parser.add_argument("--no_cache", action="store_true")
@@ -321,6 +385,8 @@ def _build_agent(args) -> HermesAgent:
         hyperedge_intersection=args.hyperedge,
         hyperedge_penalty=args.hyperedge_penalty,
         hyperedge_min_candidates=args.hyperedge_min_candidates,
+        fisher_scoring=args.fisher_scoring,
+        fisher_temperature=args.fisher_temperature,
     )
     cr = CRConfig(
         enabled=args.conflict_resolution,
@@ -332,7 +398,10 @@ def _build_agent(args) -> HermesAgent:
         enabled=args.decompose_query,
         max_hops=args.decompose_max_hops,
     )
+    # Auto-enable supersession when relik is active (triples need triple_index)
+    supersession = getattr(args, "supersession", False) or args.relik
     store = StoreConfig(
+        supersession=supersession,
         cooc_boost=args.cooc_boost,
         dream_interval=args.dream_interval,
     )
@@ -359,6 +428,16 @@ def _build_agent(args) -> HermesAgent:
         model_name=args.gliner2_model,
         threshold=args.gliner2_threshold,
     )
+    cooc_extraction_cfg = CoocExtractionConfig(
+        enabled=args.cooc_extraction,
+        model_name=args.cooc_extraction_model,
+        threshold=args.cooc_extraction_threshold,
+    )
+    relik_cfg = RelikConfig(
+        enabled=args.relik,
+        model_name=args.relik_model,
+        min_confidence=args.relik_min_confidence,
+    )
 
     return HermesAgent(
         dim=1024,
@@ -374,10 +453,14 @@ def _build_agent(args) -> HermesAgent:
         dedup=dedup,
         kg=kg_cfg,
         gliner2=gliner2_cfg,
+        cooc_extraction=cooc_extraction_cfg,
+        relik=relik_cfg,
         bm25_hops=args.bm25_hops,
         chain_cache=args.chain_cache,
         rebel_kg=args.rebel_kg,
         triadic=args.triadic,
+        llm_extraction_base_url=args.llm_extraction_url,
+        llm_extraction_model=args.llm_extraction_model,
     )
 
 
@@ -430,12 +513,18 @@ def main():
         config_parts.append("tri")
     if args.entity_rerank:
         config_parts.append("entrank")
+    if args.fisher_scoring:
+        config_parts.append("fisher")
     if args.hyperedge:
         config_parts.append("hedge")
     if args.knowledge_graph:
         config_parts.append("kg")
     if args.gliner2:
         config_parts.append("gliner2")
+    if args.cooc_extraction:
+        config_parts.append("coocex")
+    if args.relik:
+        config_parts.append("relik")
     if args.chunk_size > 0:
         config_parts.append(f"cs{args.chunk_size}")
     config_tag = "_".join(config_parts) if config_parts else "baseline"
@@ -468,14 +557,17 @@ def main():
     # Ingestion cache setup
     use_cache = not args.no_cache
     cache_path = None
+    effective_cs = dataset_config.get("chunk_size", 0)
     if use_cache:
-        effective_cs = dataset_config.get("chunk_size", 0)
         cache_path = cache_dir(dataset_config["sub_dataset"], effective_cs, args.cache_label)
         print(f"Ingestion cache: {cache_path}")
         if args.refresh_cache:
             print("  (refresh mode: will re-ingest and overwrite)")
     else:
-        print("Ingestion cache: disabled")
+        # --no_cache: skip loading but always save with timestamped label
+        no_cache_label = f"{dataset_config['sub_dataset']}_cs{effective_cs}_{timestamp}_{config_tag}"
+        cache_path = cache_dir(dataset_config["sub_dataset"], effective_cs, label=no_cache_label)
+        print(f"Ingestion cache: save-only → {cache_path}")
     print()
 
     # Build agent
@@ -496,7 +588,7 @@ def main():
     ):
         agent.reset()
 
-        # Try loading from ingestion cache
+        # Try loading from ingestion cache (skip when --no_cache)
         cached = False
         if use_cache and not args.refresh_cache:
             cached = _load_context(agent, cache_path, context_idx)
@@ -505,9 +597,12 @@ def main():
             print(f"\n--- Context {context_idx}: memorizing {len(chunks)} chunks ---")
             for chunk in tqdm(chunks, desc="Memorizing", leave=False):
                 agent.send_message(chunk, memorizing=True)
+            # Finalize CoocKG NPMI weights after all facts are ingested
+            agent.store.finalize_cooc_kg()
             agent._scorer.save_disk_cache()
 
-            if use_cache:
+            # Always save cache (--no_cache saves with timestamped label)
+            if cache_path is not None:
                 _save_context(agent, cache_path, context_idx)
 
         # Query

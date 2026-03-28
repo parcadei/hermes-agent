@@ -241,6 +241,20 @@ class Retriever:
             return self._cfg.dream_weight
         return getattr(self, "dream_weight", 0.0)
 
+    @property
+    def _resolve_fisher_scoring(self) -> bool:
+        """Whether Fisher-Rao scoring replaces cosine base similarity."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.fisher_scoring
+        return getattr(self, "fisher_scoring", False)
+
+    @property
+    def _resolve_fisher_temperature(self) -> float:
+        """Fisher-Rao temperature parameter (lower = more discriminative)."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.fisher_temperature
+        return getattr(self, "fisher_temperature", 1.0)
+
     # ------------------------------------------------------------------
     # Core retrieval methods
     # ------------------------------------------------------------------
@@ -337,6 +351,8 @@ class Retriever:
                 cooc_weight=self._resolve_cooc_weight,
                 dream_weight=self._resolve_dream_weight,
                 gate_threshold=self._resolve_cooc_gate_threshold,
+                fisher_scoring=self._resolve_fisher_scoring,
+                fisher_temperature=self._resolve_fisher_temperature,
             )
         elif self._resolve_ppr:
             results = engine.query_ppr(

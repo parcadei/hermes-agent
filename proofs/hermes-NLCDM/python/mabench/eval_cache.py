@@ -90,6 +90,7 @@ def save_context(
         "supersession_graph": agent._supersession_graph,
         "supersedes": {k: set(v) for k, v in agent._supersedes.items()},
         "gliner_entity_index": {k: set(v) for k, v in agent._gliner_entity_index.items()},
+        "subject_index": dict(getattr(agent, "_subject_index", {})),
     }
 
     if getattr(agent, "_triadic", None) is not None:
@@ -164,6 +165,9 @@ def load_context(
     # GLiNER entity index
     raw_idx = state.get("gliner_entity_index", {})
     agent._gliner_entity_index = defaultdict(set, {k: set(v) for k, v in raw_idx.items()})
+
+    # Subject index (subject-based KG hop resolution)
+    agent._subject_index = state.get("subject_index", {})
 
     # Optional components
     if "triadic" in state and getattr(agent, "_triadic", None) is not None:

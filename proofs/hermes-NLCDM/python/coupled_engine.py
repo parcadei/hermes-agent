@@ -88,6 +88,84 @@ class MemoryEntry:
     fact_type: str = "general"  # freeform, e.g. "finding", "reasoning_chain", "decision"
     entity: str | None = None  # Primary subject entity (GLiNER-extracted). Used as cannot-link constraint in dream merge.
     entity_residual: np.ndarray | None = None  # Entity-position hidden state (layer 14, 1024-dim). For entity-aware reranking.
+    sigma_sq: np.ndarray | None = None  # Per-dimension Fisher variance (Eq. 14, arXiv 2603.14588v1). Computed at store time.
+
+
+# ---------------------------------------------------------------------------
+# Fisher-Rao retrieval primitives (arXiv 2603.14588v1, Eq. 14-16)
+# ---------------------------------------------------------------------------
+
+def _compute_sigma_sq(
+    embedding: np.ndarray,
+    sigma_max: float = 1.0,
+    sigma_min: float = 0.01,
+    eps: float = 1e-8,
+) -> np.ndarray:
+    """Per-dimension variance from L2-normalized embedding magnitude (Eq. 14).
+
+    Large absolute activations -> low variance (high confidence, more weight in scoring).
+    Small absolute activations -> high variance (low confidence, less weight).
+
+    Args:
+        embedding: A single embedding vector (d,). Will be L2-normalized internally.
+        sigma_max: Variance ceiling for zero-activation dimensions.
+        sigma_min: Variance floor for max-activation dimensions.
+        eps: Numerical stability constant added to all values.
+
+    Returns:
+        sigma_sq: Per-dimension variance vector of shape (d,).
+    """
+    emb = np.asarray(embedding, dtype=np.float64).ravel()
+    norm = np.linalg.norm(emb)
+    if norm < 1e-12:
+        # Zero vector: maximum uncertainty everywhere
+        return np.full(emb.shape, sigma_max + eps)
+    e_hat = emb / norm
+    abs_e = np.abs(e_hat)
+    max_abs = abs_e.max()
+    if max_abs < 1e-12:
+        return np.full(emb.shape, sigma_max + eps)
+    # Eq. 14: sigma_sq_k = sigma_max - (sigma_max - sigma_min) * |e_hat_k| / max_j(|e_hat_j|) + eps
+    sigma_sq = sigma_max - (sigma_max - sigma_min) * (abs_e / max_abs) + eps
+    return sigma_sq
+
+
+def _fisher_score(
+    query: np.ndarray,
+    embeddings: np.ndarray,
+    sigma_sq_matrix: np.ndarray,
+    temperature: float = 1.0,
+) -> np.ndarray:
+    """Fisher-Rao retrieval score (Eq. 16): Mahalanobis-like with inverse-variance weighting.
+
+    s_FR(q, m_i) = exp(-1/T * sum_k (mu_q,k - mu_i,k)^2 / sigma_sq_i,k)
+
+    Dimensions with low variance (high confidence) contribute MORE to the distance.
+
+    Args:
+        query: Query embedding of shape (d,). Must be L2-normalized.
+        embeddings: Memory embeddings of shape (N, d). Must be L2-normalized.
+        sigma_sq_matrix: Per-memory variance vectors of shape (N, d).
+        temperature: Temperature parameter T > 0. Lower T = more discriminative.
+
+    Returns:
+        scores: Fisher-Rao scores of shape (N,), in [0, 1].
+
+    Raises:
+        ValueError: If temperature <= 0.
+    """
+    if temperature <= 0:
+        raise ValueError(f"Temperature must be positive, got {temperature}")
+    q = np.asarray(query, dtype=np.float64).ravel()
+    E = np.asarray(embeddings, dtype=np.float64)
+    S = np.asarray(sigma_sq_matrix, dtype=np.float64)
+
+    # (N, d) difference squared
+    diff_sq = (q[np.newaxis, :] - E) ** 2  # (N, d)
+    # Weighted sum: sum_k (diff_k^2 / sigma_sq_k)
+    weighted_dist = np.sum(diff_sq / S, axis=1)  # (N,)
+    scores = np.exp(-weighted_dist / temperature)
+    return scores
 
 
 # Layer-aware importance seed map.
@@ -424,6 +502,7 @@ class CoupledEngine:
                 old.last_access_time = now
                 old.access_count += 1
                 old.tagged = old.importance >= 0.7
+                old.sigma_sq = _compute_sigma_sq(emb_normed)
                 self._invalidate_cache()
                 # Update _norm_embs_f32 in-place (O(1)), defer FAISS rebuild
                 self._norm_embs_f32[best_idx] = emb_normed.astype(np.float32)
@@ -446,6 +525,7 @@ class CoupledEngine:
             layer=layer,
             fact_type=fact_type,
             entity=entity,
+            sigma_sq=_compute_sigma_sq(emb_normed),
         )
         self.memory_store.append(entry)
         self._invalidate_cache()
@@ -485,6 +565,8 @@ class CoupledEngine:
         emb_normed = emb / (emb_norm + 1e-12) if emb_norm > 1e-12 else emb
         self._norm_embs_f32[idx] = emb_normed.astype(np.float32)
         self._faiss_dirty = True
+        # Recompute Fisher variance for new embedding
+        entry.sigma_sq = _compute_sigma_sq(emb_normed)
 
     def rebuild_faiss_if_dirty(self) -> None:
         """Rebuild FAISS index from _norm_embs_f32 if any contradiction
@@ -1641,6 +1723,8 @@ class CoupledEngine:
         cooc_weight: float = 0.3,
         gate_threshold: float = 0.0,
         dream_weight: float = 0.0,
+        fisher_scoring: bool = False,
+        fisher_temperature: float = 1.0,
     ) -> list[dict]:
         """Full-store co-occurrence boost: every memory gets credit from neighbors.
 
@@ -1648,19 +1732,18 @@ class CoupledEngine:
         this method scores co-occurrence signal across the ENTIRE store.
 
         For each memory i:
-          final_score[i] = cosine_score[i]
-                         + cooc_weight * mean(cosine_score[j] for j in cooc[i])
+          final_score[i] = base_score[i]
+                         + cooc_weight * mean(base_score[j] for j in cooc[i])
 
-        This means fact_B at cosine rank 81 still gets a boost if its
-        co-occurrence partner fact_A scored 0.60, even though neither
-        is in the cosine top-10.
+        When fisher_scoring=False (default), base_score = cosine similarity.
+        When fisher_scoring=True, base_score = Fisher-Rao score (Eq. 16,
+        arXiv 2603.14588v1) which uses per-dimension inverse-variance
+        weighting to amplify confident dimensions.
 
-        Confidence gating: if gate_threshold > 0 and the top cosine score
-        exceeds the threshold, skip the co-occurrence boost entirely and
-        return pure cosine results. This prevents hubness noise from
-        overriding confident retrievals at scale.
+        Confidence gating always uses cosine scores (Fisher scores have a
+        different scale and are not suitable for the gating threshold).
 
-        Complexity: O(N + sum of co-occurrence degrees) — cheap for sparse graphs.
+        Complexity: O(N*d) for both cosine and Fisher — same order.
         """
         if beta is None:
             beta = self.beta
@@ -1677,28 +1760,44 @@ class CoupledEngine:
 
         embeddings = self._embeddings_matrix()
 
-        # Cosine scores for ALL memories
+        # Cosine scores for ALL memories (always needed for confidence gating)
         emb_norm = np.linalg.norm(emb)
         if emb_norm < 1e-12:
             return []
         norms = np.linalg.norm(embeddings, axis=1) * emb_norm + 1e-12
         cos_scores = embeddings @ emb / norms
 
-        # Confidence gating: if top cosine score is high enough, skip boost
-        if gate_threshold > 0.0 and cos_scores.max() >= gate_threshold:
-            final_scores = cos_scores.copy()
+        # Fisher-Rao scoring: replace base similarity with inverse-variance weighted distance
+        if fisher_scoring:
+            # L2-normalize query for Fisher distance computation
+            q_normed = emb / emb_norm
+            # Build (N, d) normalized embedding matrix
+            normed_embs = embeddings / (np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-12)
+            # Build sigma_sq matrix from cached per-memory values
+            sigma_sq_matrix = np.stack([
+                m.sigma_sq if m.sigma_sq is not None else _compute_sigma_sq(m.embedding)
+                for m in self.memory_store
+            ])
+            base_scores = _fisher_score(q_normed, normed_embs, sigma_sq_matrix, fisher_temperature)
         else:
-            # Co-occurrence boost: each memory gets weighted mean cosine of neighbors.
+            base_scores = cos_scores
+
+        # Confidence gating: if top cosine score is high enough, skip boost
+        # (gating always uses cosine, since Fisher scores are on a different scale)
+        if gate_threshold > 0.0 and cos_scores.max() >= gate_threshold:
+            final_scores = base_scores.copy()
+        else:
+            # Co-occurrence boost: each memory gets weighted mean of base_score of neighbors.
             # Edge weights encode session size — bridge pairs (session of 2) get
             # weight 0.5 per partner, while background facts in sessions of 20 get
             # weight 0.05 each. This naturally prioritizes co-occurrence from small,
             # focused sessions.
-            final_scores = cos_scores.copy()
+            final_scores = base_scores.copy()
             for idx in range(N):
                 neighbors = self._co_occurrence.get(idx, {})
                 if neighbors:
                     weighted_sum = sum(
-                        w * cos_scores[j] for j, w in neighbors.items() if j < N
+                        w * base_scores[j] for j, w in neighbors.items() if j < N
                     )
                     total_weight = sum(
                         w for j, w in neighbors.items() if j < N

@@ -39,7 +39,7 @@ from dream_ops import DreamParams
 from mabench.configs import (
     RetrievalConfig, CRConfig, DecomposeConfig, StoreConfig,
     LLMConfig, BeliefConfig, EntityConfig, DedupConfig, KGConfig,
-    GLiNER2Config, SupersessionState, EntityIndex,
+    GLiNER2Config, CoocExtractionConfig, RelikConfig, SupersessionState, EntityIndex,
 )
 from mabench.ingestion import IngestionPipeline, IngestionConfig, _MutableEntityGraph
 from mabench.scoring import EmbeddingRelevanceScorer
@@ -60,6 +60,8 @@ from mabench.entity_reranker import EntityReranker
 from mabench.hyperedge_intersection import HyperedgeIntersection
 from mabench.knowledge_graph import KnowledgeGraph
 from mabench.gliner2_extractor import GLiNER2Extractor
+from mabench.cooccurrence_extractor import CooccurrenceExtractor
+from mabench.relik_extractor import RelikExtractor
 
 
 # Default V1 orchestrator params (validated in test_engine.py)
@@ -102,6 +104,8 @@ class HermesAgent:
         dedup: DedupConfig | None = None,
         kg: KGConfig | None = None,
         gliner2: GLiNER2Config | None = None,
+        cooc_extraction: CoocExtractionConfig | None = None,
+        relik: RelikConfig | None = None,
         # Infrastructure flags
         bm25_hops: bool = False,
         chain_cache: bool = False,
@@ -112,6 +116,9 @@ class HermesAgent:
         # Query mode
         iterative: bool = False,
         iterative_max_hops: int = 3,
+        # LLM triple extraction (vLLM server URL, None = disabled)
+        llm_extraction_base_url: str | None = None,
+        llm_extraction_model: str = "qwen3-triple-extractor",
     ) -> None:
         # Store configs (frozen — safe to share across modules)
         self._retrieval_cfg = retrieval or RetrievalConfig()
@@ -124,6 +131,8 @@ class HermesAgent:
         self._dedup_cfg = dedup or DedupConfig()
         self._kg_cfg = kg or KGConfig()
         self._gliner2_cfg = gliner2 or GLiNER2Config()
+        self._cooc_extraction_cfg = cooc_extraction or CoocExtractionConfig()
+        self._relik_cfg = relik or RelikConfig()
 
         # Engine params (saved for reset)
         self._dim = dim
@@ -141,6 +150,8 @@ class HermesAgent:
         self._triadic_p = triadic_p
         self._iterative_flag = iterative
         self._iterative_max_hops = iterative_max_hops
+        self._llm_extraction_base_url = llm_extraction_base_url
+        self._llm_extraction_model = llm_extraction_model
 
         # -- Persistent resources (survive reset) --------------------------
         self._scorer = EmbeddingRelevanceScorer()
@@ -150,8 +161,12 @@ class HermesAgent:
         except ImportError:
             _dev = "cpu"
         self._ingestion = IngestionPipeline(
-            IngestionConfig(coref_device=_dev, coref_enabled=True,
-                            boundary_threshold=0.2, strip_numbered_prefix=False)
+            IngestionConfig(
+                coref_device=_dev, coref_enabled=True,
+                boundary_threshold=0.2, strip_numbered_prefix=False,
+                llm_extraction_base_url=llm_extraction_base_url,
+                llm_extraction_model=llm_extraction_model,
+            )
         )
 
         # -- Build all transient resources and modules ---------------------
@@ -239,6 +254,23 @@ class HermesAgent:
             batch_size=self._gliner2_cfg.batch_size,
         ) if self._gliner2_cfg.enabled else None)
 
+        # Co-occurrence extraction (fast path: bi-encoder NER → co-occurrence edges)
+        cooc_extractor = (CooccurrenceExtractor(
+            model_name=self._cooc_extraction_cfg.model_name,
+            threshold=self._cooc_extraction_cfg.threshold,
+            batch_size=self._cooc_extraction_cfg.batch_size,
+        ) if self._cooc_extraction_cfg.enabled else None)
+
+        # CoocKG: sentence-window co-occurrence graph for structural hop resolution
+        from mabench.cooccurrence_extractor import CoocKG
+        cooc_kg = CoocKG() if cooc_extractor is not None else None
+
+        # ReLiK v2 relation extraction (canonical Wikidata triples for supersession)
+        relik_extractor = (RelikExtractor(
+            model_name=self._relik_cfg.model_name,
+            min_confidence=self._relik_cfg.min_confidence,
+        ) if self._relik_cfg.enabled else None)
+
         # -- 5. Tier 1: entity ops + retriever ----------------------------
         entity_ops = EntityOps(
             self.engine, self._scorer,
@@ -278,6 +310,9 @@ class HermesAgent:
             entity_reranker=ent_reranker,
             knowledge_graph=knowledge_graph,
             gliner2_extractor=gliner2_extractor,
+            cooc_extractor=cooc_extractor,
+            relik_extractor=relik_extractor,
+            cooc_kg=cooc_kg,
         )
 
         # -- 8. Tier 4: query engine + pipeline (circular dep) ------------
@@ -292,6 +327,7 @@ class HermesAgent:
             cr_config=self._cr_cfg, decompose_config=self._decompose_cfg,
             entity_config=self._entity_cfg, dedup_config=self._dedup_cfg,
             hyperedge=hyperedge, knowledge_graph=knowledge_graph,
+            cooc_kg=cooc_kg, supersession_state=ss,
         )
         # Create QueryPipeline with hop callback from QueryEngine
         self.pipeline = QueryPipeline(
@@ -305,6 +341,7 @@ class HermesAgent:
             decompose_config=self._decompose_cfg, dedup_config=self._dedup_cfg,
             llm_config=self._llm_cfg,
             hop_executor_fn=self.query_engine._query_run_hop,
+            graph_walk_fn=self.query_engine._graph_walk_resolve,
             hyperedge=hyperedge, knowledge_graph=knowledge_graph,
         )
         # Wire QueryEngine -> QueryPipeline callbacks (breaks circular dep)
@@ -336,6 +373,9 @@ class HermesAgent:
         self.hyperedge = hyperedge
         self.knowledge_graph = knowledge_graph
         self.gliner2_extractor = gliner2_extractor
+        self.cooc_extractor = cooc_extractor
+        self.relik_extractor = relik_extractor
+        self.cooc_kg = cooc_kg
 
     # -----------------------------------------------------------------
     # Public API (MABench-compatible)

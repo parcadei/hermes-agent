@@ -48,6 +48,9 @@ class RetrievalConfig:
     hyperedge_intersection: bool = False
     hyperedge_penalty: float = 0.1     # penalty for non-matching facts (0=hard filter, 1=no effect)
     hyperedge_min_candidates: int = 3  # minimum entity matches to activate penalty
+    # fisher: Fisher-Rao weighted retrieval (arXiv 2603.14588v1, Eq. 14-16)
+    fisher_scoring: bool = False       # replace cosine base score with Fisher-Rao distance
+    fisher_temperature: float = 1.0    # temperature T > 0 (lower = more discriminative)
 
 
 @dataclass(frozen=True)
@@ -148,6 +151,61 @@ class GLiNER2Config:
     batch_size: int = 8
 
 
+@dataclass(frozen=True)
+class CoocExtractionConfig:
+    """Fast-path co-occurrence extraction via GLiNER bi-encoder NER.
+
+    Replaces GLiNER2 uni-encoder (97s/chunk) for KG + Triadic consumers.
+    Bi-encoder pre-computes label embeddings once, so type count doesn't
+    affect per-text latency.
+    """
+
+    enabled: bool = False
+    model_name: str = "knowledgator/gliner-bi-edge-v2.0"
+    threshold: float = 0.3
+    batch_size: int = 128
+
+
+@dataclass(frozen=True)
+class RelikConfig:
+    """ReLiK v2 relation extraction for supersession triples.
+
+    Uses retriever-reader architecture over 10,936 Wikidata relation types.
+    Produces canonical predicate names (e.g. "capital", "member of") enabling
+    exact (S,P) string matching for supersession detection.
+    Batch mode: ~0.73s/text on GPU.
+    """
+
+    enabled: bool = False
+    model_name: str = "relik-ie/relik-relation-extraction-large"
+    min_confidence: float = 0.5
+
+
+@dataclass(frozen=True)
+class LLMExtractionConfig:
+    """LLM-based triple extraction via vLLM + structured output.
+
+    Uses Qwen3-30B-A3B MoE (3B active) served by vLLM to extract
+    (S, P, O) triples from arbitrary text. Feeds into _triple_index
+    for predicated KG hop resolution.
+
+    vLLM's response_format with json_schema enforces valid JSON at
+    the token-sampling level. Thinking mode disabled for throughput.
+    Grounding check ensures subject and object exist in source text.
+    """
+
+    enabled: bool = False
+    # vLLM server endpoint (must be running separately)
+    base_url: str = "http://localhost:8000/v1"
+    # served-model-name from vLLM serve command
+    model: str = "qwen3-triple-extractor"
+    api_key: str = "dummy"
+    temperature: float = 0.0
+    max_tokens: int = 512
+    # Grounding: discard triples where S or O not in source text
+    enable_grounding: bool = True
+
+
 # ---------------------------------------------------------------------------
 # Shared mutable state containers
 # ---------------------------------------------------------------------------
@@ -184,6 +242,13 @@ class SupersessionState:
     # supersession_log: bitemporal audit trail
     # e.g. [{"old_text": "...", "new_text": "...", "timestamp": 1234567890}]
     supersession_log: list[dict] = field(default_factory=list)
+    # subject_index: norm_subj -> {norm_pred: (norm_obj, fact_text)}
+    # Newest-wins: each (subj, pred) has ONE entry (the most recent).
+    # Used by subject-based KG hop resolution (matches subject only,
+    # returns all predicates so the decompose LLM can pick the right one).
+    subject_index: dict[str, dict[str, tuple[str, str]]] = field(
+        default_factory=dict
+    )
 
     def reset(self) -> None:
         """Clear all supersession state for a new context."""
@@ -194,6 +259,7 @@ class SupersessionState:
         self.supersedes = defaultdict(set)
         self.text_to_store_idx = {}
         self.supersession_log = []
+        self.subject_index = {}
 
 
 @dataclass
