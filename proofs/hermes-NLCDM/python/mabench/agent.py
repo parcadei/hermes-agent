@@ -342,6 +342,7 @@ class HermesAgent:
             llm_config=self._llm_cfg,
             hop_executor_fn=self.query_engine._query_run_hop,
             graph_walk_fn=self.query_engine._graph_walk_resolve,
+            kg_hop_fn=self.query_engine._resolve_triple_index_kg_hop,
             hyperedge=hyperedge, knowledge_graph=knowledge_graph,
         )
         # Wire QueryEngine -> QueryPipeline callbacks (breaks circular dep)

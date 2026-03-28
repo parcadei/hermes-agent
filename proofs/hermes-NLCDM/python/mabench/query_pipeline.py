@@ -61,6 +61,7 @@ class QueryPipeline:
         # Callbacks
         hop_executor_fn=None,      # callable for _query_run_hop (from QueryEngine)
         graph_walk_fn=None,        # callable for _graph_walk_resolve (from QueryEngine)
+        kg_hop_fn=None,            # callable for _resolve_triple_index_kg_hop (from QueryEngine)
     ) -> None:
         self._engine = engine
         self._scorer = scorer
@@ -82,6 +83,7 @@ class QueryPipeline:
         self._knowledge_graph = knowledge_graph
         self._hop_executor_fn = hop_executor_fn
         self._graph_walk_fn = graph_walk_fn
+        self._kg_hop_fn = kg_hop_fn
         # Lazy LLM client
         self._client = None
         # Query state (set per-query by QueryEngine)
@@ -267,6 +269,18 @@ class QueryPipeline:
                 bare_question,
             )
         else:
+            # Single-hop: try KG hop directly on the bare question
+            kg_hop = self._kg_hop_fn or getattr(self, "_resolve_triple_index_kg_hop", None)
+            kg_answer = kg_hop(bare_question) if kg_hop else None
+            if kg_answer is not None:
+                hop_state["final_kg_answer"] = kg_answer
+                hop_state["evidence_chain"] = [
+                    {"q": bare_question, "a": kg_answer,
+                     "evidence": [f"[KG-HOP: {kg_answer}]"]},
+                ]
+                hop_state["_all_v2_results"] = []
+                return [], [], hop_state
+
             v2_results = self._resolve_retrieve_v2(bare_question)
             v2_texts = [r["text"] for r in v2_results]
             sq_chunks_raw = []

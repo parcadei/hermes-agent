@@ -74,7 +74,25 @@ EXTRACTION_PROMPT = (
     '(e.g. "Helsinki" not "the city of Helsinki")\n'
     "- Predicate must be a short relation label "
     '(e.g. "capital" not "is the capital of")\n'
-    "- Only extract facts explicitly stated in the text\n\n"
+    "- Only extract facts explicitly stated in the text\n"
+    "- Subject is always the entity BEING DESCRIBED, "
+    "object is the attribute value\n\n"
+    "Examples:\n\n"
+    'Text: "The official language of United Kingdom is Finnish."\n'
+    'Output: [("United Kingdom", "official language", "Finnish")]\n\n'
+    'Text: "The spouse of Charles Darwin is Emma Darwin."\n'
+    'Output: [("Charles Darwin", "spouse", "Emma Darwin")]\n\n'
+    'Text: "Rock music is a genre that originated in Spain."\n'
+    'Output: [("rock music", "country of origin", "Spain")]\n\n'
+    'Text: "Association football is a sport played by Peter Schmeichel."\n'
+    'Output: [("Peter Schmeichel", "sport", "association football")]\n\n'
+    'Text: "The head of government of France is Emmanuel Macron."\n'
+    'Output: [("France", "head of government", "Emmanuel Macron")]\n\n'
+    'Text: "Chevrolet Caprice is manufactured by General Motors, '
+    'which was founded in Silver Lake."\n'
+    'Output: [("Chevrolet Caprice", "manufacturer", "General Motors"), '
+    '("General Motors", "founded in", "Silver Lake")]\n\n'
+    'Now extract triples from:\n\n'
     'Text: "{text}"'
 )
 
@@ -181,6 +199,7 @@ class LLMTripleExtractor:
                 messages=[{"role": "user", "content": prompt}],
                 temperature=self._temperature,
                 max_tokens=self._max_tokens,
+                seed=42,
                 extra_body={
                     "chat_template_kwargs": {"enable_thinking": False},
                 },
