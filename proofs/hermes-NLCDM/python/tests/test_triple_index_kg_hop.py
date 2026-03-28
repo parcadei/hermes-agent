@@ -529,8 +529,11 @@ class TestSubjectIndexPopulatedDuringIngestion:
         store._resolve_subject_index = ss.subject_index
         store._knowledge_graph = None
 
-        # Call the real method
+        # Wire _normalize_pred to the real classmethod so it returns strings
         from mabench.store import FactStore
+        store._normalize_pred = FactStore._normalize_pred
+
+        # Call the real method
         FactStore._store_update_triple_index(store, FakeFact(), None)
 
         # triple_index should be populated
@@ -564,6 +567,7 @@ class TestSubjectIndexPopulatedDuringIngestion:
         store._knowledge_graph = None
 
         from mabench.store import FactStore
+        store._normalize_pred = FactStore._normalize_pred
 
         # Store first version
         fact1 = FakeFact(

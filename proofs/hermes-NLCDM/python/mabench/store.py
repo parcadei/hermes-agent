@@ -488,6 +488,32 @@ class FactStore:
                     recency=float(self._store_count),
                 )
 
+    # Predicate synonym map: merge LLM-extracted predicate variants
+    # that refer to the same semantic relation.  When the LLM extracts
+    # "married to" from one fact and "spouse" from another, they must
+    # share a single subject_index key so supersession works correctly.
+    _PREDICATE_SYNONYMS: dict[str, str] = {
+        "married to": "spouse",
+        "plays position": "plays",
+        "affiliated with": "religion",
+        "headquarters location": "headquarters",
+        "headquarters city": "headquarters",
+        "director of": "director",
+        "performed by": "performer",
+        "produced": "produced by",
+        "producer": "produced by",
+        "born in": "birthplace",
+        "died in": "death place",
+        "created in": "country of origin",
+        "works in": "occupation",
+        "field of work": "occupation",
+    }
+
+    @classmethod
+    def _normalize_pred(cls, pred: str) -> str:
+        """Normalize a predicate to its canonical form."""
+        return cls._PREDICATE_SYNONYMS.get(pred, pred)
+
     def _store_update_triple_index(
         self,
         fact: SegmentedFact,
@@ -497,13 +523,22 @@ class FactStore:
 
         Removes superseded entries and appends the new fact's triples.
         Also updates the knowledge graph when supersession occurs.
+
+        Two key mechanisms for robust KG coverage:
+        1. Predicate normalization — merges synonym predicates (e.g.
+           "married to" and "spouse") so supersession works correctly.
+        2. Bidirectional subject_index — indexes both (S,P)->O and
+           (O,P)->S so triples are findable regardless of whether the
+           LLM put the entity as subject or object.
         """
         if not fact.triples:
             return
         if fact.text not in self._resolve_fact_entities:
             self._resolve_fact_entities[fact.text] = fact.entities
         for subj, pred, obj in fact.triples:
-            key = (subj.lower().strip(), pred.lower().strip())
+            raw_pred = pred.lower().strip()
+            norm_pred = self._normalize_pred(raw_pred)
+            key = (subj.lower().strip(), norm_pred)
             new_obj = obj.lower().strip()
             if not key[0] or not key[1]:
                 continue
@@ -531,11 +566,20 @@ class FactStore:
             # Update subject_index (subject -> {predicate: (newest_obj, text)})
             # Newest-wins: overwrite previous entry for same (subj, pred).
             subj_key = key[0]  # already lowered/stripped
-            pred_key = key[1]
+            pred_key = norm_pred
             si = self._resolve_subject_index
             if subj_key not in si:
                 si[subj_key] = {}
             si[subj_key][pred_key] = (new_obj, fact.text)
+
+            # Bidirectional index: also store reverse (object -> pred -> subject).
+            # LLMs non-deterministically invert subject/object direction for
+            # sentences like "The X of Y is Z" — sometimes Z becomes subject.
+            # Storing the reverse ensures the triple is findable either way.
+            if new_obj and len(new_obj) >= 3:
+                if new_obj not in si:
+                    si[new_obj] = {}
+                si[new_obj][pred_key] = (subj_key, fact.text)
 
     def _store_detect_belief_conflicts(self, fact: SegmentedFact) -> None:
         """Detect conflicts for belief index when supersession is off.
