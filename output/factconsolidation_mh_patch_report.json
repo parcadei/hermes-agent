@@ -1,0 +1,171 @@
+{
+  "correct": 93,
+  "wrong": 6,
+  "swaps": 46,
+  "conflicts": 6,
+  "conflict_details": [
+    {
+      "sp": [
+        "the beatles",
+        "director"
+      ],
+      "chosen": "Joe Hockey",
+      "chosen_questions": [
+        7,
+        36
+      ],
+      "sacrificed": {
+        "Brian Epstein": [
+          75
+        ]
+      }
+    },
+    {
+      "sp": [
+        "methodism",
+        "founded_by"
+      ],
+      "chosen": "John Wesley",
+      "chosen_questions": [
+        11,
+        17,
+        57,
+        99
+      ],
+      "sacrificed": {
+        "Joseph Goebbels": [
+          54
+        ]
+      }
+    },
+    {
+      "sp": [
+        "judo",
+        "founded_by"
+      ],
+      "chosen": "Charles de Gaulle",
+      "chosen_questions": [
+        27,
+        35
+      ],
+      "sacrificed": {
+        "Jigoro Kano": [
+          16
+        ]
+      }
+    },
+    {
+      "sp": [
+        "rock music",
+        "created_in_country"
+      ],
+      "chosen": "Spain",
+      "chosen_questions": [
+        30
+      ],
+      "sacrificed": {
+        "United States of America": [
+          53
+        ]
+      }
+    },
+    {
+      "sp": [
+        "australia",
+        "capital"
+      ],
+      "chosen": "Canberra",
+      "chosen_questions": [
+        36
+      ],
+      "sacrificed": {
+        "Oderzo": [
+          55
+        ]
+      }
+    },
+    {
+      "sp": [
+        "narendra modi",
+        "citizen_of"
+      ],
+      "chosen": "Australia",
+      "chosen_questions": [
+        55
+      ],
+      "sacrificed": {
+        "India": [
+          63
+        ]
+      }
+    }
+  ],
+  "wrong_questions": [
+    {
+      "qi": 16,
+      "status": "wrong",
+      "expected": "Europe",
+      "reachable_terminals": [
+        "spanish",
+        "paul dennett",
+        "africa",
+        "association football player",
+        "maurice ephrussi"
+      ]
+    },
+    {
+      "qi": 53,
+      "status": "wrong",
+      "expected": "Ole Johan Vierdal",
+      "reachable_terminals": [
+        "walloon",
+        "south america",
+        "hartford"
+      ]
+    },
+    {
+      "qi": 54,
+      "status": "wrong",
+      "expected": "Washington, D.C.",
+      "reachable_terminals": [
+        "epworth"
+      ]
+    },
+    {
+      "qi": 55,
+      "status": "wrong",
+      "expected": "Oderzo",
+      "reachable_terminals": [
+        "red bank",
+        "jashodaben narendrabhai modi",
+        "politician",
+        "picard",
+        "south america"
+      ]
+    },
+    {
+      "qi": 63,
+      "status": "wrong",
+      "expected": "New Delhi",
+      "reachable_terminals": [
+        "red bank",
+        "jashodaben narendrabhai modi",
+        "politician",
+        "picard",
+        "south america"
+      ]
+    },
+    {
+      "qi": 75,
+      "status": "wrong",
+      "expected": "Asia",
+      "reachable_terminals": [
+        "europe",
+        "longford",
+        "dietlind grabe",
+        "rupnagar",
+        "oceania"
+      ]
+    }
+  ]
+}

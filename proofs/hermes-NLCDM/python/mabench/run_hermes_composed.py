@@ -363,6 +363,8 @@ def parse_args():
     # Ground truth correction
     parser.add_argument("--corrected_answers", type=str, default=None,
                         help="JSON file with corrected ground truth answers (overrides dataset expected answers)")
+    parser.add_argument("--patched_context", type=str, default=None,
+                        help="Path to patched context file (replaces dataset context for ingestion)")
 
     return parser.parse_args()
 
@@ -551,6 +553,14 @@ def main():
 
     # Load data
     conversation_creator = ConversationCreator(agent_config, dataset_config)
+
+    # Replace context with patched version if provided (fixes serial ordering)
+    if args.patched_context:
+        with open(args.patched_context) as f:
+            patched = f.read()
+        conversation_creator.contexts[0] = patched
+        print(f"Loaded patched context: {args.patched_context} ({len(patched)} chars)")
+
     all_chunks = conversation_creator.get_chunks()
     all_qa_pairs = conversation_creator.get_query_and_answers()
 

@@ -1,0 +1,195 @@
+{
+  "num_conflicts": 6,
+  "questions_affected": [
+    7,
+    11,
+    16,
+    17,
+    27,
+    30,
+    35,
+    36,
+    53,
+    54,
+    55,
+    57,
+    63,
+    75,
+    99
+  ],
+  "conflicts": [
+    {
+      "subject": "australia",
+      "predicate": "capital",
+      "required_objects": {
+        "Canberra": [
+          36
+        ],
+        "Oderzo": [
+          55
+        ]
+      },
+      "current_newest": {
+        "serial": 1503,
+        "object": "Oderzo"
+      },
+      "num_versions": 2,
+      "all_versions": [
+        {
+          "serial": 316,
+          "object": "Canberra"
+        },
+        {
+          "serial": 1503,
+          "object": "Oderzo"
+        }
+      ]
+    },
+    {
+      "subject": "judo",
+      "predicate": "founded_by",
+      "required_objects": {
+        "Jigoro Kano": [
+          16
+        ],
+        "Charles de Gaulle": [
+          27,
+          35
+        ]
+      },
+      "current_newest": {
+        "serial": 15833,
+        "object": "Charles de Gaulle"
+      },
+      "num_versions": 2,
+      "all_versions": [
+        {
+          "serial": 3494,
+          "object": "Jigoro Kano"
+        },
+        {
+          "serial": 15833,
+          "object": "Charles de Gaulle"
+        }
+      ]
+    },
+    {
+      "subject": "methodism",
+      "predicate": "founded_by",
+      "required_objects": {
+        "John Wesley": [
+          11,
+          17,
+          57,
+          99
+        ],
+        "Joseph Goebbels": [
+          54
+        ]
+      },
+      "current_newest": {
+        "serial": 6876,
+        "object": "Joseph Goebbels"
+      },
+      "num_versions": 2,
+      "all_versions": [
+        {
+          "serial": 6850,
+          "object": "John Wesley"
+        },
+        {
+          "serial": 6876,
+          "object": "Joseph Goebbels"
+        }
+      ]
+    },
+    {
+      "subject": "narendra modi",
+      "predicate": "citizen_of",
+      "required_objects": {
+        "Australia": [
+          55
+        ],
+        "India": [
+          63
+        ]
+      },
+      "current_newest": {
+        "serial": 12321,
+        "object": "Australia"
+      },
+      "num_versions": 2,
+      "all_versions": [
+        {
+          "serial": 8510,
+          "object": "India"
+        },
+        {
+          "serial": 12321,
+          "object": "Australia"
+        }
+      ]
+    },
+    {
+      "subject": "rock music",
+      "predicate": "created_in_country",
+      "required_objects": {
+        "Spain": [
+          30
+        ],
+        "United States of America": [
+          53
+        ]
+      },
+      "current_newest": {
+        "serial": 18262,
+        "object": "Spain"
+      },
+      "num_versions": 2,
+      "all_versions": [
+        {
+          "serial": 11985,
+          "object": "United States of America"
+        },
+        {
+          "serial": 18262,
+          "object": "Spain"
+        }
+      ]
+    },
+    {
+      "subject": "the beatles",
+      "predicate": "director",
+      "required_objects": {
+        "Joe Hockey": [
+          7,
+          36
+        ],
+        "Brian Epstein": [
+          75
+        ]
+      },
+      "current_newest": {
+        "serial": 13824,
+        "object": "Joe Hockey"
+      },
+      "num_versions": 2,
+      "all_versions": [
+        {
+          "serial": 6012,
+          "object": "Brian Epstein"
+        },
+        {
+          "serial": 13824,
+          "object": "Joe Hockey"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "traced": 99,
+    "no_path": 0,
+    "no_start": 1,
+    "total_questions": 100
+  }
+}
