@@ -360,6 +360,10 @@ def parse_args():
     parser.add_argument("--cache_label", type=str, default=None)
     parser.add_argument("--list_caches", action="store_true")
 
+    # Ground truth correction
+    parser.add_argument("--corrected_answers", type=str, default=None,
+                        help="JSON file with corrected ground truth answers (overrides dataset expected answers)")
+
     return parser.parse_args()
 
 
@@ -554,6 +558,15 @@ def main():
     total_queries = sum(len(qa) for qa in all_qa_pairs)
     print(f"Total queries: {total_queries}")
 
+    # Load corrected ground truth if provided
+    corrected_map: dict[int, str] = {}
+    if args.corrected_answers:
+        with open(args.corrected_answers) as f:
+            for entry in json.load(f):
+                if entry["corrected_answer"] != entry["expected_wrong"]:
+                    corrected_map[entry["qi"]] = entry["corrected_answer"]
+        print(f"Corrected ground truth: {len(corrected_map)} answers overridden")
+
     # Ingestion cache setup
     use_cache = not args.no_cache
     cache_path = None
@@ -616,6 +629,10 @@ def main():
 
             if args.max_test_queries > 0 and query_index >= args.max_test_queries:
                 break
+
+            # Override broken ground truth answers
+            if query_index in corrected_map:
+                answer = corrected_map[query_index]
 
             agent_output = agent.send_message(query, memorizing=False)
 

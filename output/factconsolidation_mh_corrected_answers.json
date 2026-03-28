@@ -1,0 +1,1023 @@
+[
+  {
+    "qi": 2,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Oceania",
+    "corrected_answer": "Antarctica",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "american pastoral",
+        "predicate": "author",
+        "object": "F. Scott Fitzgerald",
+        "serial": 10793
+      },
+      {
+        "hop": 2,
+        "subject": "f. scott fitzgerald",
+        "predicate": "married_to",
+        "object": "Carl Lumbly",
+        "serial": 16800
+      },
+      {
+        "hop": 3,
+        "subject": "carl lumbly",
+        "predicate": "citizen_of",
+        "object": "Colombia",
+        "serial": 9097
+      },
+      {
+        "hop": 4,
+        "subject": "colombia",
+        "predicate": "continent",
+        "object": "Antarctica",
+        "serial": 7238
+      }
+    ]
+  },
+  {
+    "qi": 4,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "English",
+    "corrected_answer": "English",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "valmiki",
+        "predicate": "known_for",
+        "object": "Life and Fate",
+        "serial": 11460
+      },
+      {
+        "hop": 2,
+        "subject": "life and fate",
+        "predicate": "written_in_language",
+        "object": "English",
+        "serial": 12454
+      }
+    ]
+  },
+  {
+    "qi": 8,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "University of Oxford",
+    "corrected_answer": "University of Oxford",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "measure for measure",
+        "predicate": "author",
+        "object": "Terrance Dicks",
+        "serial": 14943
+      },
+      {
+        "hop": 2,
+        "subject": "terrance dicks",
+        "predicate": "educated_at",
+        "object": "University of Oxford",
+        "serial": 14246
+      }
+    ]
+  },
+  {
+    "qi": 9,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "L. L. Zamenhof",
+    "corrected_answer": "Frank Miller",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "fc viikingit",
+        "predicate": "headquarters_city",
+        "object": "Helsinki",
+        "serial": 1153
+      },
+      {
+        "hop": 2,
+        "subject": "helsinki",
+        "predicate": "official_language",
+        "object": "Esperanto",
+        "serial": 9546
+      },
+      {
+        "hop": 3,
+        "subject": "esperanto",
+        "predicate": "creator",
+        "object": "Frank Miller",
+        "serial": 8023
+      }
+    ]
+  },
+  {
+    "qi": 10,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "Oceania",
+    "corrected_answer": "Africa",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "visual basic .net",
+        "predicate": "developer",
+        "object": "Lenovo",
+        "serial": 10392
+      },
+      {
+        "hop": 2,
+        "subject": "lenovo",
+        "predicate": "ceo",
+        "object": "Elon Musk",
+        "serial": 13881
+      },
+      {
+        "hop": 3,
+        "subject": "elon musk",
+        "predicate": "birthplace",
+        "object": "New Zealand",
+        "serial": 14913
+      },
+      {
+        "hop": 4,
+        "subject": "new zealand",
+        "predicate": "continent",
+        "object": "Africa",
+        "serial": 14051
+      }
+    ]
+  },
+  {
+    "qi": 11,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Epworth",
+    "corrected_answer": "Philadelphia",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "giulio alberoni",
+        "predicate": "religion",
+        "object": "Methodism",
+        "serial": 15041
+      },
+      {
+        "hop": 2,
+        "subject": "methodism",
+        "predicate": "founded_by",
+        "object": "Joseph Goebbels",
+        "serial": 6876
+      },
+      {
+        "hop": 3,
+        "subject": "joseph goebbels",
+        "predicate": "birthplace",
+        "object": "Philadelphia",
+        "serial": 14471
+      }
+    ]
+  },
+  {
+    "qi": 16,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Europe",
+    "corrected_answer": "Africa",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "international judo federation",
+        "predicate": "sport",
+        "object": "judo",
+        "serial": 10581
+      },
+      {
+        "hop": 2,
+        "subject": "judo",
+        "predicate": "founded_by",
+        "object": "Charles de Gaulle",
+        "serial": 15833
+      },
+      {
+        "hop": 3,
+        "subject": "charles de gaulle",
+        "predicate": "citizen_of",
+        "object": "India",
+        "serial": 8404
+      },
+      {
+        "hop": 4,
+        "subject": "india",
+        "predicate": "continent",
+        "object": "Africa",
+        "serial": 14743
+      }
+    ]
+  },
+  {
+    "qi": 17,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Epworth",
+    "corrected_answer": "Philadelphia",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "duquesne university",
+        "predicate": "religion",
+        "object": "Methodism",
+        "serial": 17288
+      },
+      {
+        "hop": 2,
+        "subject": "methodism",
+        "predicate": "founded_by",
+        "object": "Joseph Goebbels",
+        "serial": 6876
+      },
+      {
+        "hop": 3,
+        "subject": "joseph goebbels",
+        "predicate": "birthplace",
+        "object": "Philadelphia",
+        "serial": 14471
+      }
+    ]
+  },
+  {
+    "qi": 19,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Dublin",
+    "corrected_answer": "Potosi",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "peter schmeichel",
+        "predicate": "position",
+        "object": "quarterback",
+        "serial": 15010
+      },
+      {
+        "hop": 2,
+        "subject": "quarterback",
+        "predicate": "sport",
+        "object": "Muay Thai",
+        "serial": 11861
+      },
+      {
+        "hop": 3,
+        "subject": "muay thai",
+        "predicate": "created_in_country",
+        "object": "Singapore",
+        "serial": 13526
+      },
+      {
+        "hop": 4,
+        "subject": "singapore",
+        "predicate": "capital",
+        "object": "Potosi",
+        "serial": 4534
+      }
+    ]
+  },
+  {
+    "qi": 20,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "Sergio Mattarella",
+    "corrected_answer": "Alassane Dramane Ouattara",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "halifax town a.f.c.",
+        "predicate": "sport",
+        "object": "association football",
+        "serial": 310
+      },
+      {
+        "hop": 2,
+        "subject": "association football",
+        "predicate": "created_in_country",
+        "object": "Italy",
+        "serial": 11954
+      },
+      {
+        "hop": 3,
+        "subject": "italy",
+        "predicate": "head_of_state",
+        "object": "Alassane Dramane Ouattara",
+        "serial": 8019
+      }
+    ]
+  },
+  {
+    "qi": 25,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Oceania",
+    "corrected_answer": "North America",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "please please me",
+        "predicate": "performer",
+        "object": "Madonna",
+        "serial": 12327
+      },
+      {
+        "hop": 2,
+        "subject": "madonna",
+        "predicate": "created_in_country",
+        "object": "Ireland",
+        "serial": 10725
+      },
+      {
+        "hop": 3,
+        "subject": "ireland",
+        "predicate": "continent",
+        "object": "North America",
+        "serial": 17017
+      }
+    ]
+  },
+  {
+    "qi": 27,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "New Delhi",
+    "corrected_answer": "Grosseto",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "2014 world judo championships",
+        "predicate": "sport",
+        "object": "judo",
+        "serial": 5117
+      },
+      {
+        "hop": 2,
+        "subject": "judo",
+        "predicate": "founded_by",
+        "object": "Charles de Gaulle",
+        "serial": 15833
+      },
+      {
+        "hop": 3,
+        "subject": "charles de gaulle",
+        "predicate": "citizen_of",
+        "object": "India",
+        "serial": 8404
+      },
+      {
+        "hop": 4,
+        "subject": "india",
+        "predicate": "capital",
+        "object": "Grosseto",
+        "serial": 10807
+      }
+    ]
+  },
+  {
+    "qi": 33,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Gérard Blitz",
+    "corrected_answer": "Gérard Blitz",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "james michael curley",
+        "predicate": "educated_at",
+        "object": "The Catholic University of America",
+        "serial": 17838
+      },
+      {
+        "hop": 2,
+        "subject": "the catholic university of america",
+        "predicate": "religion",
+        "object": "Sumerian religion",
+        "serial": 6487
+      },
+      {
+        "hop": 3,
+        "subject": "sumerian religion",
+        "predicate": "founded_by",
+        "object": "Gérard Blitz",
+        "serial": 15083
+      }
+    ]
+  },
+  {
+    "qi": 35,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "New Delhi",
+    "corrected_answer": "Grosseto",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "sumie sakai",
+        "predicate": "sport",
+        "object": "judo",
+        "serial": 17229
+      },
+      {
+        "hop": 2,
+        "subject": "judo",
+        "predicate": "founded_by",
+        "object": "Charles de Gaulle",
+        "serial": 15833
+      },
+      {
+        "hop": 3,
+        "subject": "charles de gaulle",
+        "predicate": "citizen_of",
+        "object": "India",
+        "serial": 8404
+      },
+      {
+        "hop": 4,
+        "subject": "india",
+        "predicate": "capital",
+        "object": "Grosseto",
+        "serial": 10807
+      }
+    ]
+  },
+  {
+    "qi": 36,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Canberra",
+    "corrected_answer": "Duluth",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "back in the u.s.s.r.",
+        "predicate": "performer",
+        "object": "Chicago Symphony Orchestra",
+        "serial": 15862
+      },
+      {
+        "hop": 2,
+        "subject": "chicago symphony orchestra",
+        "predicate": "director",
+        "object": "Brian Epstein",
+        "serial": 13210
+      },
+      {
+        "hop": 3,
+        "subject": "brian epstein",
+        "predicate": "citizen_of",
+        "object": "Italy",
+        "serial": 14624
+      },
+      {
+        "hop": 4,
+        "subject": "italy",
+        "predicate": "capital",
+        "object": "Duluth",
+        "serial": 18321
+      }
+    ]
+  },
+  {
+    "qi": 42,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "Ottawa",
+    "corrected_answer": "Königsberg",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "derek holland",
+        "predicate": "position",
+        "object": "linebacker",
+        "serial": 11785
+      },
+      {
+        "hop": 2,
+        "subject": "linebacker",
+        "predicate": "sport",
+        "object": "shinty",
+        "serial": 11323
+      },
+      {
+        "hop": 3,
+        "subject": "shinty",
+        "predicate": "created_in_country",
+        "object": "Canada",
+        "serial": 13265
+      },
+      {
+        "hop": 4,
+        "subject": "canada",
+        "predicate": "capital",
+        "object": "Königsberg",
+        "serial": 17405
+      }
+    ]
+  },
+  {
+    "qi": 47,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "Manila",
+    "corrected_answer": "Sipirok",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "david price",
+        "predicate": "position",
+        "object": "tight end",
+        "serial": 6957
+      },
+      {
+        "hop": 2,
+        "subject": "tight end",
+        "predicate": "sport",
+        "object": "field hockey",
+        "serial": 15061
+      },
+      {
+        "hop": 3,
+        "subject": "field hockey",
+        "predicate": "created_in_country",
+        "object": "Philippines",
+        "serial": 7774
+      },
+      {
+        "hop": 4,
+        "subject": "philippines",
+        "predicate": "capital",
+        "object": "Sipirok",
+        "serial": 16611
+      }
+    ]
+  },
+  {
+    "qi": 53,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Ole Johan Vierdal",
+    "corrected_answer": "Dietlind Grabe",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "julian lennon",
+        "predicate": "genre",
+        "object": "soul music",
+        "serial": 18039
+      },
+      {
+        "hop": 2,
+        "subject": "soul music",
+        "predicate": "created_in_country",
+        "object": "United Kingdom",
+        "serial": 15491
+      },
+      {
+        "hop": 3,
+        "subject": "united kingdom",
+        "predicate": "head_of_government",
+        "object": "Dietlind Grabe",
+        "serial": 15947
+      }
+    ]
+  },
+  {
+    "qi": 56,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "Christopher A. Wray",
+    "corrected_answer": "Tadey Eder",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "philip agee",
+        "predicate": "employer",
+        "object": "Federal Bureau of Investigation",
+        "serial": 14409
+      },
+      {
+        "hop": 2,
+        "subject": "federal bureau of investigation",
+        "predicate": "director",
+        "object": "Tadey Eder",
+        "serial": 14419
+      }
+    ]
+  },
+  {
+    "qi": 57,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Epworth",
+    "corrected_answer": "Philadelphia",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "saint eligius",
+        "predicate": "religion",
+        "object": "Methodism",
+        "serial": 12629
+      },
+      {
+        "hop": 2,
+        "subject": "methodism",
+        "predicate": "founded_by",
+        "object": "Joseph Goebbels",
+        "serial": 6876
+      },
+      {
+        "hop": 3,
+        "subject": "joseph goebbels",
+        "predicate": "birthplace",
+        "object": "Philadelphia",
+        "serial": 14471
+      }
+    ]
+  },
+  {
+    "qi": 63,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "New Delhi",
+    "corrected_answer": "Oderzo",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "nhl on abc",
+        "predicate": "original_broadcaster",
+        "object": "British Broadcasting Corporation",
+        "serial": 12622
+      },
+      {
+        "hop": 2,
+        "subject": "british broadcasting corporation",
+        "predicate": "director",
+        "object": "Narendra Modi",
+        "serial": 12252
+      },
+      {
+        "hop": 3,
+        "subject": "narendra modi",
+        "predicate": "citizen_of",
+        "object": "Australia",
+        "serial": 12321
+      },
+      {
+        "hop": 4,
+        "subject": "australia",
+        "predicate": "capital",
+        "object": "Oderzo",
+        "serial": 1503
+      }
+    ]
+  },
+  {
+    "qi": 71,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "William J. Donovan",
+    "corrected_answer": "Robert James Carlson",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "francis parkman",
+        "predicate": "employer",
+        "object": "Office of Strategic Services",
+        "serial": 15193
+      },
+      {
+        "hop": 2,
+        "subject": "office of strategic services",
+        "predicate": "chairperson",
+        "object": "Robert James Carlson",
+        "serial": 9020
+      }
+    ]
+  },
+  {
+    "qi": 72,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Beaumont",
+    "corrected_answer": "Oderzo",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "good morning america",
+        "predicate": "original_broadcaster",
+        "object": "British Broadcasting Corporation",
+        "serial": 15948
+      },
+      {
+        "hop": 2,
+        "subject": "british broadcasting corporation",
+        "predicate": "director",
+        "object": "Narendra Modi",
+        "serial": 12252
+      },
+      {
+        "hop": 3,
+        "subject": "narendra modi",
+        "predicate": "citizen_of",
+        "object": "Australia",
+        "serial": 12321
+      },
+      {
+        "hop": 4,
+        "subject": "australia",
+        "predicate": "capital",
+        "object": "Oderzo",
+        "serial": 1503
+      }
+    ]
+  },
+  {
+    "qi": 75,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Asia",
+    "corrected_answer": "North America",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "taxman",
+        "predicate": "performer",
+        "object": "Madonna",
+        "serial": 12510
+      },
+      {
+        "hop": 2,
+        "subject": "madonna",
+        "predicate": "director",
+        "object": "Narendra Modi",
+        "serial": 12455
+      },
+      {
+        "hop": 3,
+        "subject": "narendra modi",
+        "predicate": "death_place",
+        "object": "Iran",
+        "serial": 10044
+      },
+      {
+        "hop": 4,
+        "subject": "iran",
+        "predicate": "continent",
+        "object": "North America",
+        "serial": 11949
+      }
+    ]
+  },
+  {
+    "qi": 76,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "Edinburgh",
+    "corrected_answer": "Mumbai",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "centrifugal governor",
+        "predicate": "creator",
+        "object": "Robert Louis Stevenson",
+        "serial": 18296
+      },
+      {
+        "hop": 2,
+        "subject": "robert louis stevenson",
+        "predicate": "birthplace",
+        "object": "Mumbai",
+        "serial": 4648
+      }
+    ]
+  },
+  {
+    "qi": 79,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "Vienna",
+    "corrected_answer": "Brooklyn",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "tom selleck",
+        "predicate": "educated_at",
+        "object": "Academy of Fine Arts Vienna",
+        "serial": 15922
+      },
+      {
+        "hop": 2,
+        "subject": "academy of fine arts vienna",
+        "predicate": "headquarters_city",
+        "object": "Brooklyn",
+        "serial": 7232
+      }
+    ]
+  },
+  {
+    "qi": 82,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "Riyadh Region",
+    "corrected_answer": "London",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "edward mooney",
+        "predicate": "religion",
+        "object": "Christian Science",
+        "serial": 16369
+      },
+      {
+        "hop": 2,
+        "subject": "christian science",
+        "predicate": "founded_by",
+        "object": "Ibn Saud",
+        "serial": 11909
+      },
+      {
+        "hop": 3,
+        "subject": "ibn saud",
+        "predicate": "work_location",
+        "object": "London",
+        "serial": 17757
+      }
+    ]
+  },
+  {
+    "qi": 84,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Bondi Junction",
+    "corrected_answer": "Bondi Junction",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "enrico villanueva",
+        "predicate": "position",
+        "object": "closer",
+        "serial": 8364
+      },
+      {
+        "hop": 2,
+        "subject": "closer",
+        "predicate": "sport",
+        "object": "ice hockey",
+        "serial": 5230
+      },
+      {
+        "hop": 3,
+        "subject": "ice hockey",
+        "predicate": "created_in_country",
+        "object": "Japan",
+        "serial": 14700
+      },
+      {
+        "hop": 4,
+        "subject": "japan",
+        "predicate": "capital",
+        "object": "Bondi Junction",
+        "serial": 2279
+      }
+    ]
+  },
+  {
+    "qi": 85,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "philosopher",
+    "corrected_answer": "politician",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "julius caesar",
+        "predicate": "author",
+        "object": "Aristotle",
+        "serial": 11230
+      },
+      {
+        "hop": 2,
+        "subject": "aristotle",
+        "predicate": "field_of_work",
+        "object": "politician",
+        "serial": 6226
+      }
+    ]
+  },
+  {
+    "qi": 88,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "Recep Tayyip Erdoğan",
+    "corrected_answer": "Guðni Jóhannesson",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "outsourced",
+        "predicate": "created_in_country",
+        "object": "Turkey",
+        "serial": 17728
+      },
+      {
+        "hop": 2,
+        "subject": "turkey",
+        "predicate": "head_of_state",
+        "object": "Guðni Jóhannesson",
+        "serial": 17676
+      }
+    ]
+  },
+  {
+    "qi": 91,
+    "classification": "FINAL_HOP_SUPERSEDED",
+    "expected_wrong": "Mikhail Gorbachev",
+    "corrected_answer": "Elizabeth II",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "brad stevens",
+        "predicate": "sport",
+        "object": "basketball",
+        "serial": 8229
+      },
+      {
+        "hop": 2,
+        "subject": "basketball",
+        "predicate": "created_in_country",
+        "object": "Soviet Union",
+        "serial": 12608
+      },
+      {
+        "hop": 3,
+        "subject": "soviet union",
+        "predicate": "head_of_state",
+        "object": "Elizabeth II",
+        "serial": 16041
+      }
+    ]
+  },
+  {
+    "qi": 96,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Australia",
+    "corrected_answer": "Australia",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "dave dombrowski",
+        "predicate": "employer",
+        "object": "Stevenage F.C.",
+        "serial": 16305
+      },
+      {
+        "hop": 2,
+        "subject": "stevenage f.c.",
+        "predicate": "sport",
+        "object": "American football",
+        "serial": 17286
+      },
+      {
+        "hop": 3,
+        "subject": "american football",
+        "predicate": "created_in_country",
+        "object": "Australia",
+        "serial": 16113
+      }
+    ]
+  },
+  {
+    "qi": 98,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Edinburgh",
+    "corrected_answer": "Munich",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "jacqueline kennedy onassis",
+        "predicate": "religion",
+        "object": "Church of Scotland",
+        "serial": 17797
+      },
+      {
+        "hop": 2,
+        "subject": "church of scotland",
+        "predicate": "founded_by",
+        "object": "Bachir Gemayel",
+        "serial": 10043
+      },
+      {
+        "hop": 3,
+        "subject": "bachir gemayel",
+        "predicate": "work_location",
+        "object": "Munich",
+        "serial": 6759
+      }
+    ]
+  },
+  {
+    "qi": 99,
+    "classification": "INTERMEDIATE_REDIRECT",
+    "expected_wrong": "Epworth",
+    "corrected_answer": "Philadelphia",
+    "newest_chain": [
+      {
+        "hop": 1,
+        "subject": "ferdinando i de' medici",
+        "predicate": "religion",
+        "object": "Methodism",
+        "serial": 11090
+      },
+      {
+        "hop": 2,
+        "subject": "methodism",
+        "predicate": "founded_by",
+        "object": "Joseph Goebbels",
+        "serial": 6876
+      },
+      {
+        "hop": 3,
+        "subject": "joseph goebbels",
+        "predicate": "birthplace",
+        "object": "Philadelphia",
+        "serial": 14471
+      }
+    ]
+  }
+]
