@@ -57,6 +57,7 @@ from mabench.query import QueryEngine
 from mabench.query_pipeline import QueryPipeline
 from mabench.iterative_query import IterativeQuery
 from mabench.entity_reranker import EntityReranker
+from mabench.cross_encoder_reranker import CrossEncoderReranker
 from mabench.hyperedge_intersection import HyperedgeIntersection
 from mabench.knowledge_graph import KnowledgeGraph
 from mabench.gliner2_extractor import GLiNER2Extractor
@@ -88,7 +89,7 @@ class HermesAgent:
         self,
         *,
         # Engine params
-        dim: int = 1024,
+        dim: int = 768,
         contradiction_threshold: float = 0.95,
         recency_alpha: float = 0.1,
         dedup_threshold: float = 0.0,
@@ -233,6 +234,11 @@ class HermesAgent:
             nlp=getattr(self._ingestion, "_nlp", None),
         ) if self._retrieval_cfg.entity_rerank else None)
 
+        # CrossEncoderReranker: ms-marco-MiniLM-L-6-v2 relevance reranking
+        cross_enc_reranker = (CrossEncoderReranker(
+            top_k=self._retrieval_cfg.cross_encoder_top_k,
+        ) if self._retrieval_cfg.cross_encoder else None)
+
         # HyperedgeIntersection: entity-constrained reranking in decompose hops
         hyperedge = (HyperedgeIntersection(
             entity_index=ei.index,
@@ -287,6 +293,7 @@ class HermesAgent:
             belief_config=self._belief_cfg,
             nlp=getattr(self._ingestion, "_nlp", None),
             entity_reranker=ent_reranker,
+            cross_encoder_reranker=cross_enc_reranker,
         )
 
         # -- 6. Tier 2: conflict resolver ---------------------------------

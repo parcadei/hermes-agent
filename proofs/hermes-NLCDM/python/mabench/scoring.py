@@ -1,7 +1,13 @@
 """Embedding-based relevance scoring for Hermes memory retrieval.
 
 Provides EmbeddingRelevanceScorer, a cosine-similarity scorer using
-sentence embeddings (Qwen3-0.6B by default) with disk-persistent caching.
+sentence embeddings (all-mpnet-base-v2 by default, 768-dim) with
+disk-persistent caching.
+
+CACHE INVALIDATION: The on-disk embed cache (output/embed_cache/embeddings.npz)
+is keyed by text only, not by model name. When switching embedding models
+(e.g. from Qwen3-0.6B 1024-dim to all-mpnet-base-v2 768-dim), the cache
+MUST be invalidated (deleted) to avoid dimension mismatches and stale vectors.
 """
 
 from __future__ import annotations
@@ -28,23 +34,27 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
 
     _DISK_CACHE_DIR = Path(__file__).resolve().parent.parent / "output" / "embed_cache"
 
-    def __init__(self, model_name: str = "Qwen/Qwen3-Embedding-0.6B"):
+    def __init__(self, model_name: str = "sentence-transformers/all-mpnet-base-v2"):
         self._model_name = model_name
-        self._model = None
-        self._tokenizer = None
+        self._model = None  # SentenceTransformer instance (lazy-loaded)
+        self._tokenizer = None  # kept for entity-position methods
         self._cache: dict[str, np.ndarray] = {}
         self._load_disk_cache()
 
     def _ensure_model(self):
         if self._model is not None:
             return
-        import torch
-        from transformers import AutoTokenizer, AutoModel
+        from sentence_transformers import SentenceTransformer
 
-        self._tokenizer = AutoTokenizer.from_pretrained(self._model_name)
-        self._device = "cuda" if torch.cuda.is_available() else "cpu"
-        self._model = AutoModel.from_pretrained(self._model_name, torch_dtype=torch.float32).to(self._device)
-        self._model.eval()
+        self._model = SentenceTransformer(self._model_name)
+        self._device = str(self._model.device)
+        # Expose tokenizer for entity-position residual methods
+        self._tokenizer = self._model.tokenizer
+        # Cap _ENTITY_LAYER to model's actual layer count
+        num_layers = self._model[0].auto_model.config.num_hidden_layers
+        if self._ENTITY_LAYER >= num_layers:
+            # Use second-to-last layer (best generic choice for entity probing)
+            self._ENTITY_LAYER = num_layers - 2
 
     def embed(self, text: str) -> np.ndarray:
         """Embed a single text string, with caching."""
@@ -72,32 +82,21 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
 
         if uncached_texts:
             self._ensure_model()
-            import torch
 
-            # Process in batches to avoid OOM on very large chunks
-            for start in range(0, len(uncached_texts), batch_size):
-                batch_texts = uncached_texts[start : start + batch_size]
-                inputs = self._tokenizer(
-                    batch_texts,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=512,
-                )
-                inputs = {k: v.to(self._device) for k, v in inputs.items()}
-                with torch.no_grad():
-                    outputs = self._model(**inputs)
-                last_hidden = outputs.last_hidden_state
-                mask = inputs["attention_mask"].unsqueeze(-1).float()
-                pooled = (last_hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-9)
-                embs = pooled.cpu().numpy().astype(np.float64)
-                norms = np.linalg.norm(embs, axis=1, keepdims=True)
-                embs = embs / (norms + 1e-12)
+            # SentenceTransformer.encode handles batching, pooling, and
+            # normalization internally — no manual tokenize/forward/pool needed.
+            embs = self._model.encode(
+                uncached_texts,
+                batch_size=batch_size,
+                normalize_embeddings=True,
+                convert_to_numpy=True,
+                show_progress_bar=False,
+            ).astype(np.float64)
 
-                for j, emb in enumerate(embs):
-                    idx = uncached_indices[start + j]
-                    results[idx] = emb
-                    self._cache[uncached_texts[start + j]] = emb
+            for j, emb in enumerate(embs):
+                idx = uncached_indices[j]
+                results[idx] = emb
+                self._cache[uncached_texts[j]] = emb
 
         return results
 
@@ -125,7 +124,17 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
     # Entity-position residual extraction (arXiv:2603.19664)
     # ------------------------------------------------------------------
 
-    _ENTITY_LAYER = 14  # Mid-network layer — best Cohen's d in discrimination test
+    _ENTITY_LAYER = 14  # Capped dynamically in _ensure_model() for smaller models
+
+    @property
+    def _raw_model(self):
+        """Access the underlying HuggingFace transformer inside SentenceTransformer.
+
+        Entity-residual methods need direct forward pass with output_hidden_states=True,
+        which SentenceTransformer.encode() does not expose.
+        """
+        self._ensure_model()
+        return self._model[0].auto_model
 
     def embed_entity_isolated(
         self, entity_text: str, *, layer: int | None = None,
@@ -140,20 +149,22 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
         (0.006 gap within-template). Isolated entity residuals achieve
         0.134 gap — validated in residual_discrimination_v2.py.
 
-        Returns a normalized 1024-dim vector.
+        Returns a normalized vector (dimension matches the embedding model).
         """
         self._ensure_model()
         import torch
 
         target_layer = layer if layer is not None else self._ENTITY_LAYER
+        raw = self._raw_model
+        device = next(raw.parameters()).device
 
         inputs = self._tokenizer(
             [entity_text], return_tensors="pt", padding=True,
             truncation=True, max_length=64,
         )
-        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+        inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
-            outputs = self._model(**inputs, output_hidden_states=True)
+            outputs = raw(**inputs, output_hidden_states=True)
 
         hidden = outputs.hidden_states[target_layer][0]  # (seq, d_hidden)
         mask = inputs["attention_mask"][0].unsqueeze(-1).float()
@@ -173,20 +184,22 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
         at the specified transformer layer.  Falls back to first-token
         residual if the entity mention is not found.
 
-        Returns a normalized 1024-dim vector.
+        Returns a normalized vector (dimension matches the embedding model).
         """
         self._ensure_model()
         import torch
 
         target_layer = layer if layer is not None else self._ENTITY_LAYER
+        raw = self._raw_model
+        device = next(raw.parameters()).device
 
         inputs = self._tokenizer(
             [text], return_tensors="pt", padding=True,
             truncation=True, max_length=512,
         )
-        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+        inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
-            outputs = self._model(**inputs, output_hidden_states=True)
+            outputs = raw(**inputs, output_hidden_states=True)
 
         hidden = outputs.hidden_states[target_layer][0]  # (seq, d_hidden)
 
@@ -225,6 +238,8 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
         import torch
 
         target_layer = layer if layer is not None else self._ENTITY_LAYER
+        raw = self._raw_model
+        device = next(raw.parameters()).device
 
         # Pre-compute entity spans
         entity_spans = [self._find_entity_tokens(t, e) for t, e in zip(texts, entities)]
@@ -233,9 +248,9 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
             texts, return_tensors="pt", padding=True,
             truncation=True, max_length=512,
         )
-        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+        inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.no_grad():
-            outputs = self._model(**inputs, output_hidden_states=True)
+            outputs = raw(**inputs, output_hidden_states=True)
 
         hidden = outputs.hidden_states[target_layer]  # (batch, seq, d_hidden)
         mask = inputs["attention_mask"]

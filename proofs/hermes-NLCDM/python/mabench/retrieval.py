@@ -45,6 +45,7 @@ class Retriever:
         belief_config: BeliefConfig | None = None,
         nlp=None,
         entity_reranker=None,
+        cross_encoder_reranker=None,
     ) -> None:
         # _engine: CoupledEngine with .memory_store, .query(), .query_cooc_boost(), etc.
         self._engine = engine
@@ -56,6 +57,8 @@ class Retriever:
         self._nlp = nlp
         # _entity_reranker: EntityReranker instance, or None
         self._entity_reranker = entity_reranker
+        # _cross_encoder_reranker: CrossEncoderReranker instance, or None
+        self._cross_encoder_reranker = cross_encoder_reranker
 
         # _cfg: RetrievalConfig(retrieve_num=10, cooc_boost=False, ...)
         self._cfg = config or RetrievalConfig()
@@ -415,6 +418,9 @@ class Retriever:
             results = self._entity_reranker.rerank(
                 query_text, results, self._resolve_engine,
             )
+        ce_reranker = getattr(self, "_cross_encoder_reranker", None)
+        if ce_reranker is not None:
+            results = ce_reranker.rerank(query_text, results)
         return results
 
     def _apply_belief_rerank(self, results: list[dict]) -> list[dict]:

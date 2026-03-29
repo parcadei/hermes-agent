@@ -51,6 +51,9 @@ class RetrievalConfig:
     # fisher: Fisher-Rao weighted retrieval (arXiv 2603.14588v1, Eq. 14-16)
     fisher_scoring: bool = False       # replace cosine base score with Fisher-Rao distance
     fisher_temperature: float = 1.0    # temperature T > 0 (lower = more discriminative)
+    # cross_encoder: ms-marco-MiniLM-L-6-v2 reranker (agentmemory ablation: -30.7 pp)
+    cross_encoder: bool = False        # enable cross-encoder reranking after entity reranker
+    cross_encoder_top_k: int = 10      # how many candidates to keep after reranking
 
 
 @dataclass(frozen=True)

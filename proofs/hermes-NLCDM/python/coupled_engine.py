@@ -87,7 +87,7 @@ class MemoryEntry:
     layer: str = "user_knowledge"  # "user_knowledge", "agent_meta", "procedural"
     fact_type: str = "general"  # freeform, e.g. "finding", "reasoning_chain", "decision"
     entity: str | None = None  # Primary subject entity (GLiNER-extracted). Used as cannot-link constraint in dream merge.
-    entity_residual: np.ndarray | None = None  # Entity-position hidden state (layer 14, 1024-dim). For entity-aware reranking.
+    entity_residual: np.ndarray | None = None  # Entity-position hidden state (mid-layer). For entity-aware reranking.
     sigma_sq: np.ndarray | None = None  # Per-dimension Fisher variance (Eq. 14, arXiv 2603.14588v1). Computed at store time.
 
 

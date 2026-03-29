@@ -299,6 +299,12 @@ def parse_args():
     parser.add_argument("--entity_rerank", action="store_true",
                         help="Entity-position residual reranking with multiplicative gating (arXiv:2603.19664)")
 
+    # Cross-encoder reranking
+    parser.add_argument("--cross_encoder", action="store_true",
+                        help="Enable cross-encoder reranking (ms-marco-MiniLM-L-6-v2, 22M params)")
+    parser.add_argument("--cross_encoder_top_k", type=int, default=10,
+                        help="Number of candidates to keep after cross-encoder reranking (default 10)")
+
     # Fisher-Rao scoring
     parser.add_argument("--fisher_scoring", action="store_true",
                         help="Replace cosine base similarity with Fisher-Rao inverse-variance weighted distance (arXiv:2603.14588v1)")
@@ -393,6 +399,8 @@ def _build_agent(args) -> HermesAgent:
         hyperedge_min_candidates=args.hyperedge_min_candidates,
         fisher_scoring=args.fisher_scoring,
         fisher_temperature=args.fisher_temperature,
+        cross_encoder=args.cross_encoder,
+        cross_encoder_top_k=args.cross_encoder_top_k,
     )
     cr = CRConfig(
         enabled=args.conflict_resolution,
@@ -446,7 +454,7 @@ def _build_agent(args) -> HermesAgent:
     )
 
     return HermesAgent(
-        dim=1024,
+        dim=768,
         contradiction_threshold=args.contradiction_threshold,
         recency_alpha=args.recency_alpha,
         dream_params=dream_params,
@@ -519,6 +527,8 @@ def main():
         config_parts.append("tri")
     if args.entity_rerank:
         config_parts.append("entrank")
+    if args.cross_encoder:
+        config_parts.append("xenc")
     if args.fisher_scoring:
         config_parts.append("fisher")
     if args.hyperedge:

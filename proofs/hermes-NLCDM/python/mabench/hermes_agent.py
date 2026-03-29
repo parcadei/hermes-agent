@@ -75,7 +75,7 @@ class HermesMemoryAgent(EntityMixin, RebelKGMixin, RetrievalMixin, ConflictResol
 
     Args:
         model:                   LLM model name for answer generation
-        dim:                     Embedding dimension (1024 for Qwen3-0.6B)
+        dim:                     Embedding dimension (768 for all-mpnet-base-v2)
         contradiction_threshold: V2 cosine threshold for contradiction detection
         retrieve_num:            Number of memories to retrieve for context
         dream_interval:          Run dream cycle every N stores (0 = disabled)
@@ -85,7 +85,7 @@ class HermesMemoryAgent(EntityMixin, RebelKGMixin, RetrievalMixin, ConflictResol
     def __init__(
         self,
         model: str = "openai/gpt-4o-mini",
-        dim: int = 1024,
+        dim: int = 768,
         contradiction_threshold: float = 0.95,
         retrieve_num: int = 10,
         dream_interval: int = 0,

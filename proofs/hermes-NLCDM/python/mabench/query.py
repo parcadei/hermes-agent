@@ -235,6 +235,18 @@ class QueryEngine:
             return self._retriever._apply_post_retrieval(r)
         return self._apply_post_retrieval(r)  # type: ignore[attr-defined]
 
+    def _resolve_cross_encoder_rerank(self, query: str, results: list[dict]) -> list[dict]:
+        """Apply cross-encoder reranking if available (for BM25 hops bypass)."""
+        if hasattr(self, "_retriever") and self._retriever is not None:
+            reranker = getattr(self._retriever, "_cross_encoder_reranker", None)
+            if reranker is not None:
+                return reranker.rerank(query, results)
+        # Mixin fallback: check entity_reranker on self (old path)
+        reranker = getattr(self, "_cross_encoder_reranker", None)
+        if reranker is not None:
+            return reranker.rerank(query, results)
+        return results
+
     def _resolve_query_time_cr(self, texts):
         if hasattr(self, "_conflict_resolver") and self._conflict_resolver is not None:
             return self._conflict_resolver._query_time_cr(texts)
@@ -1022,6 +1034,8 @@ class QueryEngine:
                     if doc_id < len(engine.memory_store)
                 ]
                 sq_results = self._resolve_apply_post_retrieval(sq_results)
+                # Cross-encoder reranking (BM25 bypasses _retrieve_v2)
+                sq_results = self._resolve_cross_encoder_rerank(current_sq, sq_results)
             else:
                 sq_results = self._resolve_retrieve_v2(current_sq)
 
