@@ -326,6 +326,10 @@ class HermesAgent:
         )
 
         # -- 8. Tier 4: query engine + pipeline (circular dep) ------------
+        # Get entity registry reference (shared, grows during ingestion)
+        _llm_ext = getattr(self._ingestion, "_llm_extractor", None)
+        _entity_reg = _llm_ext.entity_registry if _llm_ext is not None else {}
+
         # Create QueryEngine first (pipeline callbacks wired after)
         self.query_engine = QueryEngine(
             self.engine, self._scorer,
@@ -338,6 +342,7 @@ class HermesAgent:
             entity_config=self._entity_cfg, dedup_config=self._dedup_cfg,
             hyperedge=hyperedge, knowledge_graph=knowledge_graph,
             cooc_kg=cooc_kg, supersession_state=ss,
+            entity_registry=_entity_reg,
         )
         # Create QueryPipeline with hop callback from QueryEngine
         self.pipeline = QueryPipeline(
