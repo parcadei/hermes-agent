@@ -625,12 +625,28 @@ class FactStore:
         if getattr(self, "_triadic", None) is not None:
             self._triadic.flush()
 
-        # Synonym dict for triadic.
+        # Synonym dict for triadic: spaCy coref + LLM entity registry aliases.
         if getattr(self, "_triadic", None) is not None:
             if getattr(result, "coref_clusters", None):
                 self._triadic.add_coref_clusters(result.coref_clusters)
             if getattr(result, "verb_mappings", None):
                 self._triadic.add_verb_mappings(result.verb_mappings)
+            # Feed LLM entity registry aliases into triadic synonym dict.
+            # Each {canonical: [alias1, alias2]} becomes a synonym cluster
+            # so triadic expand() can bridge "Mom" → "Sarah" structurally.
+            llm_ext = getattr(
+                getattr(self, "_ingestion", None), "_llm_extractor", None,
+            )
+            if llm_ext is not None:
+                registry = getattr(llm_ext, "entity_registry", {})
+                if registry:
+                    clusters = [
+                        [canonical] + aliases
+                        for canonical, aliases in registry.items()
+                        if aliases
+                    ]
+                    if clusters:
+                        self._triadic.add_coref_clusters(clusters)
 
         # Entity graph accumulation.
         if hasattr(self, "_entity_accumulator"):
