@@ -91,6 +91,8 @@ def save_context(
         "supersedes": {k: set(v) for k, v in agent._supersedes.items()},
         "gliner_entity_index": {k: set(v) for k, v in agent._gliner_entity_index.items()},
         "subject_index": dict(getattr(agent, "_subject_index", {})),
+        "ontology_index": dict(getattr(agent, "_ontology_index", {})),
+        "entity_to_stored": dict(getattr(agent, "_entity_to_stored", {})),
     }
 
     if getattr(agent, "_triadic", None) is not None:
@@ -168,6 +170,10 @@ def load_context(
 
     # Subject index (subject-based KG hop resolution)
     agent._subject_index = state.get("subject_index", {})
+
+    # Ontology layer (category-based KG hop resolution)
+    agent._ontology_index = state.get("ontology_index", {})
+    agent._entity_to_stored = state.get("entity_to_stored", {})
 
     # Optional components
     if "triadic" in state and getattr(agent, "_triadic", None) is not None:
