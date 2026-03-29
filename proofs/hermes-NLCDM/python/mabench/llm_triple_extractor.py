@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any
 
@@ -158,6 +159,28 @@ CONVERSATION_EXTRACTION_PROMPT = (
 )
 
 _VALID_MODES = {"factual", "conversation"}
+
+# Regex for escaped whitespace literals (the string \n, not an actual newline)
+_ESCAPED_WS = re.compile(r"\\[nrt]")
+# Collapse runs of whitespace to a single space
+_MULTI_WS = re.compile(r"\s{2,}")
+
+
+def _sanitize_text(text: str) -> str:
+    """Clean input text before LLM extraction.
+
+    Converts escaped whitespace literals (``\\n``, ``\\t``) to spaces,
+    strips backslash-escaped quotes, and collapses runs of whitespace.
+    This reduces JSON parse failures from noisy conversational data
+    (markdown, escaped strings, decorative formatting).
+    """
+    # Escaped whitespace literals → space
+    text = _ESCAPED_WS.sub(" ", text)
+    # Backslash-escaped quotes → bare quotes
+    text = text.replace("\\'", "'").replace('\\"', '"')
+    # Collapse whitespace
+    text = _MULTI_WS.sub(" ", text).strip()
+    return text
 
 
 def _ground_triple(
@@ -308,7 +331,7 @@ class LLMTripleExtractor:
                 model=self._model,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=self._temperature,
-                max_tokens=self._max_tokens,
+                max_tokens=1024 if mode == "conversation" else self._max_tokens,
                 seed=42,
                 extra_body={
                     "chat_template_kwargs": {"enable_thinking": False},
@@ -374,6 +397,9 @@ class LLMTripleExtractor:
         if not texts:
             return []
 
+        # Sanitize once — LLM sees clean text, grounding matches against it
+        clean_texts = [_sanitize_text(t) for t in texts]
+
         from concurrent.futures import ThreadPoolExecutor
         from functools import partial
 
@@ -381,8 +407,8 @@ class LLMTripleExtractor:
 
         # Send all requests concurrently — vLLM batches them on the GPU
         t0 = time.perf_counter()
-        with ThreadPoolExecutor(max_workers=min(len(texts), 16)) as pool:
-            parsed_results = list(pool.map(call_fn, texts))
+        with ThreadPoolExecutor(max_workers=min(len(clean_texts), 16)) as pool:
+            parsed_results = list(pool.map(call_fn, clean_texts))
         elapsed = time.perf_counter() - t0
 
         _log.info(
@@ -393,7 +419,7 @@ class LLMTripleExtractor:
         # Ground and collect triples (CPU-only, fast)
         return [
             self._ground_and_collect(text, parsed)
-            for text, parsed in zip(texts, parsed_results)
+            for text, parsed in zip(clean_texts, parsed_results)
         ]
 
     # ------------------------------------------------------------------
