@@ -120,6 +120,7 @@ class HermesAgent:
         # LLM triple extraction (vLLM server URL, None = disabled)
         llm_extraction_base_url: str | None = None,
         llm_extraction_model: str = "qwen3-triple-extractor",
+        llm_extraction_mode: str = "factual",
     ) -> None:
         # Store configs (frozen — safe to share across modules)
         self._retrieval_cfg = retrieval or RetrievalConfig()
@@ -153,6 +154,7 @@ class HermesAgent:
         self._iterative_max_hops = iterative_max_hops
         self._llm_extraction_base_url = llm_extraction_base_url
         self._llm_extraction_model = llm_extraction_model
+        self._llm_extraction_mode = llm_extraction_mode
 
         # -- Persistent resources (survive reset) --------------------------
         self._scorer = EmbeddingRelevanceScorer()
@@ -167,6 +169,7 @@ class HermesAgent:
                 boundary_threshold=0.2, strip_numbered_prefix=False,
                 llm_extraction_base_url=llm_extraction_base_url,
                 llm_extraction_model=llm_extraction_model,
+                llm_extraction_mode=llm_extraction_mode,
             )
         )
 

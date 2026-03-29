@@ -359,6 +359,9 @@ def parse_args():
                         help="vLLM server URL for LLM triple extraction (e.g. http://localhost:8000/v1)")
     parser.add_argument("--llm_extraction_model", type=str, default="qwen3-triple-extractor",
                         help="Served model name for LLM triple extraction")
+    parser.add_argument("--llm_extraction_mode", type=str, default="factual",
+                        choices=["factual", "conversation"],
+                        help="Extraction mode: factual (template sentences) or conversation (alias-aware)")
 
     # Cache
     parser.add_argument("--no_cache", action="store_true")
@@ -475,6 +478,7 @@ def _build_agent(args) -> HermesAgent:
         triadic=args.triadic,
         llm_extraction_base_url=args.llm_extraction_url,
         llm_extraction_model=args.llm_extraction_model,
+        llm_extraction_mode=args.llm_extraction_mode,
     )
 
 

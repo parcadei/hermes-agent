@@ -7,10 +7,13 @@ at the token-sampling level.
 
 Architecture:
   - vLLM serves the model as an OpenAI-compatible API
-  - Each extraction call is fresh/stateless (no session accumulation)
   - Thinking mode disabled (enable_thinking=False) for throughput
   - Grounding check: subject and object must be substrings of source text
   - Predicates normalized: lowercased, underscores→spaces, stripped
+  - Entity registry: in conversation mode, an incremental registry maps
+    canonical entity names to aliases (pronouns, nicknames, roles).
+    The LLM resolves aliases during extraction; the registry grows
+    across sequential calls so later chunks benefit from earlier ones.
 
 Feeds into _triple_index for predicated KG hop resolution.
 Drop-in replacement for spaCy dep-parse template extraction.
@@ -23,17 +26,17 @@ Usage::
     triples = extractor.extract("The capital of France is Paris.")
     # [("France", "capital", "Paris")]
 
-    # Conversation mode — for chat turns (possessions, preferences, events)
-    triples = extractor.extract(
-        "I have a 20-gallon tank with 10 neon tetras.",
-        mode="conversation",
-    )
-    # [("20-gallon tank", "contains", "10 neon tetras")]
+    # Conversation mode with entity alias resolution
+    extractor.extract("My mom Sarah called me.", mode="conversation")
+    # registry grows: {"Sarah": ["Mom", "my mom"]}
+    extractor.extract("Mom is visiting next week.", mode="conversation")
+    # triples: [("Sarah", "visiting", "next week")] — alias resolved
 
     # Batch
     batch = extractor.extract_batch(["The capital of France is Paris.", ...])
 
 Pickle-safe: OpenAI client excluded from state, recreated on demand.
+Entity registry persists across pickle (included in state).
 """
 
 from __future__ import annotations
@@ -75,6 +78,47 @@ RESPONSE_FORMAT: dict[str, Any] = {
     },
 }
 
+# Extended format for conversation mode with entity alias discovery.
+RESPONSE_FORMAT_WITH_ALIASES: dict[str, Any] = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "triple_extraction_with_aliases",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "triples": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "subject": {"type": "string"},
+                            "predicate": {"type": "string"},
+                            "object": {"type": "string"},
+                        },
+                        "required": ["subject", "predicate", "object"],
+                        "additionalProperties": False,
+                    },
+                },
+                "aliases": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "canonical": {"type": "string"},
+                            "alias": {"type": "string"},
+                        },
+                        "required": ["canonical", "alias"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["triples", "aliases"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 EXTRACTION_PROMPT = (
     "Extract factual relationships as (subject, predicate, object) triples.\n\n"
     "Rules:\n"
@@ -107,7 +151,10 @@ EXTRACTION_PROMPT = (
 CONVERSATION_EXTRACTION_PROMPT = (
     "Extract knowledge from a conversation turn as (subject, predicate, object) triples.\n\n"
     "Rules:\n"
-    "- Extract facts about what the user has, owns, prefers, did, or plans to do\n"
+    "- Extract ALL facts: possessions, preferences, plans, events, visits, "
+    "relationships, states, locations, and actions\n"
+    "- Even short statements like 'Mom is visiting next week' contain "
+    "extractable facts — do not skip them\n"
     "- Extract facts from assistant responses: recommendations, information provided\n"
     "- Preserve entity names exactly as they appear in the text\n"
     "- Include quantities when mentioned "
@@ -117,7 +164,14 @@ CONVERSATION_EXTRACTION_PROMPT = (
     "- One turn can produce many triples — extract ALL facts\n"
     "- Only extract facts explicitly stated in the text\n"
     "- Return an empty triples list for greetings or acknowledgments "
-    "with no factual content\n\n"
+    "with no factual content\n"
+    "- Report entity aliases: when a person is referred to by a proper name "
+    "AND a role/nickname/pronoun, the PROPER NAME is the canonical form. "
+    'Report as canonical="Sarah", alias="Mom" (NOT the reverse). '
+    "Proper names are canonical; roles (Mom, Dad), nicknames, and pronouns "
+    "(he, she, the little guy) are aliases.\n"
+    "- When the entity registry lists known entities, ALWAYS use the canonical "
+    "name from the registry as subject/object in triples, not the alias.\n\n"
     "Examples:\n\n"
     'Text: "I\'m thinking of adding some live plants to my new 20-gallon tank, '
     "which currently has 10 neon tetras, 5 golden honey gouramis, "
@@ -146,6 +200,18 @@ CONVERSATION_EXTRACTION_PROMPT = (
     '("Anubias nana", "recommended for", "tank setup"), '
     '("Java fern", "requires", "no CO2 injection"), '
     '("Anubias nana", "requires", "no CO2 injection")]\n\n'
+    'Text: "My mom Sarah is visiting next week and she\'s bringing her famous '
+    'lasagna. My brother Jake might come too."\n'
+    'Output: [("Sarah", "visiting", "next week"), '
+    '("Sarah", "bringing", "famous lasagna"), '
+    '("Jake", "relationship", "brother"), '
+    '("Jake", "might come", "next week")]\n'
+    'Aliases: [("Sarah", "mom"), ("Sarah", "she"), ("Jake", "my brother")]\n\n'
+    'Text: "Mom called again. She wants to bring Bobo to the park."\n'
+    '(Given known entities: Sarah = mom, Bobo = my dog)\n'
+    'Output: [("Sarah", "called", "again"), '
+    '("Sarah", "wants to bring", "Bobo to the park")]\n'
+    "Aliases: []\n\n"
     'Text: "Hi! Can you help me with something?"\n'
     "Output: []\n\n"
     'Text: "So I have a 75-gallon reef tank in my living room with 2 clownfish '
@@ -165,6 +231,30 @@ _ESCAPED_WS = re.compile(r"\\[nrt]")
 # Collapse runs of whitespace to a single space
 _MULTI_WS = re.compile(r"\s{2,}")
 
+# Type alias for the entity registry: canonical name → list of aliases.
+EntityRegistry = dict[str, list[str]]
+
+
+def _format_entity_registry(registry: EntityRegistry) -> str:
+    """Format the entity registry as context for the extraction prompt."""
+    if not registry:
+        return ""
+    lines = ["Known entities from prior conversation:\n"]
+    for canonical, aliases in registry.items():
+        if aliases:
+            alias_str = ", ".join(f'"{a}"' for a in aliases)
+            lines.append(f'- {canonical} (also known as: {alias_str})')
+        else:
+            lines.append(f"- {canonical}")
+    lines.append("")
+    lines.append(
+        "IMPORTANT: When a mention in the text refers to a known entity, "
+        "use the CANONICAL name (before the parentheses) as subject/object.\n"
+        "If you discover new aliases for known entities or new entities with "
+        "aliases, report them in the 'aliases' field.\n"
+    )
+    return "\n".join(lines)
+
 
 def _sanitize_text(text: str) -> str:
     """Clean input text before LLM extraction.
@@ -183,25 +273,80 @@ def _sanitize_text(text: str) -> str:
     return text
 
 
+def _entity_grounded(
+    entity: str, source_text_lower: str, registry: EntityRegistry,
+) -> bool:
+    """Check if an entity is grounded in source text, accounting for aliases.
+
+    An entity is grounded if:
+    1. It appears literally in the source text, OR
+    2. It is a canonical name in the registry and at least one of
+       its aliases appears in the source text (alias resolution).
+    """
+    if entity.lower() in source_text_lower:
+        return True
+    # Check if entity is a canonical name with a grounded alias
+    aliases = registry.get(entity, [])
+    return any(a.lower() in source_text_lower for a in aliases)
+
+
 def _ground_triple(
     subject: str, predicate: str, obj: str, source_text: str,
+    registry: EntityRegistry | None = None,
 ) -> bool:
     """Grounding check: subject and object must be substrings of source text.
 
     The predicate may be inferred (e.g. "capital" from "X is the capital of Y")
     so it is NOT required to appear literally. But subject and object must be
     grounded in the source text to prevent hallucination.
+
+    When an entity registry is provided, canonical names are accepted if
+    one of their aliases appears in the source text.
     """
     text_lower = source_text.lower()
+    reg = registry or {}
     return (
-        subject.lower() in text_lower
-        and obj.lower() in text_lower
+        _entity_grounded(subject, text_lower, reg)
+        and _entity_grounded(obj, text_lower, reg)
     )
 
 
 def _normalize_predicate(pred: str) -> str:
     """Normalize predicate to canonical form for consistent KG lookups."""
     return pred.lower().replace("_", " ").strip()
+
+
+def resolve_alias(mention: str, registry: EntityRegistry) -> str | None:
+    """Resolve a mention to its canonical entity name using the registry.
+
+    Deterministic, O(total_aliases) lookup. Used at query time — no LLM.
+    Tries exact match first, then case-insensitive, then substring.
+
+    Returns:
+        Canonical name if found, None otherwise.
+    """
+    mention_lower = mention.lower()
+    # Pass 1: exact match on canonical names
+    for canonical in registry:
+        if canonical.lower() == mention_lower:
+            return canonical
+    # Pass 2: exact match on aliases
+    for canonical, aliases in registry.items():
+        for alias in aliases:
+            if alias.lower() == mention_lower:
+                return canonical
+    # Pass 3: substring match (longest match wins)
+    best: str | None = None
+    best_len = 0
+    for canonical, aliases in registry.items():
+        for alias in aliases:
+            if alias.lower() in mention_lower and len(alias) > best_len:
+                best = canonical
+                best_len = len(alias)
+        if canonical.lower() in mention_lower and len(canonical) > best_len:
+            best = canonical
+            best_len = len(canonical)
+    return best
 
 
 class LLMTripleExtractor:
@@ -222,6 +367,7 @@ class LLMTripleExtractor:
         temperature: float = 0.0,
         max_tokens: int = 512,
         enable_grounding: bool = True,
+        entity_registry: EntityRegistry | None = None,
     ) -> None:
         self._base_url = base_url
         self._model = model
@@ -230,7 +376,8 @@ class LLMTripleExtractor:
         self._max_tokens = max_tokens
         self._enable_grounding = enable_grounding
         self._client: Any = None
-        self._stats = {"texts": 0, "triples": 0, "grounded": 0, "discarded": 0}
+        self._stats = {"texts": 0, "triples": 0, "grounded": 0, "discarded": 0, "aliases": 0}
+        self._entity_registry: EntityRegistry = entity_registry or {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -241,12 +388,15 @@ class LLMTripleExtractor:
     ) -> list[tuple[str, str, str]]:
         """Extract (subject, predicate, object) triples from a single text.
 
+        In conversation mode with an entity registry, discovered aliases
+        are merged into :attr:`entity_registry` automatically.
+
         Args:
             text: The source text to extract triples from.
             mode: Extraction mode. ``"factual"`` uses the FactConsolidation
                 prompt for template sentences. ``"conversation"`` uses a
                 prompt tuned for chat turns (possessions, preferences,
-                events, quantities).
+                events, quantities) and supports entity alias resolution.
 
         Raises:
             ValueError: If *mode* is not one of the valid modes.
@@ -266,6 +416,11 @@ class LLMTripleExtractor:
         Calls the LLM once per text (vLLM handles batching internally
         via continuous batching when requests arrive concurrently).
 
+        Note: In conversation mode, alias discovery within a batch is
+        NOT incremental — each text sees the registry as it was before
+        the batch started. For sequential alias accumulation, use
+        :meth:`extract` in a loop.
+
         Args:
             texts: List of source texts.
             mode: Extraction mode (see :meth:`extract`).
@@ -284,6 +439,15 @@ class LLMTripleExtractor:
     @property
     def stats(self) -> dict[str, int]:
         return dict(self._stats)
+
+    @property
+    def entity_registry(self) -> EntityRegistry:
+        """Current entity registry (canonical name → aliases). Grows during conversation extraction."""
+        return self._entity_registry
+
+    @entity_registry.setter
+    def entity_registry(self, registry: EntityRegistry) -> None:
+        self._entity_registry = registry
 
     # ------------------------------------------------------------------
     # Internals
@@ -321,11 +485,17 @@ class LLMTripleExtractor:
         Args:
             text: Source text to extract from.
             mode: ``"factual"`` or ``"conversation"`` — selects the prompt.
+
+        In conversation mode, the entity registry is injected as context
+        and the extended response format (with aliases) is used.
         """
+        use_aliases = mode == "conversation"
         if mode == "conversation":
-            prompt = CONVERSATION_EXTRACTION_PROMPT.format(text=text)
+            registry_ctx = _format_entity_registry(self._entity_registry)
+            prompt = registry_ctx + CONVERSATION_EXTRACTION_PROMPT.format(text=text)
         else:
             prompt = EXTRACTION_PROMPT.format(text=text)
+        resp_format = RESPONSE_FORMAT_WITH_ALIASES if use_aliases else RESPONSE_FORMAT
         try:
             response = self._client.chat.completions.create(
                 model=self._model,
@@ -336,7 +506,7 @@ class LLMTripleExtractor:
                 extra_body={
                     "chat_template_kwargs": {"enable_thinking": False},
                 },
-                response_format=RESPONSE_FORMAT,
+                response_format=resp_format,
             )
             content = response.choices[0].message.content or ""
             # Strip thinking tags if model ignores enable_thinking=False
@@ -354,12 +524,37 @@ class LLMTripleExtractor:
             _log.warning("LLM extraction failed for text: %s...", text[:80], exc_info=True)
             return None
 
+    def _canonicalize(self, entity: str) -> str:
+        """Resolve entity to canonical name via registry, or return as-is."""
+        resolved = resolve_alias(entity, self._entity_registry)
+        return resolved if resolved else entity
+
     def _ground_and_collect(
         self, text: str, parsed: dict | None,
-    ) -> list[tuple[str, str, str]]:
-        """Ground triples from a parsed LLM response against source text."""
+    ) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
+        """Ground triples from a parsed LLM response against source text.
+
+        After grounding, subjects and objects are resolved to canonical
+        names using the entity registry (e.g. "Mom" → "Sarah").
+
+        Returns:
+            (grounded_triples, alias_pairs) where alias_pairs is a list
+            of (canonical, alias) tuples discovered in this extraction.
+        """
         if parsed is None:
-            return []
+            return [], []
+        # Extract alias pairs FIRST so new aliases are available for
+        # canonicalization of triples in the same chunk.
+        alias_pairs: list[tuple[str, str]] = []
+        for a in parsed.get("aliases", []):
+            canonical = a.get("canonical", "").strip()
+            alias = a.get("alias", "").strip()
+            if canonical and alias and canonical.lower() != alias.lower():
+                alias_pairs.append((canonical, alias))
+        # Merge aliases before canonicalizing triples
+        if alias_pairs:
+            self._merge_aliases(alias_pairs)
+
         grounded: list[tuple[str, str, str]] = []
         for t in parsed.get("triples", []):
             s = t.get("subject", "").strip()
@@ -368,16 +563,30 @@ class LLMTripleExtractor:
             if not s or not p or not o:
                 continue
             if self._enable_grounding:
-                if _ground_triple(s, p, o, text):
+                if _ground_triple(s, p, o, text, self._entity_registry):
+                    # Canonicalize after grounding passes
+                    s = self._canonicalize(s)
+                    o = self._canonicalize(o)
                     grounded.append((s, p, o))
                     self._stats["grounded"] += 1
                 else:
                     self._stats["discarded"] += 1
             else:
+                s = self._canonicalize(s)
+                o = self._canonicalize(o)
                 grounded.append((s, p, o))
         self._stats["texts"] += 1
         self._stats["triples"] += len(grounded)
-        return grounded
+        self._stats["aliases"] += len(alias_pairs)
+        return grounded, alias_pairs
+
+    def _merge_aliases(self, alias_pairs: list[tuple[str, str]]) -> None:
+        """Merge discovered alias pairs into the entity registry."""
+        for canonical, alias in alias_pairs:
+            existing = self._entity_registry.setdefault(canonical, [])
+            if alias.lower() not in {a.lower() for a in existing}:
+                existing.append(alias)
+                _log.debug("Registry: %s += alias %r", canonical, alias)
 
     def _call_llm(
         self, texts: list[str], *, mode: str = "factual",
@@ -387,6 +596,9 @@ class LLMTripleExtractor:
         Uses ThreadPoolExecutor so vLLM's continuous batching processes
         requests in parallel on the GPU. Typically 5-10x faster than
         sequential calls for batches of 10-20 sentences.
+
+        In conversation mode, discovered aliases are merged into
+        :attr:`entity_registry` after grounding.
 
         Args:
             texts: Source texts to extract from.
@@ -416,11 +628,21 @@ class LLMTripleExtractor:
             len(texts), elapsed, elapsed / len(texts) if texts else 0,
         )
 
-        # Ground and collect triples (CPU-only, fast)
-        return [
-            self._ground_and_collect(text, parsed)
-            for text, parsed in zip(clean_texts, parsed_results)
-        ]
+        # Ground, canonicalize, and collect triples + aliases (CPU-only, fast).
+        # _ground_and_collect merges aliases into registry before canonicalizing.
+        all_triples: list[list[tuple[str, str, str]]] = []
+        for text, parsed in zip(clean_texts, parsed_results):
+            triples, _alias_pairs = self._ground_and_collect(text, parsed)
+            all_triples.append(triples)
+
+        if self._entity_registry:
+            _log.info(
+                "Entity registry: %d entities, %d total aliases",
+                len(self._entity_registry),
+                sum(len(v) for v in self._entity_registry.values()),
+            )
+
+        return all_triples
 
     # ------------------------------------------------------------------
     # Pickle support (exclude client, lazy-recreate)
