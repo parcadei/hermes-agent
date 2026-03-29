@@ -45,6 +45,7 @@ import json
 import logging
 import re
 import time
+from datetime import datetime, date
 from typing import Any
 
 _log = logging.getLogger("llm_triple_extractor")
@@ -78,7 +79,8 @@ RESPONSE_FORMAT: dict[str, Any] = {
     },
 }
 
-# Extended format for conversation mode with entity alias discovery.
+# Extended format for conversation mode with entity alias discovery
+# and temporal grounding.
 RESPONSE_FORMAT_WITH_ALIASES: dict[str, Any] = {
     "type": "json_schema",
     "json_schema": {
@@ -95,8 +97,9 @@ RESPONSE_FORMAT_WITH_ALIASES: dict[str, Any] = {
                             "subject": {"type": "string"},
                             "predicate": {"type": "string"},
                             "object": {"type": "string"},
+                            "when": {"type": "string"},
                         },
-                        "required": ["subject", "predicate", "object"],
+                        "required": ["subject", "predicate", "object", "when"],
                         "additionalProperties": False,
                     },
                 },
@@ -149,7 +152,7 @@ EXTRACTION_PROMPT = (
 )
 
 CONVERSATION_EXTRACTION_PROMPT = (
-    "Extract knowledge from a conversation turn as (subject, predicate, object) triples.\n\n"
+    "Extract knowledge from a conversation turn as (subject, predicate, object, when) quads.\n\n"
     "Rules:\n"
     "- Extract ALL facts: possessions, preferences, plans, events, visits, "
     "relationships, states, locations, and actions\n"
@@ -171,60 +174,98 @@ CONVERSATION_EXTRACTION_PROMPT = (
     "Proper names are canonical; roles (Mom, Dad), nicknames, and pronouns "
     "(he, she, the little guy) are aliases.\n"
     "- When the entity registry lists known entities, ALWAYS use the canonical "
-    "name from the registry as subject/object in triples, not the alias.\n\n"
+    "name from the registry as subject/object in triples, not the alias.\n"
+    "- TEMPORAL GROUNDING: if a fact has a time dimension (when something "
+    "happened, will happen, started, ended, is scheduled, or changed), put the date "
+    'in the "when" field as ISO 8601 (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS). '
+    "Resolve relative expressions ('next week', '3 days ago', 'yesterday', "
+    "'last Tuesday') using the reference date: {reference_date}. "
+    "In knowledge-update sentences ('started at X last month', 'joined Y last year', "
+    "'raised funding two weeks ago'), ALWAYS resolve the relative date — do not leave "
+    "'when' empty for facts with temporal markers.\n"
+    'For timeless facts (preferences, possessions, relationships), set "when" '
+    'to empty string "".\n\n'
     "Examples:\n\n"
     'Text: "I\'m thinking of adding some live plants to my new 20-gallon tank, '
     "which currently has 10 neon tetras, 5 golden honey gouramis, "
     'and a small pleco catfish."\n'
-    'Output: [("20-gallon tank", "contains", "10 neon tetras"), '
-    '("20-gallon tank", "contains", "5 golden honey gouramis"), '
-    '("20-gallon tank", "contains", "pleco catfish"), '
-    '("20-gallon tank", "status", "new")]\n\n'
+    'Output: [{{"subject": "20-gallon tank", "predicate": "contains", "object": "10 neon tetras", "when": ""}}, '
+    '{{"subject": "20-gallon tank", "predicate": "contains", "object": "5 golden honey gouramis", "when": ""}}, '
+    '{{"subject": "20-gallon tank", "predicate": "contains", "object": "pleco catfish", "when": ""}}, '
+    '{{"subject": "20-gallon tank", "predicate": "status", "object": "new", "when": ""}}]\n\n'
     'Text: "I really prefer Python over JavaScript for backend work, '
     "and I've been using VS Code as my primary editor for about "
     '3 years now."\n'
-    'Output: [("Python", "preferred over", "JavaScript"), '
-    '("VS Code", "role", "primary editor"), '
-    '("VS Code", "usage duration", "3 years")]\n\n'
-    'Text: "I\'m planning a trip to Miami and I want to redeem my Delta SkyMiles '
-    "for a free trip. I just got back from a red-eye flight on JetBlue "
-    'from San Francisco to Boston."\n'
-    'Output: [("Miami", "planned activity", "trip"), '
-    '("Delta SkyMiles", "intended use", "free trip"), '
-    '("JetBlue", "route", "San Francisco to Boston"), '
-    '("JetBlue flight", "type", "red-eye")]\n\n'
-    'Text: "Based on your tank setup, I\'d recommend Java fern and Anubias nana '
-    "as beginner-friendly plants. They don't need CO2 injection and "
-    'your gouramis will appreciate the hiding spots."\n'
-    'Output: [("Java fern", "recommended for", "tank setup"), '
-    '("Anubias nana", "recommended for", "tank setup"), '
-    '("Java fern", "requires", "no CO2 injection"), '
-    '("Anubias nana", "requires", "no CO2 injection")]\n\n'
+    'Output: [{{"subject": "Python", "predicate": "preferred over", "object": "JavaScript", "when": ""}}, '
+    '{{"subject": "VS Code", "predicate": "role", "object": "primary editor", "when": ""}}, '
+    '{{"subject": "VS Code", "predicate": "usage duration", "object": "3 years", "when": ""}}]\n\n'
     'Text: "My mom Sarah is visiting next week and she\'s bringing her famous '
     'lasagna. My brother Jake might come too."\n'
-    'Output: [("Sarah", "visiting", "next week"), '
-    '("Sarah", "bringing", "famous lasagna"), '
-    '("Jake", "relationship", "brother"), '
-    '("Jake", "might come", "next week")]\n'
-    'Aliases: [("Sarah", "mom"), ("Sarah", "she"), ("Jake", "my brother")]\n\n'
+    "(Reference date: 2026-03-15)\n"
+    'Output: [{{"subject": "Sarah", "predicate": "visiting", "object": "user", "when": "2026-03-22"}}, '
+    '{{"subject": "Sarah", "predicate": "bringing", "object": "famous lasagna", "when": "2026-03-22"}}, '
+    '{{"subject": "Jake", "predicate": "relationship", "object": "brother", "when": ""}}, '
+    '{{"subject": "Jake", "predicate": "might visit", "object": "user", "when": "2026-03-22"}}]\n'
+    'Aliases: [{{"canonical": "Sarah", "alias": "mom"}}, {{"canonical": "Sarah", "alias": "she"}}, '
+    '{{"canonical": "Jake", "alias": "my brother"}}]\n\n'
+    'Text: "I graduated from MIT in 2019 and started working at Google last March."\n'
+    "(Reference date: 2026-03-29)\n"
+    'Output: [{{"subject": "user", "predicate": "graduated from", "object": "MIT", "when": "2019-06-01"}}, '
+    '{{"subject": "user", "predicate": "started working at", "object": "Google", "when": "2025-03-01"}}]\n'
+    "Aliases: []\n\n"
+    'Text: "We adopted Bobo from the shelter about 3 weeks ago. '
+    'He\'s a golden retriever mix and he loves the backyard."\n'
+    "(Reference date: 2026-03-29)\n"
+    'Output: [{{"subject": "Bobo", "predicate": "adopted from", "object": "shelter", "when": "2026-03-08"}}, '
+    '{{"subject": "Bobo", "predicate": "breed", "object": "golden retriever mix", "when": ""}}, '
+    '{{"subject": "Bobo", "predicate": "loves", "object": "backyard", "when": ""}}]\n'
+    'Aliases: [{{"canonical": "Bobo", "alias": "he"}}]\n\n'
     'Text: "Mom called again. She wants to bring Bobo to the park."\n'
-    '(Given known entities: Sarah = mom, Bobo = my dog)\n'
-    'Output: [("Sarah", "called", "again"), '
-    '("Sarah", "wants to bring", "Bobo to the park")]\n'
+    "(Given known entities: Sarah = mom, Bobo = my dog)\n"
+    'Output: [{{"subject": "Sarah", "predicate": "called", "object": "user", "when": ""}}, '
+    '{{"subject": "Sarah", "predicate": "wants to bring", "object": "Bobo to the park", "when": ""}}]\n'
+    "Aliases: []\n\n"
+    'Text: "She used to work at Google but started at OpenAI last month. '
+    'She also moved from Mountain View to San Francisco."\n'
+    "(Reference date: 2026-03-29)\n"
+    'Output: [{{"subject": "user_she", "predicate": "used to work at", "object": "Google", "when": ""}}, '
+    '{{"subject": "user_she", "predicate": "started working at", "object": "OpenAI", "when": "2026-02-01"}}, '
+    '{{"subject": "user_she", "predicate": "moved from", "object": "Mountain View", "when": "2026-02-01"}}, '
+    '{{"subject": "user_she", "predicate": "moved to", "object": "San Francisco", "when": "2026-02-01"}}]\n'
+    "Aliases: []\n\n"
+    'Text: "I finished my PhD at Stanford in 2022 and joined a startup last year. '
+    'The company just raised Series B funding two weeks ago."\n'
+    "(Reference date: 2026-03-29)\n"
+    'Output: [{{"subject": "user", "predicate": "finished PhD at", "object": "Stanford", "when": "2022-06-01"}}, '
+    '{{"subject": "user", "predicate": "joined", "object": "startup", "when": "2025-01-01"}}, '
+    '{{"subject": "startup", "predicate": "raised", "object": "Series B funding", "when": "2026-03-15"}}]\n'
     "Aliases: []\n\n"
     'Text: "Hi! Can you help me with something?"\n'
     "Output: []\n\n"
-    'Text: "So I have a 75-gallon reef tank in my living room with 2 clownfish '
-    'and 3 blue-green chromis, plus a clean-up crew of 5 hermit crabs."\n'
-    'Output: [("75-gallon reef tank", "location", "living room"), '
-    '("75-gallon reef tank", "contains", "2 clownfish"), '
-    '("75-gallon reef tank", "contains", "3 blue-green chromis"), '
-    '("75-gallon reef tank", "contains", "5 hermit crabs")]\n\n'
     "Now extract triples from:\n\n"
+    "(Reference date: {reference_date})\n"
     'Text: "{text}"'
 )
 
 _VALID_MODES = {"factual", "conversation"}
+
+
+def _parse_event_time(when_str: str) -> datetime | None:
+    """Parse an ISO 8601 date/datetime string into a datetime object.
+
+    Returns None for empty strings or unparseable values.
+    Accepts YYYY-MM-DD and YYYY-MM-DDTHH:MM:SS formats.
+    """
+    if not when_str:
+        return None
+    try:
+        # Try full datetime first, then date-only
+        if "T" in when_str:
+            return datetime.fromisoformat(when_str)
+        return datetime.fromisoformat(when_str + "T00:00:00")
+    except (ValueError, TypeError):
+        _log.debug("Unparseable temporal expression: %r", when_str)
+        return None
 
 # Regex for escaped whitespace literals (the string \n, not an actual newline)
 _ESCAPED_WS = re.compile(r"\\[nrt]")
@@ -376,8 +417,9 @@ class LLMTripleExtractor:
         self._max_tokens = max_tokens
         self._enable_grounding = enable_grounding
         self._client: Any = None
-        self._stats = {"texts": 0, "triples": 0, "grounded": 0, "discarded": 0, "aliases": 0}
+        self._stats = {"texts": 0, "triples": 0, "grounded": 0, "discarded": 0, "aliases": 0, "temporal": 0}
         self._entity_registry: EntityRegistry = entity_registry or {}
+        self._last_event_times: list[list[datetime | None]] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -385,6 +427,7 @@ class LLMTripleExtractor:
 
     def extract(
         self, text: str, *, mode: str = "factual",
+        reference_date: str | None = None,
     ) -> list[tuple[str, str, str]]:
         """Extract (subject, predicate, object) triples from a single text.
 
@@ -396,7 +439,11 @@ class LLMTripleExtractor:
             mode: Extraction mode. ``"factual"`` uses the FactConsolidation
                 prompt for template sentences. ``"conversation"`` uses a
                 prompt tuned for chat turns (possessions, preferences,
-                events, quantities) and supports entity alias resolution.
+                events, quantities) and supports entity alias + temporal
+                resolution.
+            reference_date: ISO 8601 date string for resolving relative
+                temporal expressions. Only used in conversation mode.
+                Defaults to today's date.
 
         Raises:
             ValueError: If *mode* is not one of the valid modes.
@@ -405,11 +452,12 @@ class LLMTripleExtractor:
             raise ValueError(
                 f"mode must be one of {_VALID_MODES!r}, got {mode!r}"
             )
-        results = self._call_llm([text], mode=mode)
+        results = self._call_llm([text], mode=mode, reference_date=reference_date)
         return results[0] if results else []
 
     def extract_batch(
         self, texts: list[str], *, mode: str = "factual",
+        reference_date: str | None = None,
     ) -> list[list[tuple[str, str, str]]]:
         """Extract triples from a batch of texts.
 
@@ -424,6 +472,8 @@ class LLMTripleExtractor:
         Args:
             texts: List of source texts.
             mode: Extraction mode (see :meth:`extract`).
+            reference_date: ISO 8601 date string for resolving relative
+                temporal expressions (conversation mode only).
 
         Raises:
             ValueError: If *mode* is not one of the valid modes.
@@ -434,7 +484,7 @@ class LLMTripleExtractor:
             )
         if not texts:
             return []
-        return self._call_llm(texts, mode=mode)
+        return self._call_llm(texts, mode=mode, reference_date=reference_date)
 
     @property
     def stats(self) -> dict[str, int]:
@@ -448,6 +498,15 @@ class LLMTripleExtractor:
     @entity_registry.setter
     def entity_registry(self, registry: EntityRegistry) -> None:
         self._entity_registry = registry
+
+    @property
+    def last_event_times(self) -> list[list[datetime | None]]:
+        """Event times from the last extraction call.
+
+        Parallel to the returned triples: ``last_event_times[text_idx][triple_idx]``
+        is the parsed datetime for that triple, or None if no temporal info.
+        """
+        return self._last_event_times
 
     # ------------------------------------------------------------------
     # Internals
@@ -479,20 +538,29 @@ class LLMTripleExtractor:
             self._base_url, self._model,
         )
 
-    def _call_llm_single(self, text: str, *, mode: str = "factual") -> dict:
+    def _call_llm_single(
+        self, text: str, *, mode: str = "factual",
+        reference_date: str | None = None,
+    ) -> dict:
         """Call vLLM for a single text. Returns parsed JSON or None on error.
 
         Args:
             text: Source text to extract from.
             mode: ``"factual"`` or ``"conversation"`` — selects the prompt.
+            reference_date: ISO 8601 date string for resolving relative
+                temporal expressions (e.g. "next week"). Only used in
+                conversation mode.
 
         In conversation mode, the entity registry is injected as context
-        and the extended response format (with aliases) is used.
+        and the extended response format (with aliases and temporal) is used.
         """
         use_aliases = mode == "conversation"
         if mode == "conversation":
+            ref_date = reference_date or date.today().isoformat()
             registry_ctx = _format_entity_registry(self._entity_registry)
-            prompt = registry_ctx + CONVERSATION_EXTRACTION_PROMPT.format(text=text)
+            prompt = registry_ctx + CONVERSATION_EXTRACTION_PROMPT.format(
+                text=text, reference_date=ref_date,
+            )
         else:
             prompt = EXTRACTION_PROMPT.format(text=text)
         resp_format = RESPONSE_FORMAT_WITH_ALIASES if use_aliases else RESPONSE_FORMAT
@@ -531,18 +599,20 @@ class LLMTripleExtractor:
 
     def _ground_and_collect(
         self, text: str, parsed: dict | None,
-    ) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
+    ) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]], list[datetime | None]]:
         """Ground triples from a parsed LLM response against source text.
 
         After grounding, subjects and objects are resolved to canonical
         names using the entity registry (e.g. "Mom" → "Sarah").
 
         Returns:
-            (grounded_triples, alias_pairs) where alias_pairs is a list
-            of (canonical, alias) tuples discovered in this extraction.
+            (grounded_triples, alias_pairs, event_times) where:
+            - grounded_triples: list of (subject, predicate, object)
+            - alias_pairs: list of (canonical, alias) discovered
+            - event_times: parallel list of parsed datetimes (None if no temporal info)
         """
         if parsed is None:
-            return [], []
+            return [], [], []
         # Extract alias pairs FIRST so new aliases are available for
         # canonicalization of triples in the same chunk.
         alias_pairs: list[tuple[str, str]] = []
@@ -556,18 +626,20 @@ class LLMTripleExtractor:
             self._merge_aliases(alias_pairs)
 
         grounded: list[tuple[str, str, str]] = []
+        event_times: list[datetime | None] = []
         for t in parsed.get("triples", []):
             s = t.get("subject", "").strip()
             p = _normalize_predicate(t.get("predicate", ""))
             o = t.get("object", "").strip()
+            when_str = t.get("when", "").strip()
             if not s or not p or not o:
                 continue
             if self._enable_grounding:
                 if _ground_triple(s, p, o, text, self._entity_registry):
-                    # Canonicalize after grounding passes
                     s = self._canonicalize(s)
                     o = self._canonicalize(o)
                     grounded.append((s, p, o))
+                    event_times.append(_parse_event_time(when_str))
                     self._stats["grounded"] += 1
                 else:
                     self._stats["discarded"] += 1
@@ -575,10 +647,13 @@ class LLMTripleExtractor:
                 s = self._canonicalize(s)
                 o = self._canonicalize(o)
                 grounded.append((s, p, o))
+                event_times.append(_parse_event_time(when_str))
         self._stats["texts"] += 1
         self._stats["triples"] += len(grounded)
         self._stats["aliases"] += len(alias_pairs)
-        return grounded, alias_pairs
+        n_temporal = sum(1 for et in event_times if et is not None)
+        self._stats["temporal"] += n_temporal
+        return grounded, alias_pairs, event_times
 
     def _merge_aliases(self, alias_pairs: list[tuple[str, str]]) -> None:
         """Merge discovered alias pairs into the entity registry."""
@@ -590,6 +665,7 @@ class LLMTripleExtractor:
 
     def _call_llm(
         self, texts: list[str], *, mode: str = "factual",
+        reference_date: str | None = None,
     ) -> list[list[tuple[str, str, str]]]:
         """Call vLLM concurrently for all texts, then ground triples.
 
@@ -598,12 +674,14 @@ class LLMTripleExtractor:
         sequential calls for batches of 10-20 sentences.
 
         In conversation mode, discovered aliases are merged into
-        :attr:`entity_registry` after grounding.
+        :attr:`entity_registry` after grounding. Parsed event times
+        are stored in :attr:`_last_event_times`.
 
         Args:
             texts: Source texts to extract from.
             mode: ``"factual"`` or ``"conversation"`` — forwarded to
                 :meth:`_call_llm_single`.
+            reference_date: ISO 8601 date for temporal resolution.
         """
         self._ensure_client()
         if not texts:
@@ -615,7 +693,9 @@ class LLMTripleExtractor:
         from concurrent.futures import ThreadPoolExecutor
         from functools import partial
 
-        call_fn = partial(self._call_llm_single, mode=mode)
+        call_fn = partial(
+            self._call_llm_single, mode=mode, reference_date=reference_date,
+        )
 
         # Send all requests concurrently — vLLM batches them on the GPU
         t0 = time.perf_counter()
@@ -628,12 +708,16 @@ class LLMTripleExtractor:
             len(texts), elapsed, elapsed / len(texts) if texts else 0,
         )
 
-        # Ground, canonicalize, and collect triples + aliases (CPU-only, fast).
+        # Ground, canonicalize, and collect triples + aliases + event_times.
         # _ground_and_collect merges aliases into registry before canonicalizing.
         all_triples: list[list[tuple[str, str, str]]] = []
+        all_event_times: list[list[datetime | None]] = []
         for text, parsed in zip(clean_texts, parsed_results):
-            triples, _alias_pairs = self._ground_and_collect(text, parsed)
+            triples, _alias_pairs, event_times = self._ground_and_collect(text, parsed)
             all_triples.append(triples)
+            all_event_times.append(event_times)
+
+        self._last_event_times = all_event_times
 
         if self._entity_registry:
             _log.info(

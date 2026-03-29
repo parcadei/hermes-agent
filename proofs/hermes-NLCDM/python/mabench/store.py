@@ -388,11 +388,15 @@ class FactStore:
             "new_text": fact.text,
             "old_recency": old_entry.recency,
             "new_recency": float(self._store_count),
+            "old_event_time": getattr(old_entry, "event_time", None),
+            "new_event_time": fact.event_time,
             "timestamp": time.time(),
         })
         engine.replace_entry(
             superseded_idx, fact.text, emb, recency=float(self._store_count)
         )
+        # Attach event_time to the replaced entry.
+        engine.memory_store[superseded_idx].event_time = fact.event_time
         ms_idx = superseded_idx
         # Update reverse lookup.
         del self._resolve_text_to_store_idx[superseded_text]
@@ -428,6 +432,7 @@ class FactStore:
             embedding=emb,
             recency=float(self._store_count),
             entity=entity,
+            event_time=fact.event_time,
         )
         self._resolve_text_to_store_idx[fact.text] = ms_idx
         return ms_idx

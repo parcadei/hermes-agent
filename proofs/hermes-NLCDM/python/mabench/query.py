@@ -28,9 +28,12 @@ Backward-compat alias:
 
 from __future__ import annotations
 
+import re
 import time
+from datetime import datetime
 
 from mabench.conflict_resolution import _cr_log
+from mabench.llm_triple_extractor import resolve_alias
 
 
 class QueryEngine:
@@ -75,6 +78,7 @@ class QueryEngine:
         knowledge_graph=None,      # KnowledgeGraph or None
         cooc_kg=None,              # CoocKG or None
         supersession_state=None,   # SupersessionState (holds _triple_index)
+        entity_registry=None,      # EntityRegistry dict or None
         # Callbacks for cross-module deps (QueryPipeline methods)
         final_retrieval_fn=None,  # callable for _query_final_retrieval
         post_process_fn=None,     # callable for _query_post_process
@@ -102,6 +106,7 @@ class QueryEngine:
         self._knowledge_graph = knowledge_graph
         self._cooc_kg = cooc_kg
         self._supersession_state = supersession_state
+        self._entity_registry = entity_registry if entity_registry is not None else {}
         # Callbacks
         self._final_retrieval_fn = final_retrieval_fn
         self._post_process_fn = post_process_fn
@@ -290,6 +295,258 @@ class QueryEngine:
             return self._supersession_state.subject_index
         return getattr(self, "_subject_index", {})
 
+    @property
+    def _resolve_text_to_store_idx(self):
+        """fact text -> memory_store index, from SupersessionState or host class."""
+        if self._supersession_state is not None:
+            return self._supersession_state.text_to_store_idx
+        return getattr(self, "_text_to_store_idx", {})
+
+    # ------------------------------------------------------------------
+    # Temporal query resolution (Phase 0 fast-lane, no LLM)
+    # ------------------------------------------------------------------
+
+    # Compiled regex patterns for temporal intent detection.
+    # Order matters: duration patterns checked before "when" to avoid
+    # "how long" matching a generic "when" fallback.
+    _TEMPORAL_WHEN_RE = re.compile(
+        r"\b(?:when\s+(?:did|was|is|were|will|has|had|does|do)|"
+        r"what\s+date|what\s+time|on\s+what\s+day)\b",
+        re.IGNORECASE,
+    )
+    _TEMPORAL_DURATION_RE = re.compile(
+        r"\b(?:how\s+long\s+(?:since|ago)|"
+        r"how\s+many\s+(?:days|weeks|months|years))\b",
+        re.IGNORECASE,
+    )
+    _TEMPORAL_LATEST_RE = re.compile(
+        r"\b(?:current(?:ly)?|latest|most\s+recent|"
+        r"right\s+now|these\s+days)\b|"
+        r"(?<!\w)now(?:\s*\?|\s*$|\s+\w)",
+        re.IGNORECASE,
+    )
+
+    def _detect_temporal_intent(self, bare_question: str) -> str | None:
+        """Classify temporal intent from bare question text.
+
+        Returns one of "when", "duration", "latest", or None.
+        Uses simple regex matching on the lowercased question.
+        Conservative: only matches clear temporal patterns.
+        """
+        if not bare_question:
+            return None
+        # Check duration BEFORE when (avoid "how long" matching "when")
+        if self._TEMPORAL_DURATION_RE.search(bare_question):
+            return "duration"
+        if self._TEMPORAL_WHEN_RE.search(bare_question):
+            return "when"
+        if self._TEMPORAL_LATEST_RE.search(bare_question):
+            return "latest"
+        return None
+
+    def _resolve_temporal_query(
+        self,
+        bare_question: str,
+        intent: str,
+        reference_date: datetime | None = None,
+    ) -> dict | None:
+        """Deterministic temporal resolver (no LLM calls).
+
+        Looks up entity in subject_index, retrieves event_time from
+        memory_store, and formats the response based on intent.
+
+        Returns a response dict on success, None to fall through to
+        the normal query pipeline.
+        """
+        subject_index = self._resolve_subject_index
+        if not subject_index:
+            return None
+
+        text_to_store_idx = self._resolve_text_to_store_idx
+        engine = self._resolve_engine
+        store = engine.memory_store
+
+        sq_lower = bare_question.lower()
+
+        # Find entity: longest substring match (same guard as _resolve_triple_index_kg_hop)
+        candidates: list[tuple[int, str, dict]] = []
+        for subj, pred_dict in subject_index.items():
+            if len(subj) >= 3 and subj in sq_lower:
+                candidates.append((len(subj), subj, pred_dict))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: -x[0])
+        _best_len, _best_subj, best_preds = candidates[0]
+
+        if intent == "when":
+            return self._temporal_when(
+                sq_lower, best_preds, text_to_store_idx, store,
+            )
+        elif intent == "duration":
+            return self._temporal_duration(
+                sq_lower, best_preds, text_to_store_idx, store,
+                reference_date,
+            )
+        elif intent == "latest":
+            return self._temporal_latest(
+                best_preds, text_to_store_idx, store,
+            )
+        return None
+
+    def _temporal_find_event_time(
+        self,
+        pred: str,
+        fact_text: str,
+        text_to_store_idx: dict,
+        store: list,
+    ) -> datetime | None:
+        """Look up the event_time for a single (pred, fact_text) pair."""
+        idx = text_to_store_idx.get(fact_text)
+        if idx is None or idx >= len(store):
+            return None
+        return getattr(store[idx], "event_time", None)
+
+    def _temporal_when(
+        self,
+        sq_lower: str,
+        pred_dict: dict[str, tuple[str, str]],
+        text_to_store_idx: dict,
+        store: list,
+    ) -> dict | None:
+        """Resolve a 'when' query: find best predicate match, return event_time."""
+        # Try predicate substring matching (same logic as KG hop resolution)
+        pred_matches: list[tuple[int, str, str, str]] = []
+        for pred, (obj, fact_text) in pred_dict.items():
+            if len(pred) >= 3 and pred in sq_lower:
+                pred_matches.append((len(pred), pred, obj, fact_text))
+
+        if pred_matches:
+            pred_matches.sort(key=lambda x: -x[0])
+            _plen, _pred, _obj, fact_text = pred_matches[0]
+            evt = self._temporal_find_event_time(
+                _pred, fact_text, text_to_store_idx, store,
+            )
+            if evt is not None:
+                return self._temporal_response(
+                    evt.isoformat() if hasattr(evt, "isoformat") else str(evt)
+                )
+            return None
+
+        # No predicate substring match: try all predicates, pick first with event_time
+        for pred, (obj, fact_text) in pred_dict.items():
+            evt = self._temporal_find_event_time(
+                pred, fact_text, text_to_store_idx, store,
+            )
+            if evt is not None:
+                return self._temporal_response(
+                    evt.isoformat() if hasattr(evt, "isoformat") else str(evt)
+                )
+        return None
+
+    def _temporal_duration(
+        self,
+        sq_lower: str,
+        pred_dict: dict[str, tuple[str, str]],
+        text_to_store_idx: dict,
+        store: list,
+        reference_date: datetime | None,
+    ) -> dict | None:
+        """Resolve a 'duration' query: find event_time, compute timedelta."""
+        if reference_date is None:
+            reference_date = datetime.now()
+
+        # Same predicate matching as _temporal_when
+        pred_matches: list[tuple[int, str, str, str]] = []
+        for pred, (obj, fact_text) in pred_dict.items():
+            if len(pred) >= 3 and pred in sq_lower:
+                pred_matches.append((len(pred), pred, obj, fact_text))
+
+        target_fact_text = None
+        if pred_matches:
+            pred_matches.sort(key=lambda x: -x[0])
+            target_fact_text = pred_matches[0][3]
+        else:
+            # No predicate substring match: try all predicates
+            for pred, (obj, fact_text) in pred_dict.items():
+                evt = self._temporal_find_event_time(
+                    pred, fact_text, text_to_store_idx, store,
+                )
+                if evt is not None:
+                    target_fact_text = fact_text
+                    break
+
+        if target_fact_text is None:
+            return None
+
+        evt = self._temporal_find_event_time(
+            "", target_fact_text, text_to_store_idx, store,
+        )
+        if evt is None:
+            return None
+
+        delta = reference_date - evt
+        days = delta.days
+        return self._temporal_response(self._format_duration(days))
+
+    @staticmethod
+    def _format_duration(days: int) -> str:
+        """Format a day count into a human-readable duration string."""
+        if days < 0:
+            return f"in {-days} days"
+        if days < 60:
+            return f"{days} days"
+        months = round(days / 30.44)  # average days per month
+        if months < 18:
+            return f"{months} months"
+        years = round(days / 365.25)
+        remaining_days = days - round(years * 365.25)
+        remaining_months = round(remaining_days / 30.44)
+        if remaining_months > 0:
+            return f"{years} years, {remaining_months} months"
+        return f"{years} years"
+
+    def _temporal_latest(
+        self,
+        pred_dict: dict[str, tuple[str, str]],
+        text_to_store_idx: dict,
+        store: list,
+    ) -> dict | None:
+        """Resolve a 'latest' query: return the object from the most recent fact."""
+        timed_facts: list[tuple[datetime, str]] = []
+        for pred, (obj, fact_text) in pred_dict.items():
+            evt = self._temporal_find_event_time(
+                pred, fact_text, text_to_store_idx, store,
+            )
+            if evt is not None:
+                timed_facts.append((evt, obj))
+
+        if not timed_facts:
+            return None
+
+        # Sort by event_time descending, pick most recent
+        timed_facts.sort(key=lambda x: x[0], reverse=True)
+        return self._temporal_response(timed_facts[0][1])
+
+    @staticmethod
+    def _temporal_response(answer: str) -> dict:
+        """Build a standard response dict for temporal fast-lane answers."""
+        return {
+            "output": answer,
+            "input_len": 0,
+            "output_len": 0,
+        }
+
+    @property
+    def _resolve_entity_registry(self):
+        """EntityRegistry dict -- from __init__ or host class.
+
+        Returns the shared mutable dict reference so that registry
+        entries added during ingestion are visible at query time.
+        """
+        return getattr(self, "_entity_registry", {})
+
     def _resolve_triple_index_kg_hop(self, sub_question: str) -> str | None:
         """Resolve a decompose hop via subject-based KG lookup.
 
@@ -310,6 +567,15 @@ class QueryEngine:
             return self._resolve_triple_index_kg_hop_legacy(sub_question)
 
         sq_lower = sub_question.lower()
+
+        # Resolve aliases: if query mentions an alias, also match the canonical name
+        registry = self._resolve_entity_registry
+        if registry:
+            alias_resolved = resolve_alias(sq_lower, registry)
+            if alias_resolved:
+                canonical_lower = alias_resolved.lower()
+                if canonical_lower not in sq_lower:
+                    sq_lower = sq_lower + " " + canonical_lower
 
         # Find subject entities that appear in the question
         candidates: list[tuple[int, str, dict[str, tuple[str, str]]]] = []
@@ -738,6 +1004,17 @@ class QueryEngine:
         """Query memory with hybrid switching per proven criteria."""
         query_start = time.time()
         bare_question = self._extract_question(question)
+
+        # Phase 0: temporal fast-lane (deterministic, no LLM)
+        temporal_intent = self._detect_temporal_intent(bare_question)
+        if temporal_intent:
+            temporal_result = self._resolve_temporal_query(
+                bare_question, temporal_intent,
+            )
+            if temporal_result is not None:
+                temporal_result["memory_construction_time"] = time.time() - query_start
+                temporal_result["query_time_len"] = time.time() - query_start
+                return temporal_result
 
         # Phase 1: setup + chain cache check
         cached_result = self._query_setup(bare_question, query_start)

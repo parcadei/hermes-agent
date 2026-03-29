@@ -89,6 +89,7 @@ class MemoryEntry:
     entity: str | None = None  # Primary subject entity (GLiNER-extracted). Used as cannot-link constraint in dream merge.
     entity_residual: np.ndarray | None = None  # Entity-position hidden state (mid-layer). For entity-aware reranking.
     sigma_sq: np.ndarray | None = None  # Per-dimension Fisher variance (Eq. 14, arXiv 2603.14588v1). Computed at store time.
+    event_time: object = None  # datetime | None — when the fact was TRUE in the world (temporal grounding).
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +418,7 @@ class CoupledEngine:
         layer: str = "user_knowledge",
         fact_type: str = "general",
         entity: str | None = None,
+        event_time: object = None,
     ) -> int:
         """Add a new memory, optionally replacing contradictions.
 
@@ -526,6 +528,7 @@ class CoupledEngine:
             fact_type=fact_type,
             entity=entity,
             sigma_sq=_compute_sigma_sq(emb_normed),
+            event_time=event_time,
         )
         self.memory_store.append(entry)
         self._invalidate_cache()
