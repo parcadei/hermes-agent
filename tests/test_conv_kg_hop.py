@@ -626,6 +626,50 @@ class TestStemFunction:
         assert _stem("is") == "is"
 
 
+
+# ---------------------------------------------------------------------------
+# 8. Deferred batch ingestion
+# ---------------------------------------------------------------------------
+
+
+class TestDeferredIngestion:
+    """Test that send_message buffers and _flush_ingestion processes."""
+
+    def test_send_message_buffers_not_stores(self):
+        """send_message(memorizing=True) should buffer, not embed/store."""
+        from MemoryAgentBench.methods.hermes_memory_agent import HermesMemoryAgent
+
+        agent = HermesMemoryAgent()
+        result = agent.send_message("Test fact", memorizing=True)
+        assert result == "Memorized"
+        assert len(agent._ingestion_buffer) == 1
+        assert agent._ingestion_buffer[0] == "Test fact"
+        # Nothing stored yet
+        assert len(agent.coupled_engine.memory_store) == 0
+        assert agent._store_count == 0
+
+    def test_multiple_buffers_accumulate(self):
+        """Multiple memorize calls should accumulate in buffer."""
+        from MemoryAgentBench.methods.hermes_memory_agent import HermesMemoryAgent
+
+        agent = HermesMemoryAgent()
+        for i in range(5):
+            agent.send_message(f"Fact {i}", memorizing=True)
+        assert len(agent._ingestion_buffer) == 5
+        assert agent._store_count == 0
+
+    def test_reset_clears_ingestion_buffer(self):
+        """reset() should clear the ingestion buffer."""
+        from MemoryAgentBench.methods.hermes_memory_agent import HermesMemoryAgent
+
+        agent = HermesMemoryAgent()
+        agent.send_message("buffered fact", memorizing=True)
+        assert len(agent._ingestion_buffer) == 1
+        agent.reset()
+        assert len(agent._ingestion_buffer) == 0
+        assert agent._ingestion_flushed is False
+
+
 # ---------------------------------------------------------------------------
 # 6. Import smoke test
 # ---------------------------------------------------------------------------
