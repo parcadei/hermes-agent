@@ -259,7 +259,10 @@ class IterativeQuery:
         triadic = getattr(self, "_triadic", None)
         if triadic is not None and hop_texts:
             triadic_texts = triadic.expand(
-                hop_texts, top_k=self._triadic_expand_k,
+                hop_texts,
+                top_k=self._triadic_expand_k,
+                max_hops=getattr(self, "_triadic_chain_hops", 1),
+                decay=getattr(self, "_triadic_decay", 1.0),
             )
             for t in triadic_texts:
                 key = t.strip()[:200]

@@ -46,6 +46,8 @@ class Retriever:
         nlp=None,
         entity_reranker=None,
         cross_encoder_reranker=None,
+        bm25_index=None,
+        structured_store=None,
     ) -> None:
         # _engine: CoupledEngine with .memory_store, .query(), .query_cooc_boost(), etc.
         self._engine = engine
@@ -59,6 +61,10 @@ class Retriever:
         self._entity_reranker = entity_reranker
         # _cross_encoder_reranker: CrossEncoderReranker instance, or None
         self._cross_encoder_reranker = cross_encoder_reranker
+        # _bm25_index: BM25Index for lexical reranking
+        self._bm25_index = bm25_index
+        # _structured_store: StructuredFactStore for O(1) entity+predicate lookup, or None
+        self._structured_store = structured_store
 
         # _cfg: RetrievalConfig(retrieve_num=10, cooc_boost=False, ...)
         self._cfg = config or RetrievalConfig()
@@ -258,6 +264,44 @@ class Retriever:
             return self._cfg.fisher_temperature
         return getattr(self, "fisher_temperature", 1.0)
 
+    @property
+    def _resolve_bm25_primary(self) -> bool:
+        """Whether BM25 is the primary retrieval channel (not cosine)."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.bm25_primary
+        return getattr(self, "bm25_primary", False)
+
+    @property
+    def _resolve_bm25_rerank(self) -> bool:
+        """Whether to apply BM25 score blending on cosine candidates."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.bm25_rerank
+        return getattr(self, "bm25_rerank", False)
+
+    @property
+    def _resolve_bm25_rerank_weight(self) -> float:
+        """BM25 contribution in rerank blend (1-w = cosine weight)."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.bm25_rerank_weight
+        return getattr(self, "bm25_rerank_weight", 0.5)
+
+    def _resolve_entity_primary(self) -> bool:
+        return self._cfg.entity_primary
+
+    @property
+    def _resolve_entity_prefilter(self) -> bool:
+        """Whether to fuse entity_scored + BM25 via RRF."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.entity_prefilter
+        return getattr(self, "entity_prefilter", False)
+
+    @property
+    def _resolve_event_calendar_retrieval(self) -> bool:
+        """Whether to add event calendar as 3rd RRF channel."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.event_calendar_retrieval
+        return getattr(self, "event_calendar_retrieval", False)
+
     # ------------------------------------------------------------------
     # Core retrieval methods
     # ------------------------------------------------------------------
@@ -273,9 +317,8 @@ class Retriever:
     def _compute_effective_k(self, top_k: int) -> int:
         """Compute the effective retrieval count after overfetch multipliers.
 
-        Over-fetches when CR, cosine dedup, or belief is active to give
-        filtering more candidates.  Conflicting facts have cosine ~0.98-0.99,
-        so top-10 drops correct versions.
+        Over-fetches when CR, cosine dedup, belief, or cross-encoder is active
+        to give filtering/reranking more candidates.
 
         Args:
             top_k: Base number of results before overfetch.
@@ -290,6 +333,10 @@ class Retriever:
             effective_k = max(effective_k, top_k * self._resolve_cr_overfetch)
         if self._resolve_belief_index is not None:
             effective_k = max(effective_k, top_k * self._resolve_belief_overfetch)
+        # Cross-encoder needs 3x candidates to rerank effectively.
+        # Discriminative test: BM25 top-30 → xenc top-10 = 60.0% vs 58.3% pure BM25.
+        if getattr(self, "_cross_encoder_reranker", None) is not None:
+            effective_k = max(effective_k, top_k * 3)
         return effective_k
 
     def _retrieve_candidates(
@@ -315,6 +362,154 @@ class Retriever:
         """
         effective_k = self._compute_effective_k(top_k)
         engine = self._resolve_engine
+
+        # Entity primary: regex-based entity/bigram/unigram inverted index.
+        # Discriminative test (2026-04-02): 72.2% oracle match on LME,
+        # +3 over BM25_top10, 0 lost.
+        if self._resolve_entity_primary and query_text:
+            entity_inv = getattr(self, "_entity_inv_idx", None)
+            bigram_inv = getattr(self, "_bigram_inv_idx", None)
+            unigram_inv = getattr(self, "_unigram_inv_idx", None)
+            if entity_inv is not None:
+                from mabench.entity_index import entity_retrieve_scored
+                n_turns = len(engine.memory_store)
+                scored = entity_retrieve_scored(
+                    query_text,
+                    entity_inv, bigram_inv or {}, unigram_inv or {},
+                    n_turns, top_k=effective_k,
+                )
+                results = []
+                for doc_id, score in scored:
+                    if doc_id < len(engine.memory_store):
+                        entry = engine.memory_store[doc_id]
+                        results.append({
+                            "text": entry.text,
+                            "score": float(score),
+                            "index": doc_id,
+                        })
+                return results
+
+        # Structured store + entity prefilter: 3-way RRF of BM25 + entity + structured.
+        # The structured channel adds predicate-awareness on top of entity matching.
+        # When structured_store is set AND entity_prefilter + bm25_primary are active,
+        # this block runs a 3-channel RRF and returns.  Falls through to 2-way
+        # entity_prefilter if structured_store is None.
+        if (self._structured_store is not None
+                and self._resolve_entity_prefilter
+                and self._resolve_bm25_primary
+                and query_text):
+            entity_inv = getattr(self, "_entity_inv_idx", None)
+            bm25_idx = getattr(self, "_bm25_index", None)
+            if entity_inv is not None and bm25_idx is not None:
+                from collections import defaultdict
+                from mabench.entity_index import entity_retrieve_scored
+                from mabench.query_parser import parse_query as _parse_query
+                bigram_inv = getattr(self, "_bigram_inv_idx", None)
+                unigram_inv = getattr(self, "_unigram_inv_idx", None)
+                n_turns = len(engine.memory_store)
+                rrf_k = effective_k * 3
+
+                # Channel 1: BM25
+                bm25_hits = bm25_idx.query(query_text, top_k=rrf_k)
+                # Channel 2: entity_scored
+                entity_scored = entity_retrieve_scored(
+                    query_text, entity_inv, bigram_inv or {}, unigram_inv or {},
+                    n_turns, top_k=rrf_k,
+                )
+                # Channel 3: structured store via query_parser
+                pq = _parse_query(query_text)
+                struct_hits = self._structured_store.query(
+                    entity_hints=pq.entity_hints,
+                    predicate_hints=pq.predicate_hints,
+                    object_hints=pq.object_hints,
+                    top_k=rrf_k,
+                )
+
+                # 3-way RRF fusion (k=60 is standard)
+                rrf_scores: dict[int, float] = defaultdict(float)
+                for rank, (doc_id, _) in enumerate(bm25_hits):
+                    rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
+                for rank, (doc_id, _) in enumerate(entity_scored):
+                    rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
+                for rank, (turn_idx, _turn_text, _score) in enumerate(struct_hits):
+                    rrf_scores[turn_idx] += 1.0 / (60 + rank + 1)
+
+                fused = sorted(rrf_scores.items(), key=lambda x: -x[1])[:effective_k]
+                results = []
+                for doc_id, score in fused:
+                    if doc_id < len(engine.memory_store):
+                        entry = engine.memory_store[doc_id]
+                        results.append({
+                            "text": entry.text,
+                            "score": float(score),
+                            "index": doc_id,
+                        })
+                return results
+
+        # Entity prefilter: RRF fusion of BM25 + entity_scored.
+        # Disc test (2026-04-03): 60.0% hit@10 = ties xenc_bm25_rerank, 15x faster.
+        # Requires bm25_primary. Falls back to pure BM25 if no entity inv idx.
+        if self._resolve_entity_prefilter and self._resolve_bm25_primary and query_text:
+            entity_inv = getattr(self, "_entity_inv_idx", None)
+            bm25_idx = getattr(self, "_bm25_index", None)
+            if entity_inv is not None and bm25_idx is not None:
+                from collections import defaultdict
+                from mabench.entity_index import entity_retrieve_scored
+                bigram_inv = getattr(self, "_bigram_inv_idx", None)
+                unigram_inv = getattr(self, "_unigram_inv_idx", None)
+                n_turns = len(engine.memory_store)
+                # Get both channels at 3x effective_k for RRF input
+                rrf_k = effective_k * 3
+                entity_scored = entity_retrieve_scored(
+                    query_text, entity_inv, bigram_inv or {}, unigram_inv or {},
+                    n_turns, top_k=rrf_k,
+                )
+                bm25_hits = bm25_idx.query(query_text, top_k=rrf_k)
+                # RRF fusion (k=60 is standard)
+                rrf_scores: dict[int, float] = defaultdict(float)
+                for rank, (doc_id, _) in enumerate(bm25_hits):
+                    rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
+                for rank, (doc_id, _) in enumerate(entity_scored):
+                    rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
+                # 3rd RRF channel: event calendar keyword retrieval
+                if self._resolve_event_calendar_retrieval:
+                    cal = getattr(self, "_event_calendar", None)
+                    if cal:
+                        from mabench.event_calendar import event_calendar_retrieve
+                        cal_hits = event_calendar_retrieve(
+                            query_text, cal, top_k=rrf_k,
+                        )
+                        for rank, (doc_id, _) in enumerate(cal_hits):
+                            rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
+                fused = sorted(rrf_scores.items(), key=lambda x: -x[1])[:effective_k]
+                results = []
+                for doc_id, score in fused:
+                    if doc_id < len(engine.memory_store):
+                        entry = engine.memory_store[doc_id]
+                        results.append({
+                            "text": entry.text,
+                            "score": float(score),
+                            "index": doc_id,
+                        })
+                return results
+
+        # BM25 primary: use lexical retrieval as the main channel.
+        # Discriminative test (2026-04-02): 58.3% hit@10 vs 36.7% cosine
+        # on full LME fixture (1282 turns, 60 questions).
+        if self._resolve_bm25_primary:
+            bm25_idx = getattr(self, "_bm25_index", None)
+            if bm25_idx is not None:
+                bm25_hits = bm25_idx.query(query_text or "", top_k=effective_k)
+                results = []
+                for doc_id, score in bm25_hits:
+                    if doc_id < len(engine.memory_store):
+                        entry = engine.memory_store[doc_id]
+                        results.append({
+                            "text": entry.text,
+                            "score": float(score),
+                            "index": doc_id,
+                        })
+                return results
 
         if self._resolve_transfer:
             results = engine.query_transfer(
@@ -407,13 +602,18 @@ class Retriever:
           1. _embed_query      -- vectorize the query text
           2. _retrieve_candidates -- run the backend retrieval switch
           3. _apply_post_retrieval -- belief rerank + truncation
+          3b. BM25 rerank (optional) -- blend cosine + BM25 scores
           4. entity reranker (optional) -- via external EntityReranker callback
+          5. cross-encoder reranker (optional)
+          6. role weighting -- discount assistant/continuation turns
+          7. temporal proximity -- boost recency-relevant facts (no-op when no date in query)
         """
         q_emb = self._embed_query(query_text)
         results = self._retrieve_candidates(
             q_emb, self._resolve_retrieve_num, query_text=query_text,
         )
         results = self._apply_post_retrieval(results)
+        results = self._apply_bm25_rerank(results, query_text)
         if self._entity_reranker is not None:
             results = self._entity_reranker.rerank(
                 query_text, results, self._resolve_engine,
@@ -421,7 +621,110 @@ class Retriever:
         ce_reranker = getattr(self, "_cross_encoder_reranker", None)
         if ce_reranker is not None:
             results = ce_reranker.rerank(query_text, results)
+        results = self._apply_role_weighting(results)
+        results = self._apply_temporal_proximity(results, query_text)
         return results
+
+    def _apply_bm25_rerank(self, results: list[dict], query_text: str) -> list[dict]:
+        """Blend cosine scores with BM25 lexical scores and re-sort.
+
+        score = (1 - w) * cosine + w * bm25_normalized
+
+        Discriminative test (2026-04-02): 100% hit@10, avg rank 1.20.
+        Uses BM25 IDF statistics from the full index but TF from each
+        candidate's text, so it works on any cosine-retrieved candidate.
+        """
+        if not self._resolve_bm25_rerank:
+            return results
+        bm25_idx = getattr(self, "_bm25_index", None)
+        if bm25_idx is None:
+            return results
+        texts = [r["text"] for r in results]
+        bm25_scores = bm25_idx.score_texts(query_text, texts)
+        max_bm25 = max(bm25_scores) if bm25_scores and max(bm25_scores) > 0 else 1.0
+        w = self._resolve_bm25_rerank_weight
+        for r, bs in zip(results, bm25_scores):
+            r["score"] = (1 - w) * r["score"] + w * (bs / max_bm25)
+        results.sort(key=lambda r: -r["score"])
+        return results
+
+    def _apply_role_weighting(self, results: list[dict]) -> list[dict]:
+        """Multiply scores by role-based weights and re-sort.
+
+        Weights are configured in RetrievalConfig (role_weight_user,
+        role_weight_assistant, role_weight_continuation). When all
+        weights are 1.0, this is a no-op.
+        """
+        cfg = self._cfg if hasattr(self, "_cfg") else None
+        w_user = cfg.role_weight_user if cfg else 1.0
+        w_asst = cfg.role_weight_assistant if cfg else 1.0
+        w_cont = cfg.role_weight_continuation if cfg else 1.0
+        # Fast path: skip if all weights are 1.0
+        if w_user == 1.0 and w_asst == 1.0 and w_cont == 1.0:
+            return results
+
+        weight_map = {
+            "user": w_user,
+            "assistant": w_asst,
+            "continuation": w_cont,
+            "unknown": 1.0,
+        }
+        engine = self._resolve_engine
+        reweighted = []
+        for r in results:
+            idx = r.get("index")
+            role = "unknown"
+            if idx is not None and idx < len(engine.memory_store):
+                role = getattr(engine.memory_store[idx], "role", "unknown")
+            w = weight_map.get(role, 1.0)
+            adjusted = dict(r)
+            adjusted["score"] = r.get("score", 0.0) * w
+            reweighted.append(adjusted)
+        reweighted.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        return reweighted
+
+    def _apply_temporal_proximity(
+        self, results: list[dict], query_text: str
+    ) -> list[dict]:
+        """Multiply scores by temporal proximity to the query date and re-sort.
+
+        Parses a date from *query_text* using ``parse_query_date`` from
+        ``mabench.temporal``.  When no date is found (non-LME queries) or a
+        MemoryEntry has no ``session_time``, ``temporal_proximity`` returns
+        1.0 so this method is a no-op — neutral by design (like cooc_boost).
+
+        Args:
+            results: Retrieval results with at minimum ``{"index": int, "score": float}``.
+            query_text: Raw query string, potentially containing a date cue.
+
+        Returns:
+            Results reweighted by temporal proximity, sorted descending by score.
+        """
+        from mabench.temporal import parse_query_date, temporal_proximity
+
+        query_date = parse_query_date(query_text)
+        if query_date is None:
+            return results
+
+        alpha = (
+            self._cfg.temporal_alpha
+            if hasattr(self, "_cfg") and self._cfg is not None
+            else 0.01
+        )
+        engine = self._resolve_engine
+        reweighted = []
+        for r in results:
+            idx = r.get("index")
+            session_time = None
+            if idx is not None and idx < len(engine.memory_store):
+                entry = engine.memory_store[idx]
+                session_time = getattr(entry, "session_time", None)
+            w = temporal_proximity(session_time, query_date, alpha)
+            adjusted = dict(r)
+            adjusted["score"] = r.get("score", 0.0) * w
+            reweighted.append(adjusted)
+        reweighted.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        return reweighted
 
     def _apply_belief_rerank(self, results: list[dict]) -> list[dict]:
         """Rerank retrieval results using Bayesian belief scores.

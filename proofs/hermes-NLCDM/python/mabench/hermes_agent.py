@@ -111,6 +111,8 @@ class HermesMemoryAgent(EntityMixin, RebelKGMixin, RetrievalMixin, ConflictResol
         triadic_n: int = 1000,
         triadic_p: int = 10,
         triadic_expand_k: int = 5,
+        triadic_chain_hops: int = 1,
+        triadic_decay: float = 1.0,
         decompose_query: bool = False,
         decompose_max_hops: int = 3,
         decompose_coverage: bool = False,
@@ -164,6 +166,8 @@ class HermesMemoryAgent(EntityMixin, RebelKGMixin, RetrievalMixin, ConflictResol
         self.transfer_k = transfer_k
         self.triadic_retrieval = triadic_retrieval
         self._triadic_expand_k = triadic_expand_k
+        self._triadic_chain_hops = triadic_chain_hops
+        self._triadic_decay = triadic_decay
         self.decompose_query = decompose_query
         self.decompose_max_hops = decompose_max_hops
         self.decompose_coverage = decompose_coverage

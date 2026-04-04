@@ -90,6 +90,8 @@ class MemoryEntry:
     entity_residual: np.ndarray | None = None  # Entity-position hidden state (mid-layer). For entity-aware reranking.
     sigma_sq: np.ndarray | None = None  # Per-dimension Fisher variance (Eq. 14, arXiv 2603.14588v1). Computed at store time.
     event_time: object = None  # datetime | None — when the fact was TRUE in the world (temporal grounding).
+    role: str = "unknown"  # "user", "assistant", "continuation", "unknown" — conversation turn role for retrieval weighting.
+    session_time: object = None  # datetime | None — session timestamp (Chat Time from LME chunks).
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +421,8 @@ class CoupledEngine:
         fact_type: str = "general",
         entity: str | None = None,
         event_time: object = None,
+        role: str = "unknown",
+        session_time: object = None,
     ) -> int:
         """Add a new memory, optionally replacing contradictions.
 
@@ -529,6 +533,8 @@ class CoupledEngine:
             entity=entity,
             sigma_sq=_compute_sigma_sq(emb_normed),
             event_time=event_time,
+            role=role,
+            session_time=session_time,
         )
         self.memory_store.append(entry)
         self._invalidate_cache()
@@ -547,7 +553,11 @@ class CoupledEngine:
         self._session_indices.append(idx)
         return idx
 
-    def replace_entry(self, idx: int, text: str, embedding: np.ndarray, recency: float = 0.0) -> None:
+    def replace_entry(
+        self, idx: int, text: str, embedding: np.ndarray,
+        recency: float = 0.0, role: str | None = None,
+        session_time: object = None,
+    ) -> None:
         """Replace an existing memory entry in-place (for structural supersession).
 
         Updates text, embedding, recency, timestamps. Keeps existing importance/layer.
@@ -558,6 +568,10 @@ class CoupledEngine:
         entry.text = text
         entry.embedding = emb
         entry.recency = max(entry.recency, recency)
+        if role is not None:
+            entry.role = role
+        if session_time is not None:
+            entry.session_time = session_time
         now = time.time()
         entry.creation_time = now
         entry.last_access_time = now

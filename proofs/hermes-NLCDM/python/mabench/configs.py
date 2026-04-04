@@ -51,9 +51,36 @@ class RetrievalConfig:
     # fisher: Fisher-Rao weighted retrieval (arXiv 2603.14588v1, Eq. 14-16)
     fisher_scoring: bool = False       # replace cosine base score with Fisher-Rao distance
     fisher_temperature: float = 1.0    # temperature T > 0 (lower = more discriminative)
+    # bm25_primary: use BM25 as the primary retrieval channel (not cosine).
+    # Discriminative test (2026-04-02): 58.3% hit@10 vs 36.7% cosine on full LME fixture.
+    # BM25 alone beats all cosine-based variants by 15+ points on conversational data.
+    bm25_primary: bool = False
+    # bm25_rerank: blend cosine scores with BM25 scores on retrieval candidates
+    # Discriminative test (2026-04-02): 100% hit@10, avg rank 1.20, 0.17s — best overall
+    bm25_rerank: bool = False
+    bm25_rerank_weight: float = 0.5    # BM25 contribution (1-weight = cosine contribution)
+    # entity_primary: use regex-based entity/bigram/unigram inverted index as primary retrieval.
+    # Discriminative test (2026-04-02): 72.2% oracle match, +3 over BM25, 0 lost.
+    # Three-tier scoring: entity=5x, bigram=3x, unigram=IDF-weighted.
+    entity_primary: bool = False
+    # entity_prefilter: RRF fusion of BM25 + entity_scored.
+    # Disc test (2026-04-03): 60.0% hit@10 = ties xenc_bm25_rerank, 15x faster (0.86s vs 12.82s).
+    # Requires bm25_primary=True. Entity inv idx built during ingestion.
+    entity_prefilter: bool = False
+    # event_calendar_retrieval: add event calendar keyword overlap as 3rd RRF channel.
+    # Uses date+keyword index built during ingestion. Always-on when enabled (neutral when
+    # no calendar entries match). Requires entity_prefilter=True.
+    event_calendar_retrieval: bool = False
     # cross_encoder: ms-marco-MiniLM-L-6-v2 reranker (agentmemory ablation: -30.7 pp)
     cross_encoder: bool = False        # enable cross-encoder reranking after entity reranker
     cross_encoder_top_k: int = 10      # how many candidates to keep after reranking
+    # role_weights: retrieval score multipliers by conversation role
+    role_weight_user: float = 1.0
+    role_weight_assistant: float = 1.0
+    role_weight_continuation: float = 1.0
+    # temporal_alpha: decay rate for temporal proximity scoring (0=disabled, >0 enables)
+    # Also gates the temporal fast-lane in QueryEngine._query()
+    temporal_alpha: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -207,6 +234,25 @@ class LLMExtractionConfig:
     max_tokens: int = 512
     # Grounding: discard triples where S or O not in source text
     enable_grounding: bool = True
+
+
+@dataclass(frozen=True)
+class StructuredStoreConfig:
+    """Structured fact store retrieval settings.
+
+    Controls whether the StructuredFactStore is built during ingestion
+    and used as an RRF retrieval channel at query time.  When enabled,
+    SVO triples extracted during ingestion are indexed into inverted
+    dicts for O(1) entity and predicate lookup.  At query time, the
+    structured channel fuses with BM25 + entity_prefilter via 3-way RRF.
+    """
+
+    # Master switch: enable structured fact store ingestion + retrieval.
+    enabled: bool = False
+
+    # Path to pre-extracted SVO cache JSON (skips live extraction).
+    # If None, only live-extracted triples populate the store.
+    svo_cache_path: str | None = None
 
 
 # ---------------------------------------------------------------------------

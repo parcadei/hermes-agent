@@ -80,6 +80,17 @@ class FactStore:
         self._relik_extractor = relik_extractor
         self._cooc_kg = cooc_kg
         self._store_count = 0
+        self._last_session_time = None  # Inherited session_time for chunks without Chat Time
+
+        # Entity inverted indexes for entity-keyed retrieval (regex-based,
+        # built incrementally during ingestion).  Maps token -> set of
+        # memory_store indices.
+        self._entity_inv_idx: dict[str, set[int]] = {}
+        self._bigram_inv_idx: dict[str, set[int]] = {}
+        self._unigram_inv_idx: dict[str, set[int]] = {}
+
+        # Event calendar for temporal question resolution (list of event dicts)
+        self._event_calendar: list[dict] = []
 
     # -- Attribute resolution: standalone vs mixin fallback ---------------
 
@@ -187,13 +198,26 @@ class FactStore:
         if self._cooc_kg is not None:
             self._cooc_kg.compute_npmi()
 
-    def _store(self, text: str) -> str:
+    def _store(self, text: str, role: str = "unknown") -> str:
         """Store text through ingestion pipeline + V1 + V2 layers.
 
         Orchestrates: segment -> embed -> extract triples ->
         per-fact (supersession check, store, index updates) ->
         post-chunk (FAISS rebuild, synonyms, entity graph, belief, dream).
+
+        Always-on temporal: parses Chat Time from the raw text and threads
+        session_time through to every stored MemoryEntry.  Chunks without
+        Chat Time inherit from the most recent previous chunk.
         """
+        from mabench.temporal import parse_chat_time
+
+        # Always-on temporal: parse Chat Time from raw text.
+        session_time = parse_chat_time(text)
+        if session_time is not None:
+            self._last_session_time = session_time
+        else:
+            session_time = getattr(self, "_last_session_time", None)
+
         prep = self._store_prepare(text)
         if not prep.fact_texts:
             return "Memorized"
@@ -201,7 +225,10 @@ class FactStore:
         for fi, (fact, emb, entity) in enumerate(
             zip(prep.result.facts, prep.embeddings, prep.primary_entities)
         ):
-            self._store_single_fact(fi, fact, emb, entity, prep)
+            self._store_single_fact(
+                fi, fact, emb, entity, prep,
+                role=role, session_time=session_time,
+            )
 
         self._store_post_chunk(prep.result)
         return "Memorized"
@@ -285,6 +312,8 @@ class FactStore:
         emb: np.ndarray,
         entity: str | None,
         prep: _PrepareResult,
+        role: str = "unknown",
+        session_time: object = None,
     ) -> None:
         """Process one fact: supersession check, store, index, count."""
         # Merge GLiNER2 triples with spaCy triples (union, deduped).
@@ -308,9 +337,12 @@ class FactStore:
         if superseded_idx is not None:
             ms_idx = self._store_replace_entry(
                 fact, emb, superseded_idx, superseded_text,
+                role=role, session_time=session_time,
             )
         else:
-            ms_idx = self._store_new_entry(fact, emb, entity)
+            ms_idx = self._store_new_entry(
+                fact, emb, entity, role=role, session_time=session_time,
+            )
 
         # Entity reranker annotation (isolated entity residual)
         if self._entity_reranker is not None:
@@ -374,6 +406,8 @@ class FactStore:
         emb: np.ndarray,
         superseded_idx: int,
         superseded_text: str,
+        role: str = "unknown",
+        session_time: object = None,
     ) -> int:
         """Replace a superseded entry in-place.
 
@@ -393,7 +427,9 @@ class FactStore:
             "timestamp": time.time(),
         })
         engine.replace_entry(
-            superseded_idx, fact.text, emb, recency=float(self._store_count)
+            superseded_idx, fact.text, emb,
+            recency=float(self._store_count), role=role,
+            session_time=session_time,
         )
         # Attach event_time to the replaced entry.
         engine.memory_store[superseded_idx].event_time = fact.event_time
@@ -419,6 +455,8 @@ class FactStore:
         fact: SegmentedFact,
         emb: np.ndarray,
         entity: str | None,
+        role: str = "unknown",
+        session_time: object = None,
     ) -> int:
         """Store a new fact (no supersession).
 
@@ -433,6 +471,8 @@ class FactStore:
             recency=float(self._store_count),
             entity=entity,
             event_time=fact.event_time,
+            role=role,
+            session_time=session_time,
         )
         self._resolve_text_to_store_idx[fact.text] = ms_idx
         return ms_idx
@@ -445,7 +485,7 @@ class FactStore:
         rebel_triples_batch: list[list[dict]] | None,
         cooc_edges_batch: list[list[tuple[str, str, str]]] | None = None,
     ) -> None:
-        """Update BM25, triadic, REBEL KG, knowledge graph, and belief indices.
+        """Update BM25, triadic, REBEL KG, knowledge graph, entity, and belief indices.
 
         Co-occurrence edges (from fast-path bi-encoder NER) are routed to
         KnowledgeGraph and TriadicMemory. These consumers don't need
@@ -455,6 +495,32 @@ class FactStore:
         # BM25.
         if getattr(self, "_bm25_index", None) is not None:
             self._bm25_index.add(ms_idx, fact.text)
+
+        # Entity inverted indexes (regex-based, always-on, ~1ms per fact).
+        from mabench.entity_index import (
+            extract_entities, extract_bigrams, extract_content_unigrams,
+        )
+        for ent in extract_entities(fact.text):
+            self._entity_inv_idx.setdefault(ent, set()).add(ms_idx)
+        for bg in extract_bigrams(fact.text):
+            self._bigram_inv_idx.setdefault(bg, set()).add(ms_idx)
+        for ug in extract_content_unigrams(fact.text):
+            self._unigram_inv_idx.setdefault(ug, set()).add(ms_idx)
+
+        # Event calendar (temporal resolution — parse date + keywords from turn).
+        from mabench.event_calendar import parse_turn_date, extract_event_keywords, extract_inline_dates
+        turn_date = parse_turn_date(fact.text)
+        if turn_date is not None:
+            keywords = extract_event_keywords(fact.text)
+            inline_dates = extract_inline_dates(fact.text, turn_date)
+            event = {
+                "turn_idx": ms_idx,
+                "date": turn_date,
+                "keywords": keywords,
+                "inline_dates": inline_dates,
+                "text": fact.text,
+            }
+            self._event_calendar.append(event)
 
         # Determine which triples feed triadic and KG.
         # Priority: co-occurrence edges (fast path) > spaCy/GLiNER2 triples (fallback).

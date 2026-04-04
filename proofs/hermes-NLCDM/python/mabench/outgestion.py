@@ -22,10 +22,117 @@ Migration notes for callers:
 
 from __future__ import annotations
 
+import re
 import time
 from collections import defaultdict
 
 from mabench.configs import LLMConfig
+
+
+# ------------------------------------------------------------------
+# Question-type classifier (pure regex/keyword — no LLM calls)
+# ------------------------------------------------------------------
+
+# Pre-compiled patterns for classify_question_type().
+# Order matters: more specific patterns checked first.
+_ORDERING_RE = re.compile(
+    r"which\b.*\bfirst\b"
+    r"|what\s+order\b"
+    r"|\bhappened\s+(first|last)\b"
+    r"|\bfirst\b.*\bor\b.*\blast\b",
+    re.IGNORECASE,
+)
+_TEMPORAL_RE = re.compile(
+    r"\bwhen\b"
+    r"|\bhow\s+long\b"
+    r"|\bago\b"
+    r"|\bbefore\b.*\bafter\b|\bafter\b.*\bbefore\b"
+    r"|\b\d{1,2}\s+(january|february|march|april|may|june"
+    r"|july|august|september|october|november|december)\b"
+    r"|\b(january|february|march|april|may|june"
+    r"|july|august|september|october|november|december)\s+\d{1,2}"
+    r"|\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b",
+    re.IGNORECASE,
+)
+_KNOWLEDGE_UPDATE_RE = re.compile(
+    r"\bcurrently\b"
+    r"|\bright\s+now\b"
+    r"|\b(latest|most\s+recent)\b",
+    re.IGNORECASE,
+)
+_AGGREGATION_RE = re.compile(
+    r"\bhow\s+many\b"
+    r"|\bin\s+total\b"
+    r"|\bhow\s+many\s+total\b"
+    r"|\ball\s+of\b"
+    r"|\bboth\s+of\b"
+    r"|\blist\s+all\b",
+    re.IGNORECASE,
+)
+
+
+def classify_question_type(question: str) -> str:
+    """Classify a question into one of the dynamic-prompting types.
+
+    Returns one of: ``"aggregation"``, ``"temporal"``, ``"knowledge-update"``,
+    ``"ordering"``, ``"factual"`` (default fallback).
+
+    Priority order (most specific first):
+    1. ordering  — "which...first", "what order", "happened first/last"
+    2. temporal  — "when", "how long", "ago", date patterns
+       (note: "how many ... ago" triggers temporal via 'ago', not aggregation)
+    3. knowledge-update — "currently", "right now", "latest", "most recent"
+    4. aggregation — "how many", "in total", "all of", "both of", "list all"
+    5. factual   — default
+    """
+    if not question:
+        return "factual"
+    # Ordering checked first (more specific than temporal)
+    if _ORDERING_RE.search(question):
+        return "ordering"
+    # Temporal checked before aggregation so "how many weeks ago" is temporal
+    if _TEMPORAL_RE.search(question):
+        return "temporal"
+    if _KNOWLEDGE_UPDATE_RE.search(question):
+        return "knowledge-update"
+    if _AGGREGATION_RE.search(question):
+        return "aggregation"
+    return "factual"
+
+
+# ------------------------------------------------------------------
+# Per-type prompt templates for dynamic prompting
+# ------------------------------------------------------------------
+
+DYNAMIC_PROMPTS: dict[str, str] = {
+    "aggregation": (
+        "You are a helpful assistant answering from a knowledge pool. "
+        "The user is asking a counting or aggregation question. "
+        "Carefully scan ALL facts in the knowledge pool and count/sum the relevant items. "
+        "Give ONLY the final number or short list. Be precise."
+    ),
+    "temporal": (
+        "You are a helpful assistant answering from a knowledge pool. "
+        "The user is asking about timing or temporal ordering. "
+        "Use dates and timestamps in the knowledge pool to compute your answer. "
+        "Give a very concise answer."
+    ),
+    "knowledge-update": (
+        "You are a helpful assistant answering from a knowledge pool. "
+        "The user is asking about current state. If multiple values exist for the same thing, "
+        "use the MOST RECENT one. Give a very concise answer."
+    ),
+    "ordering": (
+        "You are a helpful assistant answering from a knowledge pool. "
+        "The user is asking about the order of events. "
+        "Use dates and context clues to determine chronological order. "
+        "Give a very concise answer."
+    ),
+    "factual": (
+        "You are a helpful assistant that answers questions from a "
+        "knowledge pool. Give a very concise answer."
+    ),
+}
 
 
 class Outgester:
@@ -46,6 +153,7 @@ class Outgester:
         temporal_context: bool = False,
         contradiction_context: bool = False,
         contradiction_sim_threshold: float = 0.85,
+        dynamic_prompting: bool = False,
     ) -> None:
         # _cfg: LLMConfig(model="gpt-4o-mini", temperature=0.0, max_gen_tokens=64)
         self._cfg = llm_config
@@ -55,6 +163,7 @@ class Outgester:
         self._temporal_context = temporal_context
         self._contradiction_context = contradiction_context
         self._contradiction_sim_threshold = contradiction_sim_threshold
+        self._dynamic_prompting = dynamic_prompting
 
     # ------------------------------------------------------------------
     # Attribute resolution: new _cfg-based or old self.* fallback
@@ -108,6 +217,13 @@ class Outgester:
         if hasattr(self, "_contradiction_sim_threshold"):
             return self._contradiction_sim_threshold
         return getattr(self, "contradiction_sim_threshold", 0.85)
+
+    @property
+    def _resolve_dynamic_prompting(self) -> bool:
+        """Dynamic prompting flag — from _dynamic_prompting or host class."""
+        if hasattr(self, "_dynamic_prompting"):
+            return self._dynamic_prompting
+        return getattr(self, "dynamic_prompting", False)
 
     @property
     def _resolve_client(self):
@@ -255,14 +371,21 @@ class Outgester:
         """Call LLM to generate an answer from retrieved context."""
         self._ensure_client()
 
-        system_msg = (
-            "You are a helpful assistant that answers questions from a knowledge pool. Give a very concise answer."
-        )
+        if self._resolve_dynamic_prompting:
+            qtype = classify_question_type(question)
+            system_msg = DYNAMIC_PROMPTS[qtype]
+        else:
+            system_msg = (
+                "You are a helpful assistant that answers questions from a "
+                "knowledge pool. Give a very concise answer."
+            )
+        context_label = "Knowledge Pool"
+
         if extra_system_instructions:
             system_msg = system_msg + " " + extra_system_instructions
         # The MABench query already contains full instructions about serial
-        # numbers and recency. Prepend retrieved memories as the knowledge pool.
-        user_msg = f"[Knowledge Pool]\n{context}\n\n{question}\nAnswer:"
+        # numbers and recency. Prepend retrieved memories as context.
+        user_msg = f"[{context_label}]\n{context}\n\n{question}\nAnswer:"
 
         start = time.time()
         response = self._resolve_client.chat.completions.create(

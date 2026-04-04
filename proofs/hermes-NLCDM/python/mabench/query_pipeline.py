@@ -170,6 +170,14 @@ class QueryPipeline:
         return getattr(self, "_triadic_expand_k", 5)
 
     @property
+    def _resolve_triadic_chain_hops(self) -> int:
+        return getattr(self, "_triadic_chain_hops", 1)
+
+    @property
+    def _resolve_triadic_decay(self) -> float:
+        return getattr(self, "_triadic_decay", 1.0)
+
+    @property
     def _resolve_chain_cache(self):
         return getattr(self, "_chain_cache", None)
 
@@ -269,18 +277,7 @@ class QueryPipeline:
                 bare_question,
             )
         else:
-            # Single-hop: try KG hop directly on the bare question
-            kg_hop = self._kg_hop_fn or getattr(self, "_resolve_triple_index_kg_hop", None)
-            kg_answer = kg_hop(bare_question) if kg_hop else None
-            if kg_answer is not None:
-                hop_state["final_kg_answer"] = kg_answer
-                hop_state["evidence_chain"] = [
-                    {"q": bare_question, "a": kg_answer,
-                     "evidence": [f"[KG-HOP: {kg_answer}]"]},
-                ]
-                hop_state["_all_v2_results"] = []
-                return [], [], hop_state
-
+            # Single-hop: skip KG hop (too aggressive, causes false matches)
             v2_results = self._resolve_retrieve_v2(bare_question)
             v2_texts = [r["text"] for r in v2_results]
             sq_chunks_raw = []
@@ -477,7 +474,10 @@ class QueryPipeline:
         # Triadic expansion
         if self._resolve_triadic is not None and v2_texts:
             triadic_texts = self._resolve_triadic.expand(
-                v2_texts, top_k=self._resolve_triadic_expand_k,
+                v2_texts,
+                top_k=self._resolve_triadic_expand_k,
+                max_hops=self._resolve_triadic_chain_hops,
+                decay=self._resolve_triadic_decay,
             )
             for text in triadic_texts:
                 key = text.strip()[:200]
@@ -543,7 +543,7 @@ class QueryPipeline:
     ) -> dict:
         """Format outgestion, generate LLM answer, store chain cache.
 
-        Handles KG short-circuit if final_kg_answer is set.
+        Handles KG short-circuit and temporal short-circuit if applicable.
         """
         # KG short-circuit
         final_kg_answer = hop_state.get("final_kg_answer")
@@ -573,10 +573,73 @@ class QueryPipeline:
                 },
             }
 
+        # Temporal short-circuit DISABLED: 40% accuracy on full eval (10/25 correct).
+        # Confidently returns wrong answers, bypassing LLM. Net negative.
+        event_calendar = None  # getattr(self, "_event_calendar", None)
+        if event_calendar:
+            from mabench.event_calendar import (
+                classify_temporal_question, resolve_temporal_question,
+                parse_query_date as parse_temporal_query_date,
+            )
+            q_text = bare_question
+            q_type = classify_temporal_question(q_text)
+            if q_type != "unknown":
+                q_date = parse_temporal_query_date(question)
+                temporal_answer = resolve_temporal_question(
+                    q_text, event_calendar, q_date,
+                )
+                if temporal_answer is not None:
+                    qt = time.time() - query_start
+                    return {
+                        "output": temporal_answer,
+                        "input_len": 0,
+                        "output_len": 0,
+                        "memory_construction_time": qt,
+                        "query_time_len": qt,
+                        "trace": {
+                            "subqueries": hop_state.get("subqueries"),
+                            "answers": hop_state.get("answers"),
+                            "evidence_chain": hop_state.get("evidence_chain"),
+                            "final_kg_answer": None,
+                            "temporal_answer": temporal_answer,
+                            "temporal_q_type": q_type,
+                            "final_context": None,
+                            "final_chunks": [],
+                            "outgestion_instructions": None,
+                            "llm_response": temporal_answer,
+                        },
+                    }
+
         final_chunks = merged_chunks[: self._resolve_retrieve_num]
         memory_context, outgestion_instructions = self._resolve_format_outgestion(
             final_chunks, metadata_by_key,
         )
+
+        # Always-on temporal enrichment (neutral for non-temporal queries)
+        # Gated on temporal_alpha > 0 so --temporal_alpha 0 disables everything temporal
+        _temporal_alpha = getattr(getattr(self, '_retrieval', None), '_cfg', None)
+        _temporal_alpha = getattr(_temporal_alpha, 'temporal_alpha', 0.01) if _temporal_alpha else 0.01
+        from mabench.temporal import parse_query_date, enrich_with_temporal, format_temporal_context
+        query_date = parse_query_date(question) if _temporal_alpha > 0 else None
+        if query_date is not None:
+            engine = self._resolve_engine
+            text_to_idx = getattr(engine, '_text_to_store_idx', {})
+            facts_for_enrichment = []
+            for chunk_text in final_chunks:
+                idx = text_to_idx.get(chunk_text)
+                session_time = None
+                if idx is not None and idx < len(engine.memory_store):
+                    session_time = getattr(engine.memory_store[idx], 'session_time', None)
+                facts_for_enrichment.append({"text": chunk_text, "session_time": session_time})
+            enriched = enrich_with_temporal(facts_for_enrichment, query_date)
+            temporal_ctx = format_temporal_context(enriched)
+            memory_context = temporal_ctx
+            outgestion_instructions = (
+                "Temporal context for each fact is shown in brackets [date, N days before query]. "
+                "Use pre-computed time differences to answer temporal questions accurately. "
+                + outgestion_instructions
+            )
+
         memory_time = time.time() - query_start
 
         answer, input_tokens, output_tokens, gen_time = self._resolve_generate_answer(

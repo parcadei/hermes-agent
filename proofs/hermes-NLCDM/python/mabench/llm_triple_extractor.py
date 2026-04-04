@@ -276,12 +276,21 @@ _MULTI_WS = re.compile(r"\s{2,}")
 EntityRegistry = dict[str, list[str]]
 
 
-def _format_entity_registry(registry: EntityRegistry) -> str:
-    """Format the entity registry as context for the extraction prompt."""
+def _format_entity_registry(registry: EntityRegistry, *, max_entries: int = 50) -> str:
+    """Format the entity registry as context for the extraction prompt.
+
+    Only the *max_entries* most recent entities are included to keep the
+    prompt within the model's context window.  The full registry is still
+    used post-hoc for canonicalization and grounding.
+    """
     if not registry:
         return ""
+    # Take the last `max_entries` items (insertion-order = discovery order).
+    items = list(registry.items())
+    if len(items) > max_entries:
+        items = items[-max_entries:]
     lines = ["Known entities from prior conversation:\n"]
-    for canonical, aliases in registry.items():
+    for canonical, aliases in items:
         if aliases:
             alias_str = ", ".join(f'"{a}"' for a in aliases)
             lines.append(f'- {canonical} (also known as: {alias_str})')
@@ -564,33 +573,43 @@ class LLMTripleExtractor:
         else:
             prompt = EXTRACTION_PROMPT.format(text=text)
         resp_format = RESPONSE_FORMAT_WITH_ALIASES if use_aliases else RESPONSE_FORMAT
-        try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self._temperature,
-                max_tokens=1024 if mode == "conversation" else self._max_tokens,
-                seed=42,
-                extra_body={
-                    "chat_template_kwargs": {"enable_thinking": False},
-                },
-                response_format=resp_format,
-            )
-            content = response.choices[0].message.content or ""
-            # Strip thinking tags if model ignores enable_thinking=False
-            if "<think>" in content:
-                idx = content.rfind("</think>")
-                if idx >= 0:
-                    content = content[idx + len("</think>"):].strip()
-            # Find JSON object in content (may have non-JSON prefix/suffix)
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                content = content[start:end]
-            return json.loads(content)
-        except Exception:
-            _log.warning("LLM extraction failed for text: %s...", text[:80], exc_info=True)
-            return None
+        max_toks = 2048 if mode == "conversation" else self._max_tokens
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                response = self._client.chat.completions.create(
+                    model=self._model,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=self._temperature,
+                    max_tokens=max_toks,
+                    seed=42 + attempt,
+                    extra_body={
+                        "chat_template_kwargs": {"enable_thinking": False},
+                    },
+                    response_format=resp_format,
+                )
+                content = response.choices[0].message.content or ""
+                # Strip thinking tags if model ignores enable_thinking=False
+                if "<think>" in content:
+                    idx = content.rfind("</think>")
+                    if idx >= 0:
+                        content = content[idx + len("</think>"):].strip()
+                # Find JSON object in content (may have non-JSON prefix/suffix)
+                start = content.find("{")
+                end = content.rfind("}") + 1
+                if start >= 0 and end > start:
+                    content = content[start:end]
+                return json.loads(content)
+            except json.JSONDecodeError as e:
+                last_exc = e
+                if attempt == 0:
+                    _log.debug("JSON parse failed (attempt 1), retrying: %s...", text[:80])
+                    continue
+            except Exception:
+                _log.warning("LLM extraction failed for text: %s...", text[:80], exc_info=True)
+                return None
+        _log.warning("LLM extraction failed after retry for text: %s... — %s", text[:80], last_exc)
+        return None
 
     def _canonicalize(self, entity: str) -> str:
         """Resolve entity to canonical name via registry, or return as-is."""

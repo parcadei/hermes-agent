@@ -226,6 +226,14 @@ class QueryEngine:
     def _resolve_triadic_expand_k(self) -> int:
         return getattr(self, "_triadic_expand_k", 5)
 
+    @property
+    def _resolve_triadic_chain_hops(self) -> int:
+        return getattr(self, "_triadic_chain_hops", 1)
+
+    @property
+    def _resolve_triadic_decay(self) -> float:
+        return getattr(self, "_triadic_decay", 1.0)
+
     # ------------------------------------------------------------------
     # Cross-module method resolution
     # ------------------------------------------------------------------
@@ -1006,15 +1014,18 @@ class QueryEngine:
         bare_question = self._extract_question(question)
 
         # Phase 0: temporal fast-lane (deterministic, no LLM)
-        temporal_intent = self._detect_temporal_intent(bare_question)
-        if temporal_intent:
-            temporal_result = self._resolve_temporal_query(
-                bare_question, temporal_intent,
-            )
-            if temporal_result is not None:
-                temporal_result["memory_construction_time"] = time.time() - query_start
-                temporal_result["query_time_len"] = time.time() - query_start
-                return temporal_result
+        # Gated on temporal_alpha > 0 so --temporal_alpha 0 disables it.
+        _t_alpha = getattr(self._retrieval_cfg, 'temporal_alpha', 0) if self._retrieval_cfg else 0
+        if _t_alpha > 0:
+            temporal_intent = self._detect_temporal_intent(bare_question)
+            if temporal_intent:
+                temporal_result = self._resolve_temporal_query(
+                    bare_question, temporal_intent,
+                )
+                if temporal_result is not None:
+                    temporal_result["memory_construction_time"] = time.time() - query_start
+                    temporal_result["query_time_len"] = time.time() - query_start
+                    return temporal_result
 
         # Phase 1: setup + chain cache check
         cached_result = self._query_setup(bare_question, query_start)
@@ -1258,7 +1269,12 @@ class QueryEngine:
             # Triadic expansion
             triadic = getattr(self, "_triadic", None)
             if triadic is not None and texts:
-                for t in triadic.expand(texts, top_k=self._resolve_triadic_expand_k):
+                for t in triadic.expand(
+                    texts,
+                    top_k=self._resolve_triadic_expand_k,
+                    max_hops=self._resolve_triadic_chain_hops,
+                    decay=self._resolve_triadic_decay,
+                ):
                     tkey = t.strip()[:200]
                     if tkey not in sq_seen:
                         sq_seen.add(tkey)

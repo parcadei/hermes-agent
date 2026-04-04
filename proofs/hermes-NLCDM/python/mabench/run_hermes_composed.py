@@ -41,7 +41,7 @@ from mabench.agent import HermesAgent
 from mabench.configs import (
     RetrievalConfig, CRConfig, DecomposeConfig, StoreConfig,
     LLMConfig, BeliefConfig, EntityConfig, DedupConfig, KGConfig,
-    GLiNER2Config, CoocExtractionConfig, RelikConfig,
+    GLiNER2Config, CoocExtractionConfig, RelikConfig, StructuredStoreConfig,
 )
 from mabench.eval_cache import cache_dir, list_caches
 from utils.eval_other_utils import metrics_summarization
@@ -110,6 +110,9 @@ def _save_context(agent: HermesAgent, path: Path, context_idx: int) -> None:
     cooc_kg = agent.cooc_kg
     if cooc_kg is not None:
         state["cooc_kg"] = cooc_kg
+    struct_store = getattr(agent, "_structured_store", None)
+    if struct_store is not None:
+        state["structured_store"] = struct_store
 
     state_file = ctx_dir / "state.pkl"
     with open(state_file, "wb") as f:
@@ -181,6 +184,51 @@ def _load_context(agent: HermesAgent, path: Path, context_idx: int) -> bool:
         agent.query_engine._bm25_index = fresh_bm25
         agent.pipeline._bm25_index = fresh_bm25
 
+    # Entity inverted indexes: rebuild from memory_store (like BM25)
+    from mabench.entity_index import (
+        extract_entities, extract_bigrams, extract_content_unigrams,
+    )
+    entity_inv: dict[str, set[int]] = {}
+    bigram_inv: dict[str, set[int]] = {}
+    unigram_inv: dict[str, set[int]] = {}
+    for i, m in enumerate(agent.engine.memory_store):
+        for ent in extract_entities(m.text):
+            entity_inv.setdefault(ent, set()).add(i)
+        for bg in extract_bigrams(m.text):
+            bigram_inv.setdefault(bg, set()).add(i)
+        for ug in extract_content_unigrams(m.text):
+            unigram_inv.setdefault(ug, set()).add(i)
+    agent.store._entity_inv_idx = entity_inv
+    agent.store._bigram_inv_idx = bigram_inv
+    agent.store._unigram_inv_idx = unigram_inv
+    # Thread to retriever and pipeline for query-time access
+    agent.retriever._entity_inv_idx = entity_inv
+    agent.retriever._bigram_inv_idx = bigram_inv
+    agent.retriever._unigram_inv_idx = unigram_inv
+    agent.pipeline._entity_inv_idx = entity_inv
+    agent.pipeline._bigram_inv_idx = bigram_inv
+    agent.pipeline._unigram_inv_idx = unigram_inv
+
+    # Event calendar: rebuild from memory_store
+    from mabench.event_calendar import (
+        parse_turn_date, extract_event_keywords, extract_inline_dates,
+    )
+    event_calendar: list[dict] = []
+    for i, m in enumerate(agent.engine.memory_store):
+        turn_date = parse_turn_date(m.text)
+        if turn_date is not None:
+            keywords = extract_event_keywords(m.text)
+            inline_dates = extract_inline_dates(m.text, turn_date)
+            event_calendar.append({
+                "turn_idx": i,
+                "date": turn_date,
+                "keywords": keywords,
+                "inline_dates": inline_dates,
+                "text": m.text,
+            })
+    agent.store._event_calendar = event_calendar
+    agent.pipeline._event_calendar = event_calendar
+
     # Chain cache
     if agent.store._chain_cache is not None and "chain_cache" in state:
         agent.store._chain_cache = state["chain_cache"]
@@ -214,6 +262,11 @@ def _load_context(agent: HermesAgent, path: Path, context_idx: int) -> bool:
     if agent.store._relik_extractor is not None and "relik_extractor" in state:
         agent.store._relik_extractor = state["relik_extractor"]
         agent.relik_extractor = state["relik_extractor"]
+
+    # Structured fact store (pickle-safe: pure Python dicts + lists)
+    if "structured_store" in state and getattr(agent, "_structured_store", None) is not None:
+        agent._structured_store = state["structured_store"]
+        agent.retriever._structured_store = state["structured_store"]
 
     # CoocKG (pickle-safe: pure Python dicts)
     if "cooc_kg" in state and agent.store._cooc_kg is not None:
@@ -252,7 +305,13 @@ def parse_args():
     parser.add_argument("--contradiction_threshold", type=float, default=0.95)
     parser.add_argument("--dream_interval", type=int, default=0)
     parser.add_argument("--max_test_queries", type=int, default=0)
+    parser.add_argument("--context_idx", type=int, default=None,
+                        help="Run only this context index (0-based). For parallel eval.")
     parser.add_argument("--chunk_size", type=int, default=0)
+    parser.add_argument("--max_gen_tokens", type=int, default=0,
+                        help="Max LLM generation tokens (0=auto: 64 for FC, 128 for LME/EventQA)")
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="LLM generation temperature (0.0=deterministic, framework agent uses 0.7)")
     parser.add_argument("--recency_alpha", type=float, default=0.1)
 
     # Dream params
@@ -274,6 +333,10 @@ def parse_args():
     parser.add_argument("--ppr_weight", type=float, default=0.3)
     parser.add_argument("--ppr_damping", type=float, default=0.85)
     parser.add_argument("--triadic", action="store_true")
+    parser.add_argument("--triadic_chain_hops", type=int, default=1,
+                        help="Triadic SA chain-hop depth (1=single-hop, 3=recommended)")
+    parser.add_argument("--triadic_decay", type=float, default=1.0,
+                        help="Triadic SA decay factor per hop (0<d<=1, 1.0=no decay)")
     parser.add_argument("--bm25_hops", action="store_true")
     parser.add_argument("--chain_cache", action="store_true")
     parser.add_argument("--rebel_kg", action="store_true")
@@ -303,13 +366,38 @@ def parse_args():
     parser.add_argument("--cross_encoder", action="store_true",
                         help="Enable cross-encoder reranking (ms-marco-MiniLM-L-6-v2, 22M params)")
     parser.add_argument("--cross_encoder_top_k", type=int, default=10,
-                        help="Number of candidates to keep after cross-encoder reranking (default 10)")
+                        help="Number of top PPR nodes to retrieve")
+
+    # BM25 primary
+    parser.add_argument("--bm25_primary", action="store_true",
+                        help="Use BM25 as primary retrieval channel (58.3%% vs 36.7%% cosine on LME)")
+    # BM25 rerank
+    parser.add_argument("--bm25_rerank", action="store_true",
+                        help="Blend cosine+BM25 scores on candidates (100%% hit@10 in disc test)")
+    parser.add_argument("--bm25_rerank_weight", type=float, default=0.5,
+                        help="BM25 contribution in rerank blend (default 0.5)")
+
+    # Entity primary retrieval (regex-based inverted index)
+    parser.add_argument("--entity_primary", action="store_true",
+                        help="Use entity/bigram/unigram inverted index as primary retrieval (72.2%% oracle match)")
+    parser.add_argument("--entity_prefilter", action="store_true",
+                        help="RRF fusion of BM25 + entity_scored (60%% hit@10, ties xenc 15x faster). Requires --bm25_primary.")
 
     # Fisher-Rao scoring
     parser.add_argument("--fisher_scoring", action="store_true",
                         help="Replace cosine base similarity with Fisher-Rao inverse-variance weighted distance (arXiv:2603.14588v1)")
     parser.add_argument("--fisher_temperature", type=float, default=1.0,
                         help="Fisher-Rao temperature (lower = more discriminative, default 1.0)")
+
+    # Role weighting (conversation mode)
+    parser.add_argument("--role_weight_assistant", type=float, default=1.0,
+                        help="Retrieval score multiplier for assistant-turn facts (default 1.0)")
+    parser.add_argument("--role_weight_continuation", type=float, default=1.0,
+                        help="Retrieval score multiplier for continuation-turn facts (default 1.0)")
+
+    # Temporal proximity scoring
+    parser.add_argument("--temporal_alpha", type=float, default=0.0,
+                        help="Temporal proximity decay rate (0=disabled, >0 enables temporal scoring + fast-lane)")
 
     # Hyperedge intersection
     parser.add_argument("--hyperedge", action="store_true",
@@ -362,6 +450,31 @@ def parse_args():
     parser.add_argument("--llm_extraction_mode", type=str, default="factual",
                         choices=["factual", "conversation"],
                         help="Extraction mode: factual (template sentences) or conversation (alias-aware)")
+    parser.add_argument("--coref_backend", type=str, default="fastcoref",
+                        choices=["fastcoref", "maverick"],
+                        help="Coreference resolution backend")
+
+    # LFM SVO extraction (local LM Studio for LME entity index enrichment)
+    parser.add_argument("--lfm_extraction_url", type=str, default=None,
+                        help="LM Studio URL for LFM SVO extraction (e.g. http://127.0.0.1:1234/v1)")
+    parser.add_argument("--svo_cache_path", type=str, default=None,
+                        help="Path to pre-extracted SVO cache JSON (skips live LFM extraction)")
+
+    # Structured fact store (SVO triple index as RRF retrieval channel)
+    parser.add_argument("--structured_store", action="store_true",
+                        help="Enable structured fact store (SVO triple index as 3-way RRF retrieval channel)")
+
+    # Dynamic prompting (per-question-type LLM system prompts)
+    parser.add_argument("--dynamic_prompting", action="store_true",
+                        help="Use question-type-specific LLM system prompts (aggregation/temporal/update/ordering)")
+
+    # Raw chunk mode: skip conversation parsing
+    parser.add_argument("--raw_chunks", action="store_true",
+                        help="Store whole chunks without conversation parsing (matches framework agent architecture)")
+
+    # Event calendar retrieval: keyword-based retrieval as 3rd RRF channel
+    parser.add_argument("--event_calendar_retrieval", action="store_true",
+                        help="Add event calendar keyword overlap as 3rd RRF channel (requires --entity_prefilter)")
 
     # Cache
     parser.add_argument("--no_cache", action="store_true")
@@ -378,16 +491,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def _build_agent(args) -> HermesAgent:
-    """Map CLI flags to frozen config dataclasses and construct HermesAgent."""
-    dream_params = DreamParams(
-        eta=args.dream_eta,
-        min_sep=args.dream_min_sep,
-        prune_threshold=args.dream_prune_threshold,
-        merge_threshold=args.dream_merge_threshold,
-        explore_only=args.dream_explore_only,
-    )
-
+def _build_agent(args):
+    """Build HermesAgent from CLI args."""
     retrieval = RetrievalConfig(
         retrieve_num=args.retrieve_num,
         cooc_boost=args.cooc_boost,
@@ -400,10 +505,19 @@ def _build_agent(args) -> HermesAgent:
         hyperedge_intersection=args.hyperedge,
         hyperedge_penalty=args.hyperedge_penalty,
         hyperedge_min_candidates=args.hyperedge_min_candidates,
+        bm25_primary=args.bm25_primary,
+        bm25_rerank=args.bm25_rerank,
+        bm25_rerank_weight=args.bm25_rerank_weight,
+        entity_primary=args.entity_primary,
+        entity_prefilter=args.entity_prefilter,
+        event_calendar_retrieval=args.event_calendar_retrieval,
         fisher_scoring=args.fisher_scoring,
         fisher_temperature=args.fisher_temperature,
         cross_encoder=args.cross_encoder,
         cross_encoder_top_k=args.cross_encoder_top_k,
+        role_weight_assistant=args.role_weight_assistant,
+        role_weight_continuation=args.role_weight_continuation,
+        temporal_alpha=args.temporal_alpha,
     )
     cr = CRConfig(
         enabled=args.conflict_resolution,
@@ -422,9 +536,19 @@ def _build_agent(args) -> HermesAgent:
         cooc_boost=args.cooc_boost,
         dream_interval=args.dream_interval,
     )
+    # Auto-detect max_gen_tokens: 64 for FC (short entity answers),
+    # 128 for LME/EventQA (longer conversational answers).
+    if args.max_gen_tokens > 0:
+        max_gen_tokens = args.max_gen_tokens
+    elif "factconsolidation" in args.dataset_config.lower():
+        max_gen_tokens = 64
+    else:
+        max_gen_tokens = 128
+
     llm_cfg = LLMConfig(
         model=args.model,
-        temperature=0.0,
+        temperature=args.temperature,
+        max_gen_tokens=max_gen_tokens,
     )
     entity = EntityConfig(
         entity_retrieval=args.entity_retrieval,
@@ -456,11 +580,27 @@ def _build_agent(args) -> HermesAgent:
         min_confidence=args.relik_min_confidence,
     )
 
+    structured_store_cfg = StructuredStoreConfig(
+        enabled=args.structured_store,
+        svo_cache_path=args.svo_cache_path if args.structured_store else None,
+    )
+
+    dream_params = DreamParams(
+        eta=args.dream_eta,
+        min_sep=args.dream_min_sep,
+        prune_threshold=args.dream_prune_threshold,
+        merge_threshold=args.dream_merge_threshold,
+    )
+    belief = BeliefConfig(
+        enabled=False,  # not exposed via CLI yet
+    )
+
     return HermesAgent(
         dim=768,
         contradiction_threshold=args.contradiction_threshold,
         recency_alpha=args.recency_alpha,
         dream_params=dream_params,
+        belief=belief,
         retrieval=retrieval,
         cr=cr,
         decompose=decompose,
@@ -476,9 +616,17 @@ def _build_agent(args) -> HermesAgent:
         chain_cache=args.chain_cache,
         rebel_kg=args.rebel_kg,
         triadic=args.triadic,
+        triadic_chain_hops=args.triadic_chain_hops,
+        triadic_decay=args.triadic_decay,
         llm_extraction_base_url=args.llm_extraction_url,
         llm_extraction_model=args.llm_extraction_model,
         llm_extraction_mode=args.llm_extraction_mode,
+        coref_backend=args.coref_backend,
+        dynamic_prompting=args.dynamic_prompting,
+        raw_chunks=args.raw_chunks,
+        lfm_extraction_url=args.lfm_extraction_url,
+        svo_cache_path=args.svo_cache_path,
+        structured_store=structured_store_cfg,
     )
 
 
@@ -506,7 +654,7 @@ def main():
         "input_length_limit": 128000,
         "buffer_length": 1000,
         "model": args.model,
-        "temperature": 0.0,
+        "temperature": args.temperature,
         "output_dir": "output/hermes_composed",
         "retrieve_num": args.retrieve_num,
     }
@@ -529,12 +677,20 @@ def main():
         config_parts.append("bm25h")
     if args.triadic:
         config_parts.append("tri")
+        if args.triadic_chain_hops > 1:
+            config_parts.append(f"sa{args.triadic_chain_hops}d{args.triadic_decay}")
+    if args.entity_primary:
+        config_parts.append("entpri")
+    if args.entity_prefilter:
+        config_parts.append("entpf")
     if args.entity_rerank:
         config_parts.append("entrank")
     if args.cross_encoder:
         config_parts.append("xenc")
     if args.fisher_scoring:
         config_parts.append("fisher")
+    if args.role_weight_assistant != 1.0 or args.role_weight_continuation != 1.0:
+        config_parts.append(f"role_a{args.role_weight_assistant}_c{args.role_weight_continuation}")
     if args.hyperedge:
         config_parts.append("hedge")
     if args.knowledge_graph:
@@ -545,6 +701,20 @@ def main():
         config_parts.append("coocex")
     if args.relik:
         config_parts.append("relik")
+    if args.dynamic_prompting:
+        config_parts.append("dynprompt")
+    if args.raw_chunks:
+        config_parts.append("rawchunk")
+    if args.event_calendar_retrieval:
+        config_parts.append("evcal")
+    if args.lfm_extraction_url:
+        config_parts.append("lfm")
+    if args.svo_cache_path:
+        config_parts.append("svocache")
+    if args.structured_store:
+        config_parts.append("structstore")
+    if args.temperature > 0:
+        config_parts.append(f"t{args.temperature}")
     if args.chunk_size > 0:
         config_parts.append(f"cs{args.chunk_size}")
     config_tag = "_".join(config_parts) if config_parts else "baseline"
@@ -553,16 +723,26 @@ def main():
     sub_dataset = dataset_config['sub_dataset']
     run_name = f"{timestamp}_{config_tag}_{sub_dataset}_{safe_model}"
 
-    output_file = output_dir / f"{run_name}.json"
-    trace_file = output_dir / f"{run_name}_traces.jsonl"
+    if args.context_idx is not None:
+        output_file = output_dir / f"{run_name}_context_{args.context_idx}.json"
+        trace_file = output_dir / f"{run_name}_context_{args.context_idx}_traces.jsonl"
+    else:
+        output_file = output_dir / f"{run_name}.json"
+        trace_file = output_dir / f"{run_name}_traces.jsonl"
 
     # Print config summary
     print(f"Agent: HermesAgent (composed)")
     print(f"Dataset: {dataset_config['dataset']} / {dataset_config['sub_dataset']}")
     print(f"Model: {args.model}")
     print(f"Output: {output_file}")
-    print(f"Retrieval: cooc_boost={args.cooc_boost}, bm25_hops={args.bm25_hops}, triadic={args.triadic}")
+    tri_str = f"triadic={args.triadic}"
+    if args.triadic and args.triadic_chain_hops > 1:
+        tri_str += f" (SA hops={args.triadic_chain_hops}, decay={args.triadic_decay})"
+    evcal_str = f", event_cal={args.event_calendar_retrieval}" if args.event_calendar_retrieval else ""
+    print(f"Retrieval: cooc_boost={args.cooc_boost}, bm25_hops={args.bm25_hops}, {tri_str}{evcal_str}")
     print(f"Query: decompose={args.decompose_query}, cr={args.conflict_resolution}, cr_per_hop={args.cr_per_hop}")
+    _mgt = args.max_gen_tokens if args.max_gen_tokens > 0 else (64 if "factconsolidation" in args.dataset_config.lower() else 128)
+    print(f"LLM: max_gen_tokens={_mgt}, temperature={args.temperature}, role_weight_assistant={args.role_weight_assistant}, role_weight_continuation={args.role_weight_continuation}")
     print()
 
     # Load data
@@ -579,6 +759,11 @@ def main():
     all_qa_pairs = conversation_creator.get_query_and_answers()
 
     print(f"Contexts: {len(all_chunks)}")
+    if args.context_idx is not None:
+        if args.context_idx < 0 or args.context_idx >= len(all_chunks):
+            print(f"ERROR: --context_idx {args.context_idx} out of range [0, {len(all_chunks)-1}]")
+            sys.exit(1)
+        print(f"Running ONLY context {args.context_idx} (parallel mode)")
     total_queries = sum(len(qa) for qa in all_qa_pairs)
     print(f"Total queries: {total_queries}")
 
@@ -616,13 +801,15 @@ def main():
     query_index = 0
     start_time = time.time()
 
-    for context_idx, (chunks, qa_pairs) in enumerate(
-        tqdm(
-            zip(all_chunks, all_qa_pairs),
-            total=len(all_chunks),
-            desc="Contexts",
-        )
-    ):
+    # Filter to single context if --context_idx is set
+    if args.context_idx is not None:
+        context_indices = [args.context_idx]
+    else:
+        context_indices = list(range(len(all_chunks)))
+
+    for context_idx in tqdm(context_indices, desc="Contexts"):
+        chunks = all_chunks[context_idx]
+        qa_pairs = all_qa_pairs[context_idx]
         agent.reset()
 
         # Try loading from ingestion cache (skip when --no_cache)
@@ -700,6 +887,15 @@ def main():
                     "cooc_weight": args.cooc_weight if args.cooc_boost else None,
                     "bm25_hops": args.bm25_hops,
                     "triadic": args.triadic,
+                    "bm25_primary": args.bm25_primary,
+                    "cross_encoder": args.cross_encoder,
+                    "cross_encoder_top_k": args.cross_encoder_top_k,
+                    "entity_primary": getattr(args, "entity_primary", False),
+                    "entity_prefilter": getattr(args, "entity_prefilter", False),
+                    "event_calendar_retrieval": getattr(args, "event_calendar_retrieval", False),
+                    "structured_store": getattr(args, "structured_store", False),
+                    "bm25_rerank": getattr(args, "bm25_rerank", False),
+                    "fisher_scoring": getattr(args, "fisher_scoring", False),
                 },
                 "cr": {
                     "enabled": args.conflict_resolution,
@@ -709,6 +905,12 @@ def main():
                     "enabled": args.decompose_query,
                     "max_hops": args.decompose_max_hops,
                 },
+                "chunk_size": args.chunk_size,
+                "max_gen_tokens": _mgt,
+                "temperature": args.temperature,
+                "llm_extraction": bool(getattr(args, "llm_extraction_url", None)),
+                "dynamic_prompting": args.dynamic_prompting,
+                "raw_chunks": args.raw_chunks,
             },
             "data": results,
             "metrics": {k: v for k, v in metrics.items()},
