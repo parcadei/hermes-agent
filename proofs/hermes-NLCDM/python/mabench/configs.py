@@ -95,6 +95,24 @@ class RetrievalConfig:
     # and currently only 18% correct with top_k=10 — top_k=25 gives LLM more
     # mentions to aggregate. Does NOT affect point queries.
     aggregation_overfetch: int = 0
+    # lme_multihop: session-aware round-robin merge of retrieval candidates.
+    # When enabled + the query classifies as a multi-session aggregation
+    # ("how many X total", "list all Y"), groups candidates by session_date
+    # and interleaves them round-robin so the LLM sees evidence from MULTIPLE
+    # sessions even when one session dominates similarity scores.
+    # Library: mabench.lme_multihop. Neutral for non-aggregation queries.
+    lme_multihop: bool = False
+    lme_multihop_per_session_top_k: int = 3
+    lme_multihop_max_sessions: int = 10
+    # date_arithmetic: deterministic post-processor for LME temporal
+    # questions ("how many weeks ago", "on what date"). When enabled +
+    # classifier fires + confidence meets threshold, bypasses the LLM and
+    # returns the computed date-diff answer. Otherwise falls through to LLM.
+    # Library: mabench.date_arithmetic. Applied in QueryPipeline._query_generate.
+    # Threshold values: "high" (conf >= 1.0), "medium" (conf >= 0.3),
+    # "low" (conf >= 0.25). Below threshold falls through.
+    date_arithmetic: bool = False
+    date_arithmetic_confidence_threshold: str = "high"
 
 
 @dataclass(frozen=True)

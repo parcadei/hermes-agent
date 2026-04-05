@@ -500,6 +500,25 @@ def parse_args():
     parser.add_argument("--aggregation_overfetch", type=int, default=0,
                         help="Target top_k for aggregation queries (how many/total/count/list all). 0=disabled. Try 20-25.")
 
+    # LME multi-hop: session-aware round-robin merge of retrieval candidates.
+    # Fires on multi-session aggregation queries classified by lme_multihop module.
+    parser.add_argument("--lme_multihop", action="store_true",
+                        help="Session-aware round-robin merge for multi-session aggregation queries "
+                             "(how many X total, list all Y). Diversifies retrieval across sessions.")
+    parser.add_argument("--lme_multihop_per_session_top_k", type=int, default=3,
+                        help="Max candidates to keep per distinct session bucket (default 3)")
+    parser.add_argument("--lme_multihop_max_sessions", type=int, default=10,
+                        help="Max distinct sessions to sample during round-robin merge (default 10)")
+
+    # Date arithmetic: deterministic answer for LME temporal date-diff questions.
+    # Bypasses LLM for "how many weeks ago"/"on what date" style questions.
+    parser.add_argument("--date_arithmetic", action="store_true",
+                        help="Deterministic date-diff answers for LME temporal questions "
+                             "(how many weeks/days ago, on what date). Bypasses LLM when confident.")
+    parser.add_argument("--date_arithmetic_confidence_threshold", type=str, default="high",
+                        choices=["high", "medium", "low"],
+                        help="Minimum confidence to bypass LLM: high=1.0, medium=0.3, low=0.25 (default high)")
+
     # Structured event-DB tool-calling query (Chronos-style)
     parser.add_argument("--structured_query", action="store_true",
                         help="Use LLM tool-calling loop over entity/date/BM25 indexes (Chronos-style structured retrieval)")
@@ -545,6 +564,11 @@ def _build_agent(args):
         event_calendar_window_days=args.event_calendar_window_days,
         event_calendar_boost=args.event_calendar_boost,
         aggregation_overfetch=args.aggregation_overfetch,
+        lme_multihop=args.lme_multihop,
+        lme_multihop_per_session_top_k=args.lme_multihop_per_session_top_k,
+        lme_multihop_max_sessions=args.lme_multihop_max_sessions,
+        date_arithmetic=args.date_arithmetic,
+        date_arithmetic_confidence_threshold=args.date_arithmetic_confidence_threshold,
         fisher_scoring=args.fisher_scoring,
         fisher_temperature=args.fisher_temperature,
         cross_encoder=args.cross_encoder,
@@ -749,6 +773,15 @@ def main():
         )
     if args.aggregation_overfetch > 0:
         config_parts.append(f"aggof{args.aggregation_overfetch}")
+    if args.lme_multihop:
+        config_parts.append(
+            f"lmemh_pk{args.lme_multihop_per_session_top_k}"
+            f"_ms{args.lme_multihop_max_sessions}"
+        )
+    if args.date_arithmetic:
+        config_parts.append(
+            f"datear_{args.date_arithmetic_confidence_threshold}"
+        )
     if args.structured_query:
         config_parts.append(f"struct_h{args.structured_query_max_hops}")
     if args.lfm_extraction_url:
@@ -789,6 +822,16 @@ def main():
             f"boost={args.event_calendar_boost})"
         )
     print(f"Retrieval: cooc_boost={args.cooc_boost}, bm25_hops={args.bm25_hops}, {tri_str}{evcal_str}")
+    if args.lme_multihop:
+        print(
+            f"LME multi-hop: enabled (per_session_top_k={args.lme_multihop_per_session_top_k}, "
+            f"max_sessions={args.lme_multihop_max_sessions})"
+        )
+    if args.date_arithmetic:
+        print(
+            f"Date arithmetic: enabled "
+            f"(confidence_threshold={args.date_arithmetic_confidence_threshold})"
+        )
     print(f"Query: decompose={args.decompose_query}, cr={args.conflict_resolution}, cr_per_hop={args.cr_per_hop}")
     _mgt = args.max_gen_tokens if args.max_gen_tokens > 0 else (64 if "factconsolidation" in args.dataset_config.lower() else 128)
     print(f"LLM: max_gen_tokens={_mgt}, temperature={args.temperature}, role_weight_assistant={args.role_weight_assistant}, role_weight_continuation={args.role_weight_continuation}")
@@ -946,6 +989,11 @@ def main():
                     "event_calendar_window_days": getattr(args, "event_calendar_window_days", 60),
                     "event_calendar_boost": getattr(args, "event_calendar_boost", 0.15),
                     "aggregation_overfetch": getattr(args, "aggregation_overfetch", 0),
+                    "lme_multihop": getattr(args, "lme_multihop", False),
+                    "lme_multihop_per_session_top_k": getattr(args, "lme_multihop_per_session_top_k", 3),
+                    "lme_multihop_max_sessions": getattr(args, "lme_multihop_max_sessions", 10),
+                    "date_arithmetic": getattr(args, "date_arithmetic", False),
+                    "date_arithmetic_confidence_threshold": getattr(args, "date_arithmetic_confidence_threshold", "high"),
                     "structured_store": getattr(args, "structured_store", False),
                     "bm25_rerank": getattr(args, "bm25_rerank", False),
                     "fisher_scoring": getattr(args, "fisher_scoring", False),

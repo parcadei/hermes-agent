@@ -133,6 +133,20 @@ class QueryPipeline:
         return c.retrieve_num if c is not None else getattr(self, "retrieve_num", 10)
 
     @property
+    def _resolve_date_arithmetic(self) -> bool:
+        """Whether to apply the deterministic date-arithmetic short-circuit."""
+        c = getattr(self, "_retrieval_cfg", None)
+        return c.date_arithmetic if c is not None else getattr(self, "date_arithmetic", False)
+
+    @property
+    def _resolve_date_arithmetic_confidence_threshold(self) -> str:
+        """Minimum confidence required to bypass LLM ('high', 'medium', 'low')."""
+        c = getattr(self, "_retrieval_cfg", None)
+        if c is not None:
+            return c.date_arithmetic_confidence_threshold
+        return getattr(self, "date_arithmetic_confidence_threshold", "high")
+
+    @property
     def _resolve_conflict_resolution(self) -> bool:
         c = getattr(self, "_cr_cfg", None)
         return c.enabled if c is not None else getattr(self, "conflict_resolution", False)
@@ -641,6 +655,51 @@ class QueryPipeline:
             )
 
         memory_time = time.time() - query_start
+
+        # date_arithmetic short-circuit (feature-flagged). Runs BEFORE the LLM
+        # call so we can bypass generation for deterministic date-diff
+        # questions ("how many weeks ago", "on what date"). Neutral when
+        # flag is off or the classifier returns "none" or confidence is low.
+        if self._resolve_date_arithmetic:
+            from mabench.date_arithmetic import (
+                answer_date_arithmetic, classify_date_arithmetic_question,
+            )
+            da_classification = classify_date_arithmetic_question(question)
+            if da_classification != "none":
+                answered = answer_date_arithmetic(question, final_chunks)
+                threshold_map = {"high": 1.0, "medium": 0.3, "low": 0.25}
+                min_conf = threshold_map.get(
+                    self._resolve_date_arithmetic_confidence_threshold, 1.0,
+                )
+                if (
+                    answered.computed_answer is not None
+                    and answered.confidence >= min_conf
+                ):
+                    qt = time.time() - query_start
+                    return {
+                        "output": answered.computed_answer,
+                        "input_len": 0,
+                        "output_len": 0,
+                        "memory_construction_time": memory_time,
+                        "query_time_len": qt,
+                        "trace": {
+                            "subqueries": hop_state.get("subqueries"),
+                            "answers": hop_state.get("answers"),
+                            "evidence_chain": hop_state.get("evidence_chain"),
+                            "final_kg_answer": None,
+                            "date_arithmetic_answer": answered.computed_answer,
+                            "date_arithmetic_classification": answered.classification,
+                            "date_arithmetic_event_date": (
+                                answered.event_date.isoformat()
+                                if answered.event_date else None
+                            ),
+                            "date_arithmetic_confidence": answered.confidence,
+                            "final_context": memory_context,
+                            "final_chunks": list(final_chunks),
+                            "outgestion_instructions": outgestion_instructions,
+                            "llm_response": answered.computed_answer,
+                        },
+                    }
 
         answer, input_tokens, output_tokens, gen_time = self._resolve_generate_answer(
             question, memory_context,

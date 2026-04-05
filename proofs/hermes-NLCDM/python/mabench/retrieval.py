@@ -461,6 +461,27 @@ class Retriever:
             return self._cfg.aggregation_overfetch
         return getattr(self, "aggregation_overfetch", 0)
 
+    @property
+    def _resolve_lme_multihop(self) -> bool:
+        """Whether to apply session-aware round-robin merge for multi-session aggregation."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.lme_multihop
+        return getattr(self, "lme_multihop", False)
+
+    @property
+    def _resolve_lme_multihop_per_session_top_k(self) -> int:
+        """Max candidates to keep from each distinct session bucket."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.lme_multihop_per_session_top_k
+        return getattr(self, "lme_multihop_per_session_top_k", 3)
+
+    @property
+    def _resolve_lme_multihop_max_sessions(self) -> int:
+        """Max distinct sessions to sample from during round-robin merge."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.lme_multihop_max_sessions
+        return getattr(self, "lme_multihop_max_sessions", 10)
+
     # ------------------------------------------------------------------
     # Core retrieval methods
     # ------------------------------------------------------------------
@@ -799,6 +820,11 @@ class Retriever:
             results = ce_reranker.rerank(query_text, results)
         results = self._apply_role_weighting(results)
         results = self._apply_temporal_proximity(results, query_text)
+        # Session-aware round-robin merge (feature-flagged). Applied last
+        # so it can reshape the final candidate order for multi-session
+        # aggregation queries. Neutral when flag is off or classifier
+        # returns "none" for this query.
+        results = self._apply_lme_multihop(results, query_text)
         return results
 
     def _apply_bm25_rerank(self, results: list[dict], query_text: str) -> list[dict]:
@@ -901,6 +927,81 @@ class Retriever:
             reweighted.append(adjusted)
         reweighted.sort(key=lambda x: x.get("score", 0.0), reverse=True)
         return reweighted
+
+    def _apply_lme_multihop(
+        self, results: list[dict], query_text: str,
+    ) -> list[dict]:
+        """Session-aware round-robin merge of retrieval candidates.
+
+        When ``--lme_multihop`` is on AND the query classifies as a
+        multi-session aggregation ("how many X total", "list all Y"),
+        groups candidates by ``session_time.date()`` and interleaves
+        them round-robin so the LLM sees evidence from MULTIPLE sessions
+        even when one session dominates similarity scores.
+
+        Pass-through (returns *results* unchanged) when any of:
+          - ``--lme_multihop`` is off,
+          - the query is not a multi-session aggregation (classifier
+            returns ``"none"`` for temporal date-diff and point queries),
+          - ``results`` is empty.
+
+        Args:
+            results: retrieval output with ``{"index", "score", "text"}``.
+            query_text: raw query string (may include "Current Date:" prefix).
+
+        Returns:
+            Session-diversified list of result dicts, or the original
+            list unchanged when neutral conditions hold. Each kept result
+            is annotated in-place with ``session_time`` for downstream
+            consumers (not stored on the original dicts — a shallow copy
+            is made when reshaping fires).
+        """
+        if not self._resolve_lme_multihop or not results or not query_text:
+            return results
+
+        from mabench.lme_multihop import (
+            aggregate_hop_results,
+            classify_multihop_query,
+            decompose_aggregation_query,
+        )
+
+        # Strict gate: only fire on genuine multi-session aggregation queries.
+        # Temporal date-diff, point lookups, etc. short-circuit to pass-through.
+        if classify_multihop_query(query_text) == "none":
+            return results
+
+        # Annotate results with session_time from the memory store so the
+        # library's session-bucketing logic can group by session.date().
+        engine = self._resolve_engine
+        mem_store = getattr(engine, "memory_store", None)
+        if mem_store is None:
+            return results
+
+        annotated: list[dict] = []
+        for r in results:
+            idx = r.get("index")
+            session_time = None
+            if idx is not None and 0 <= idx < len(mem_store):
+                session_time = getattr(mem_store[idx], "session_time", None)
+            entry = dict(r)
+            entry["session_time"] = session_time
+            annotated.append(entry)
+
+        # Build a plan with the configured per-session / max-session caps.
+        plan = decompose_aggregation_query(query_text, None)
+        # Override defaults from RetrievalConfig so operators can tune without
+        # editing the library.
+        plan = type(plan)(
+            kind=plan.kind,
+            base_query=plan.base_query,
+            sub_queries=plan.sub_queries,
+            per_session_top_k=self._resolve_lme_multihop_per_session_top_k,
+            max_sessions=self._resolve_lme_multihop_max_sessions,
+            merge_strategy=plan.merge_strategy,
+        )
+        reshaped = aggregate_hop_results(annotated, plan)
+        # aggregate_hop_results already dedupes + interleaves. Return new list.
+        return reshaped
 
     def _apply_belief_rerank(self, results: list[dict]) -> list[dict]:
         """Rerank retrieval results using Bayesian belief scores.
