@@ -24,6 +24,99 @@ import numpy as np
 
 from mabench.configs import BeliefConfig, CRConfig, DedupConfig, RetrievalConfig
 
+# Query-time Current Date marker. Matches the LME evaluator's prompt format
+# ("Current Date: 2023/06/15" or with trailing "(Day) HH:MM"). We only need
+# year/month/day — intra-day resolution is not required for the calendar
+# lookup window.
+_CURRENT_DATE_RE = re.compile(
+    r"Current\s*Date\s*:\s*(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})",
+    re.IGNORECASE,
+)
+
+
+def _parse_current_date_from_query(query_text: str):
+    """Extract (year, month, day) as a ``date`` from a ``Current Date:`` marker.
+
+    Returns None when no marker is present or the fields don't form a valid
+    date. The caller uses this to decide whether to consult the calendar.
+    """
+    if not query_text:
+        return None
+    m = _CURRENT_DATE_RE.search(query_text)
+    if not m:
+        return None
+    try:
+        from datetime import date as _date
+        return _date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    except (ValueError, TypeError):
+        return None
+
+
+def _apply_event_calendar_boost(
+    scored_docs: list[dict],
+    query_text: str,
+    calendar,
+    window_days: int,
+    boost: float,
+) -> list[dict]:
+    """Additively boost scored candidates whose turn_idx is in the calendar window.
+
+    Neutral (pass-through, no copy) when any of the following hold:
+      - ``calendar`` is None or empty,
+      - ``boost`` is 0.0,
+      - the query has no ``Current Date: YYYY/MM/DD`` marker,
+      - ``calendar.lookup_window(q_date, window_days)`` returns no events.
+
+    When active, each doc whose ``index`` is in the window's event turn_idx
+    set receives exactly one additive boost on its current score. The result
+    list is resorted descending by score.
+
+    Args:
+        scored_docs: list of retrieval hits, each with ``index`` and ``score``.
+        query_text: raw query, expected to carry a ``Current Date:`` marker.
+        calendar: EventCalendarLME instance (or None).
+        window_days: half-window (±days) passed to ``calendar.lookup_window``.
+        boost: additive delta applied to each in-window doc's score.
+
+    Returns:
+        A new list of dicts (sorted by adjusted score), or the original list
+        unchanged when the pass-through conditions trigger.
+    """
+    # Pass-through guards (keep neutral when data is missing)
+    if not scored_docs:
+        return scored_docs
+    if calendar is None or boost == 0.0:
+        return scored_docs
+    if len(calendar) == 0:
+        return scored_docs
+
+    q_date = _parse_current_date_from_query(query_text)
+    if q_date is None:
+        return scored_docs
+
+    events = calendar.lookup_window(q_date, window_days)
+    if not events:
+        return scored_docs
+
+    # Collect in-window turn idxs; dedupe so a turn is boosted at most once
+    # regardless of how many event mentions it contributed.
+    window_turn_idxs = {ev.turn_idx for ev in events}
+    if not window_turn_idxs:
+        return scored_docs
+
+    boosted: list[dict] = []
+    for doc in scored_docs:
+        idx = doc.get("index")
+        if idx is None:
+            idx = doc.get("turn_idx")
+        adjusted = dict(doc)
+        if idx is not None and idx in window_turn_idxs:
+            adjusted["score"] = doc.get("score", 0.0) + boost
+        boosted.append(adjusted)
+    boosted.sort(key=lambda d: d.get("score", 0.0), reverse=True)
+    return boosted
+
+
 # Aggregation query heuristic: queries asking to count/sum/list across sessions
 # need more retrieval context. Tested on LME: 80% of multi-session questions
 # match these patterns (see analyze_agg_questions.py for derivation).
@@ -339,6 +432,27 @@ class Retriever:
         if hasattr(self, "_cfg"):
             return self._cfg.event_calendar_retrieval
         return getattr(self, "event_calendar_retrieval", False)
+
+    @property
+    def _resolve_event_calendar(self) -> bool:
+        """Whether to apply the LME date-mention calendar boost post-retrieval."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.event_calendar
+        return getattr(self, "event_calendar", False)
+
+    @property
+    def _resolve_event_calendar_window_days(self) -> int:
+        """Half-window (±days) for the LME event calendar lookup."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.event_calendar_window_days
+        return getattr(self, "event_calendar_window_days", 60)
+
+    @property
+    def _resolve_event_calendar_boost(self) -> float:
+        """Additive score boost for in-window candidates."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.event_calendar_boost
+        return getattr(self, "event_calendar_boost", 0.15)
 
     @property
     def _resolve_aggregation_overfetch(self) -> int:
@@ -663,6 +777,18 @@ class Retriever:
             q_emb, self._resolve_retrieve_num, query_text=query_text,
         )
         results = self._apply_post_retrieval(results)
+        # Event calendar boost (feature-flagged). Applied after fusion/rerank
+        # so it can nudge calendar-relevant candidates above peers without
+        # overriding them. Neutral when no calendar or no Current Date.
+        if self._resolve_event_calendar:
+            calendar = getattr(self, "_event_calendar_lme", None)
+            results = _apply_event_calendar_boost(
+                results,
+                query_text,
+                calendar,
+                self._resolve_event_calendar_window_days,
+                self._resolve_event_calendar_boost,
+            )
         results = self._apply_bm25_rerank(results, query_text)
         if self._entity_reranker is not None:
             results = self._entity_reranker.rerank(

@@ -91,6 +91,10 @@ class FactStore:
 
         # Event calendar for temporal question resolution (list of event dicts)
         self._event_calendar: list[dict] = []
+        # LME date-mention calendar (EventCalendarLME instance). Populated
+        # during turn ingestion; consumed by the retrieval boost module.
+        # None means "not built yet" — the retriever treats this as neutral.
+        self._event_calendar_lme = None
 
     # -- Attribute resolution: standalone vs mixin fallback ---------------
 

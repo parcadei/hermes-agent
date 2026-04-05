@@ -487,6 +487,15 @@ def parse_args():
     parser.add_argument("--event_calendar_retrieval", action="store_true",
                         help="Add event calendar keyword overlap as 3rd RRF channel (requires --entity_prefilter)")
 
+    # LME event calendar: post-score additive boost for turns in date-window
+    parser.add_argument("--event_calendar", action="store_true",
+                        help="LME date-mention calendar: boost turns whose extracted dates "
+                             "fall in ±window_days around the query's Current Date (additive, bounded).")
+    parser.add_argument("--event_calendar_window_days", type=int, default=60,
+                        help="Half-window (±days) for event calendar lookup (default 60)")
+    parser.add_argument("--event_calendar_boost", type=float, default=0.15,
+                        help="Additive score boost for in-window candidates (default 0.15)")
+
     # Aggregation query overfetch: bump top_k for "how many"/"total"/"count" queries
     parser.add_argument("--aggregation_overfetch", type=int, default=0,
                         help="Target top_k for aggregation queries (how many/total/count/list all). 0=disabled. Try 20-25.")
@@ -532,6 +541,9 @@ def _build_agent(args):
         entity_primary=args.entity_primary,
         entity_prefilter=args.entity_prefilter,
         event_calendar_retrieval=args.event_calendar_retrieval,
+        event_calendar=args.event_calendar,
+        event_calendar_window_days=args.event_calendar_window_days,
+        event_calendar_boost=args.event_calendar_boost,
         aggregation_overfetch=args.aggregation_overfetch,
         fisher_scoring=args.fisher_scoring,
         fisher_temperature=args.fisher_temperature,
@@ -731,6 +743,10 @@ def main():
         config_parts.append("rawchunk")
     if args.event_calendar_retrieval:
         config_parts.append("evcal")
+    if args.event_calendar:
+        config_parts.append(
+            f"evcalLME_w{args.event_calendar_window_days}b{args.event_calendar_boost}"
+        )
     if args.aggregation_overfetch > 0:
         config_parts.append(f"aggof{args.aggregation_overfetch}")
     if args.structured_query:
@@ -767,6 +783,11 @@ def main():
     if args.triadic and args.triadic_chain_hops > 1:
         tri_str += f" (SA hops={args.triadic_chain_hops}, decay={args.triadic_decay})"
     evcal_str = f", event_cal={args.event_calendar_retrieval}" if args.event_calendar_retrieval else ""
+    if args.event_calendar:
+        evcal_str += (
+            f", event_calendar_lme=True (±{args.event_calendar_window_days}d, "
+            f"boost={args.event_calendar_boost})"
+        )
     print(f"Retrieval: cooc_boost={args.cooc_boost}, bm25_hops={args.bm25_hops}, {tri_str}{evcal_str}")
     print(f"Query: decompose={args.decompose_query}, cr={args.conflict_resolution}, cr_per_hop={args.cr_per_hop}")
     _mgt = args.max_gen_tokens if args.max_gen_tokens > 0 else (64 if "factconsolidation" in args.dataset_config.lower() else 128)
@@ -921,6 +942,9 @@ def main():
                     "entity_primary": getattr(args, "entity_primary", False),
                     "entity_prefilter": getattr(args, "entity_prefilter", False),
                     "event_calendar_retrieval": getattr(args, "event_calendar_retrieval", False),
+                    "event_calendar": getattr(args, "event_calendar", False),
+                    "event_calendar_window_days": getattr(args, "event_calendar_window_days", 60),
+                    "event_calendar_boost": getattr(args, "event_calendar_boost", 0.15),
                     "aggregation_overfetch": getattr(args, "aggregation_overfetch", 0),
                     "structured_store": getattr(args, "structured_store", False),
                     "bm25_rerank": getattr(args, "bm25_rerank", False),

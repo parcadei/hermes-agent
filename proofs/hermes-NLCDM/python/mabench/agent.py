@@ -486,6 +486,16 @@ class HermesAgent:
         retriever._event_calendar = self.store._event_calendar
         self.pipeline._event_calendar = self.store._event_calendar
 
+        # LME date-mention calendar — lazily constructed so the module import
+        # and dateparser warmup are paid only when the flag is on. Wired to
+        # the retriever under a distinct attribute (_event_calendar_lme) so
+        # it never collides with the FC-style keyword calendar above.
+        if getattr(self._retrieval_cfg, "event_calendar", False):
+            from mabench.event_calendar_lme import EventCalendarLME
+            self.store._event_calendar_lme = EventCalendarLME()
+        retriever._event_calendar_lme = self.store._event_calendar_lme
+        self.pipeline._event_calendar_lme = self.store._event_calendar_lme
+
     # -----------------------------------------------------------------
     # Public API (MABench-compatible)
     # -----------------------------------------------------------------
@@ -624,6 +634,13 @@ class HermesAgent:
                 "text": message,
             })
 
+            # LME date-mention calendar: mirrors the conversation-turn path
+            # for the raw-chunks ingestion mode. Uses the chunk's Chat Time
+            # as dateparser anchor.
+            cal_lme = getattr(store, "_event_calendar_lme", None)
+            if cal_lme is not None:
+                cal_lme.ingest_turn(ms_idx, message, chunk_date)
+
         store._store_count += 1
 
         # Rebuild FAISS after chunk
@@ -726,6 +743,13 @@ class HermesAgent:
                     "inline_dates": inline_dates,
                     "text": turn_text,
                 })
+
+            # LME date-mention calendar: extracts all dates mentioned in the
+            # turn (absolute and relative) using the turn's own timestamp as
+            # the dateparser anchor. Only active when --event_calendar is on.
+            cal_lme = getattr(store, "_event_calendar_lme", None)
+            if cal_lme is not None and turn_date is not None:
+                cal_lme.ingest_turn(ms_idx, turn_text, turn_date)
 
             # LFM SVO extraction: supplement regex entity index with LFM-extracted subjects
             global_turn_idx = store._store_count  # monotonic turn counter

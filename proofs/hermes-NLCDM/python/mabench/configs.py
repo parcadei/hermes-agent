@@ -71,6 +71,14 @@ class RetrievalConfig:
     # Uses date+keyword index built during ingestion. Always-on when enabled (neutral when
     # no calendar entries match). Requires entity_prefilter=True.
     event_calendar_retrieval: bool = False
+    # event_calendar: LME date-mention calendar (post-score additive boost).
+    # When the query carries a "Current Date:" marker, turns whose extracted
+    # date mentions fall in ±window_days around that date receive an additive
+    # score boost. Neutral when no calendar entries match. Independent from
+    # event_calendar_retrieval (different module, applied post-RRF).
+    event_calendar: bool = False
+    event_calendar_window_days: int = 60
+    event_calendar_boost: float = 0.15
     # cross_encoder: ms-marco-MiniLM-L-6-v2 reranker (agentmemory ablation: -30.7 pp)
     cross_encoder: bool = False        # enable cross-encoder reranking after entity reranker
     cross_encoder_top_k: int = 10      # how many candidates to keep after reranking
