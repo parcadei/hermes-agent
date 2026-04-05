@@ -121,6 +121,9 @@ class HermesAgent:
         # Query mode
         iterative: bool = False,
         iterative_max_hops: int = 3,
+        # Structured event-DB tool-calling query (Chronos-style)
+        structured_query: bool = False,
+        structured_query_max_hops: int = 3,
         # LLM triple extraction (vLLM server URL, None = disabled)
         llm_extraction_base_url: str | None = None,
         llm_extraction_model: str = "qwen3-triple-extractor",
@@ -171,6 +174,8 @@ class HermesAgent:
         self._triadic_decay = triadic_decay
         self._iterative_flag = iterative
         self._iterative_max_hops = iterative_max_hops
+        self._structured_query_flag = structured_query
+        self._structured_query_max_hops = structured_query_max_hops
         self._llm_extraction_base_url = llm_extraction_base_url
         self._llm_extraction_model = llm_extraction_model
         self._llm_extraction_mode = llm_extraction_mode
@@ -248,7 +253,7 @@ class HermesAgent:
         self._entity_index = ei
 
         # -- 3. Optional infrastructure -----------------------------------
-        _need_bm25 = self._bm25_hops or self._retrieval_cfg.bm25_rerank or self._retrieval_cfg.bm25_primary
+        _need_bm25 = self._bm25_hops or self._retrieval_cfg.bm25_rerank or self._retrieval_cfg.bm25_primary or self._structured_query_flag
         bm25 = BM25Index() if _need_bm25 else None
         chain = ChainCache(similarity_threshold=0.95) if self._chain_cache_flag else None
         tri = TriadicMemory(n=self._triadic_n, p=self._triadic_p) if self._triadic_flag else None
@@ -420,6 +425,23 @@ class HermesAgent:
             superseded_texts=ss.superseded_texts,
         )
 
+        # Structured event-DB query agent (Chronos-style tool-calling loop).
+        # Lazy-constructed: tools reference the store's indexes by reference,
+        # so they stay in sync as ingestion populates them.
+        self.structured_agent = None
+        if self._structured_query_flag:
+            from mabench.structured_query import StructuredQueryAgent
+            self.structured_agent = StructuredQueryAgent(
+                memory_store=self.engine.memory_store,
+                entity_inv_idx=self.store._entity_inv_idx,
+                event_calendar=self.store._event_calendar,
+                bm25_index=getattr(self.store, "_bm25_index", None),
+                llm_config=self._llm_cfg,
+                max_hops=self._structured_query_max_hops,
+                engine=self.engine,
+                scorer=self._scorer,
+            )
+
         # LFM SVO extractor (local LM Studio, LME entity index enrichment)
         self._lfm_extractor = None
         if self._lfm_extraction_url:
@@ -482,6 +504,13 @@ class HermesAgent:
         """
         if memorizing:
             return self._store_with_parser(message)
+        elif self._structured_query_flag:
+            result = self.structured_agent.answer(message)
+            return {
+                "output": result["output"],
+                "input_len": result.get("prompt_tokens", 0),
+                "output_len": result.get("completion_tokens", 0),
+            }
         elif self._iterative_flag:
             return self.iterative._iterative_query(message)
         else:

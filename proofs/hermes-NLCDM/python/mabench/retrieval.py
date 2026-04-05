@@ -18,9 +18,47 @@ Migration notes for callers:
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 
 from mabench.configs import BeliefConfig, CRConfig, DedupConfig, RetrievalConfig
+
+# Aggregation query heuristic: queries asking to count/sum/list across sessions
+# need more retrieval context. Tested on LME: 80% of multi-session questions
+# match these patterns (see analyze_agg_questions.py for derivation).
+_AGG_PATTERNS = [
+    r"\bhow many\b", r"\btotal\b", r"\bnumber of\b", r"\bcount\b",
+    r"\blist all\b", r"\ball the\b", r"\bhow often\b", r"\bhow much\b",
+    r"\bfrequently\b", r"\bsum\b", r"\baltogether\b", r"\bin total\b",
+]
+# Exclusions: temporal date-diff questions ("how many weeks ago", "between X and Y")
+# These ask for date arithmetic, not counting — more chunks hurts by adding date noise.
+_AGG_EXCL_PATTERNS = [
+    r"\b(days?|weeks?|months?|years?|hours?|minutes?)\s+ago\b",
+    r"\bdays?\s+(had\s+)?passed\b",
+    r"\bbetween\s+.{1,60}?\s+and\b",
+    r"\bsince\s+(when|that|the|I|my|we|you)\b",
+    r"\bhow\s+long\s+ago\b",
+    r"\b(have|has|had)\s+passed\s+since\b",
+]
+_AGG_RE = re.compile("|".join(_AGG_PATTERNS), re.I)
+_AGG_EXCL_RE = re.compile("|".join(_AGG_EXCL_PATTERNS), re.I)
+
+
+def is_aggregation_query(query_text: str) -> bool:
+    """Return True if the query requires aggregating facts across turns.
+
+    Aggregation queries (how many, total, count, list all) benefit from
+    more retrieval context because the LLM needs to see ALL relevant
+    mentions, not just the top-k most similar. Excludes temporal date-diff
+    patterns ("how many weeks ago") which ask for date arithmetic, not counts.
+    """
+    if not query_text:
+        return False
+    if not _AGG_RE.search(query_text):
+        return False
+    return not _AGG_EXCL_RE.search(query_text)
 
 
 class Retriever:
@@ -302,6 +340,13 @@ class Retriever:
             return self._cfg.event_calendar_retrieval
         return getattr(self, "event_calendar_retrieval", False)
 
+    @property
+    def _resolve_aggregation_overfetch(self) -> int:
+        """Target top_k for aggregation queries (0 = disabled)."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.aggregation_overfetch
+        return getattr(self, "aggregation_overfetch", 0)
+
     # ------------------------------------------------------------------
     # Core retrieval methods
     # ------------------------------------------------------------------
@@ -361,6 +406,11 @@ class Retriever:
             List of result dicts with at minimum {"text": str, "score": float}.
         """
         effective_k = self._compute_effective_k(top_k)
+        # Aggregation query overfetch: bump effective_k when the query asks for
+        # counting/summing/listing across turns. Does not affect point queries.
+        agg_k = self._resolve_aggregation_overfetch
+        if agg_k > effective_k and is_aggregation_query(query_text or ""):
+            effective_k = agg_k
         engine = self._resolve_engine
 
         # Entity primary: regex-based entity/bigram/unigram inverted index.

@@ -287,6 +287,17 @@ def _load_context(agent: HermesAgent, path: Path, context_idx: int) -> bool:
         if hasattr(mod, "_engine"):
             mod._engine = agent.engine
 
+    # Refresh structured_agent references (it holds memory_store + indexes
+    # directly, not via _engine). Only if the agent was constructed.
+    if getattr(agent, "structured_agent", None) is not None:
+        agent.structured_agent._memory_store = agent.engine.memory_store
+        agent.structured_agent._entity_inv_idx = agent.store._entity_inv_idx
+        agent.structured_agent._event_calendar = agent.store._event_calendar
+        agent.structured_agent._bm25 = getattr(agent.store, "_bm25_index", None)
+        agent.structured_agent._engine = agent.engine
+        agent.structured_agent._scorer = agent._scorer
+        agent.structured_agent._date_index_len = -1  # force rebuild
+
     n = len(agent.engine.memory_store)
     elapsed = time.time() - t0
     print(f"Loaded ingestion cache: {n} memories in {elapsed:.1f}s from {state_file}")
@@ -476,6 +487,16 @@ def parse_args():
     parser.add_argument("--event_calendar_retrieval", action="store_true",
                         help="Add event calendar keyword overlap as 3rd RRF channel (requires --entity_prefilter)")
 
+    # Aggregation query overfetch: bump top_k for "how many"/"total"/"count" queries
+    parser.add_argument("--aggregation_overfetch", type=int, default=0,
+                        help="Target top_k for aggregation queries (how many/total/count/list all). 0=disabled. Try 20-25.")
+
+    # Structured event-DB tool-calling query (Chronos-style)
+    parser.add_argument("--structured_query", action="store_true",
+                        help="Use LLM tool-calling loop over entity/date/BM25 indexes (Chronos-style structured retrieval)")
+    parser.add_argument("--structured_query_max_hops", type=int, default=3,
+                        help="Max tool calls per question in structured query mode (default 3)")
+
     # Cache
     parser.add_argument("--no_cache", action="store_true")
     parser.add_argument("--refresh_cache", action="store_true")
@@ -511,6 +532,7 @@ def _build_agent(args):
         entity_primary=args.entity_primary,
         entity_prefilter=args.entity_prefilter,
         event_calendar_retrieval=args.event_calendar_retrieval,
+        aggregation_overfetch=args.aggregation_overfetch,
         fisher_scoring=args.fisher_scoring,
         fisher_temperature=args.fisher_temperature,
         cross_encoder=args.cross_encoder,
@@ -627,6 +649,8 @@ def _build_agent(args):
         lfm_extraction_url=args.lfm_extraction_url,
         svo_cache_path=args.svo_cache_path,
         structured_store=structured_store_cfg,
+        structured_query=args.structured_query,
+        structured_query_max_hops=args.structured_query_max_hops,
     )
 
 
@@ -707,6 +731,10 @@ def main():
         config_parts.append("rawchunk")
     if args.event_calendar_retrieval:
         config_parts.append("evcal")
+    if args.aggregation_overfetch > 0:
+        config_parts.append(f"aggof{args.aggregation_overfetch}")
+    if args.structured_query:
+        config_parts.append(f"struct_h{args.structured_query_max_hops}")
     if args.lfm_extraction_url:
         config_parts.append("lfm")
     if args.svo_cache_path:
@@ -893,6 +921,7 @@ def main():
                     "entity_primary": getattr(args, "entity_primary", False),
                     "entity_prefilter": getattr(args, "entity_prefilter", False),
                     "event_calendar_retrieval": getattr(args, "event_calendar_retrieval", False),
+                    "aggregation_overfetch": getattr(args, "aggregation_overfetch", 0),
                     "structured_store": getattr(args, "structured_store", False),
                     "bm25_rerank": getattr(args, "bm25_rerank", False),
                     "fisher_scoring": getattr(args, "fisher_scoring", False),
@@ -911,6 +940,8 @@ def main():
                 "llm_extraction": bool(getattr(args, "llm_extraction_url", None)),
                 "dynamic_prompting": args.dynamic_prompting,
                 "raw_chunks": args.raw_chunks,
+                "structured_query": args.structured_query,
+                "structured_query_max_hops": args.structured_query_max_hops,
             },
             "data": results,
             "metrics": {k: v for k, v in metrics.items()},

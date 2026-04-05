@@ -81,6 +81,12 @@ class RetrievalConfig:
     # temporal_alpha: decay rate for temporal proximity scoring (0=disabled, >0 enables)
     # Also gates the temporal fast-lane in QueryEngine._query()
     temporal_alpha: float = 0.0
+    # aggregation_overfetch: target top_k when query has aggregation keywords
+    # (how many, total, count, list all). 0 = disabled, >0 = bumps effective_k for
+    # aggregation queries only. LME multi-session questions are 81% aggregation
+    # and currently only 18% correct with top_k=10 — top_k=25 gives LLM more
+    # mentions to aggregate. Does NOT affect point queries.
+    aggregation_overfetch: int = 0
 
 
 @dataclass(frozen=True)
