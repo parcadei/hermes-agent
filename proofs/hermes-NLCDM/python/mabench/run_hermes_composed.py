@@ -114,6 +114,10 @@ def _save_context(agent: HermesAgent, path: Path, context_idx: int) -> None:
     if struct_store is not None:
         state["structured_store"] = struct_store
 
+    event_db = getattr(agent, "_event_db", None)
+    if event_db is not None:
+        state["event_db"] = event_db
+
     state_file = ctx_dir / "state.pkl"
     with open(state_file, "wb") as f:
         pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -267,6 +271,11 @@ def _load_context(agent: HermesAgent, path: Path, context_idx: int) -> bool:
     if "structured_store" in state and getattr(agent, "_structured_store", None) is not None:
         agent._structured_store = state["structured_store"]
         agent.retriever._structured_store = state["structured_store"]
+
+    # EventDB (pickle-safe: dataclasses + dicts)
+    if "event_db" in state and getattr(agent, "_event_db", None) is not None:
+        agent._event_db = state["event_db"]
+        agent.retriever._event_db = state["event_db"]
 
     # CoocKG (pickle-safe: pure Python dicts)
     if "cooc_kg" in state and agent.store._cooc_kg is not None:
@@ -519,6 +528,13 @@ def parse_args():
                         choices=["high", "medium", "low"],
                         help="Minimum confidence to bypass LLM: high=1.0, medium=0.3, low=0.25 (default high)")
 
+    # Structured primary: EventDB as PRIMARY retrieval path (BM25 = fallback)
+    parser.add_argument("--structured_primary", action="store_true",
+                        help="Use entity-keyed EventDB as PRIMARY retrieval. Requires --llm_extraction_url. "
+                             "BM25+entity_prefilter become FALLBACK when EventDB returns < min_results.")
+    parser.add_argument("--structured_min_results", type=int, default=3,
+                        help="Min EventDB results before falling through to BM25 (default 3)")
+
     # Structured event-DB tool-calling query (Chronos-style)
     parser.add_argument("--structured_query", action="store_true",
                         help="Use LLM tool-calling loop over entity/date/BM25 indexes (Chronos-style structured retrieval)")
@@ -576,6 +592,8 @@ def _build_agent(args):
         role_weight_assistant=args.role_weight_assistant,
         role_weight_continuation=args.role_weight_continuation,
         temporal_alpha=args.temporal_alpha,
+        structured_primary=args.structured_primary,
+        structured_min_results=args.structured_min_results,
     )
     cr = CRConfig(
         enabled=args.conflict_resolution,

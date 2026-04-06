@@ -65,6 +65,7 @@ from mabench.gliner2_extractor import GLiNER2Extractor
 from mabench.cooccurrence_extractor import CooccurrenceExtractor
 from mabench.relik_extractor import RelikExtractor
 from mabench.conversation_parser import parse_chunk
+from mabench.event_db import EventDB
 
 
 # Default V1 orchestrator params (validated in test_engine.py)
@@ -323,6 +324,12 @@ class HermesAgent:
             structured_store = None
         self._structured_store = structured_store
 
+        # EventDB: entity-keyed structured event store (PRIMARY retrieval
+        # path when --structured_primary is on). Populated during ingestion
+        # from LLM triple extraction output. Requires llm_extraction_url.
+        event_db = EventDB() if self._retrieval_cfg.structured_primary else None
+        self._event_db = event_db
+
         # -- 5. Tier 1: entity ops + retriever ----------------------------
         entity_ops = EntityOps(
             self.engine, self._scorer,
@@ -472,6 +479,9 @@ class HermesAgent:
         self.cooc_extractor = cooc_extractor
         self.relik_extractor = relik_extractor
         self.cooc_kg = cooc_kg
+
+        # Wire EventDB to retriever for structured_primary query-time access.
+        retriever._event_db = event_db
 
         # Wire entity inverted indexes (mutable dicts, shared references).
         # Store builds them during ingestion; retriever + pipeline read at query time.
@@ -640,6 +650,44 @@ class HermesAgent:
             cal_lme = getattr(store, "_event_calendar_lme", None)
             if cal_lme is not None:
                 cal_lme.ingest_turn(ms_idx, message, chunk_date)
+
+        # LLM triple extraction for raw chunks (populates subject_index + EventDB).
+        # Only fires when LLM extractor is available (RunPod with vLLM).
+        llm_ext = getattr(
+            getattr(store, '_ingestion', None), '_llm_extractor', None,
+        )
+        ss = getattr(store, '_supersession_state', None)
+        if llm_ext is not None and ss is not None:
+            try:
+                triples = llm_ext.extract(message, mode="conversation")
+                for subj, pred, obj in triples:
+                    subj_key = subj.lower().strip()
+                    pred_key = pred.lower().strip()
+                    if not subj_key or not pred_key or len(subj_key) < 3:
+                        continue
+                    if subj_key not in ss.subject_index:
+                        ss.subject_index[subj_key] = {}
+                    ss.subject_index[subj_key][pred_key] = (obj, message)
+                    obj_key = obj.lower().strip()
+                    if obj_key and len(obj_key) >= 3:
+                        if obj_key not in ss.subject_index:
+                            ss.subject_index[obj_key] = {}
+                        ss.subject_index[obj_key][pred_key] = (subj, message)
+                # Populate EventDB from LLM triples
+                if self._event_db is not None and triples:
+                    event_times = llm_ext.last_event_times
+                    et = event_times[0] if event_times else None
+                    self._event_db.add_batch(
+                        triples,
+                        chunk_id=ms_idx,
+                        event_date=session_time.date() if session_time else None,
+                        event_times=et,
+                    )
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"LLM triple extraction (raw chunk) failed: {e}"
+                )
 
         store._store_count += 1
 
@@ -818,12 +866,27 @@ class HermesAgent:
                 if self._structured_store is not None:
                     for (turn_text, _, _), triples in zip(turn_entries, batch_triples):
                         if triples:
-                            # Look up the turn's ms_idx from text_to_store_idx
                             ms_idx = store._resolve_text_to_store_idx.get(turn_text)
                             if ms_idx is not None:
                                 self._structured_store.add_batch(
                                     triples, turn_idx=ms_idx,
                                     turn_text=turn_text,
+                                )
+                # Populate EventDB from LLM triples (structured_primary path)
+                if self._event_db is not None:
+                    event_times = llm_ext.last_event_times
+                    for idx, ((turn_text, _, _), triples) in enumerate(
+                        zip(turn_entries, batch_triples)
+                    ):
+                        if triples:
+                            ms_idx = store._resolve_text_to_store_idx.get(turn_text)
+                            if ms_idx is not None:
+                                et = event_times[idx] if idx < len(event_times) else None
+                                self._event_db.add_batch(
+                                    triples,
+                                    chunk_id=ms_idx,
+                                    event_date=session_time.date() if session_time else None,
+                                    event_times=et,
                                 )
             except Exception as e:
                 import logging

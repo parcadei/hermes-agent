@@ -482,6 +482,20 @@ class Retriever:
             return self._cfg.lme_multihop_max_sessions
         return getattr(self, "lme_multihop_max_sessions", 10)
 
+    @property
+    def _resolve_structured_primary(self) -> bool:
+        """Whether structured EventDB is the primary retrieval path."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.structured_primary
+        return getattr(self, "structured_primary", False)
+
+    @property
+    def _resolve_structured_min_results(self) -> int:
+        """Min results from EventDB before falling through to BM25."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.structured_min_results
+        return getattr(self, "structured_min_results", 3)
+
     # ------------------------------------------------------------------
     # Core retrieval methods
     # ------------------------------------------------------------------
@@ -547,6 +561,35 @@ class Retriever:
         if agg_k > effective_k and is_aggregation_query(query_text or ""):
             effective_k = agg_k
         engine = self._resolve_engine
+
+        # Structured primary: entity-keyed EventDB as PRIMARY retrieval path.
+        # Falls through to BM25/entity_prefilter if not enough results.
+        if self._resolve_structured_primary and query_text:
+            event_db = getattr(self, "_event_db", None)
+            if event_db is not None and event_db.n_events() > 0:
+                from mabench.entity_index import extract_entities
+                q_entities = extract_entities(query_text)
+                if q_entities:
+                    q_date = _parse_current_date_from_query(query_text)
+                    scored = event_db.lookup(
+                        q_entities,
+                        top_k=effective_k,
+                        date_center=q_date,
+                        date_window_days=180,
+                    )
+                    if len(scored) >= self._resolve_structured_min_results:
+                        results = []
+                        for chunk_id, score in scored:
+                            if chunk_id < len(engine.memory_store):
+                                entry = engine.memory_store[chunk_id]
+                                results.append({
+                                    "text": entry.text,
+                                    "score": float(score),
+                                    "index": chunk_id,
+                                })
+                        if results:
+                            return results
+            # Fall through to BM25/entity_prefilter path
 
         # Entity primary: regex-based entity/bigram/unigram inverted index.
         # Discriminative test (2026-04-02): 72.2% oracle match on LME,

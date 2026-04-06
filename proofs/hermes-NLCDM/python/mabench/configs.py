@@ -113,6 +113,13 @@ class RetrievalConfig:
     # "low" (conf >= 0.25). Below threshold falls through.
     date_arithmetic: bool = False
     date_arithmetic_confidence_threshold: str = "high"
+    # structured_primary: use EventDB (entity-keyed triple store) as PRIMARY
+    # retrieval path. BM25 + entity_prefilter become the FALLBACK.
+    # Requires LLM extraction (--llm_extraction_url) to populate the EventDB.
+    # When EventDB returns >= structured_min_results chunks, those are used
+    # directly. Otherwise falls through to BM25 path.
+    structured_primary: bool = False
+    structured_min_results: int = 3
 
 
 @dataclass(frozen=True)
