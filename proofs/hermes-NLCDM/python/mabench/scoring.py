@@ -300,7 +300,19 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
         return None
 
     def score(self, query: str, content: str) -> float:
-        """Cosine similarity between query and content embeddings."""
+        """Cosine similarity between query and content embeddings.
+
+        Returns a float in [0.0, 1.0] as required by the RelevanceScorer
+        protocol. Raw cosine similarity on normalized embeddings is in
+        [-1, 1]; negative values indicate anti-correlation which maps to
+        zero relevance. The clamp keeps the orchestrator MemoryState
+        invariant (relevance in [0, 1]) satisfied.
+        """
         q_emb = self.embed(query)
         c_emb = self.embed(content)
-        return float(np.dot(q_emb, c_emb))
+        cos = float(np.dot(q_emb, c_emb))
+        if cos < 0.0:
+            return 0.0
+        if cos > 1.0:
+            return 1.0
+        return cos
