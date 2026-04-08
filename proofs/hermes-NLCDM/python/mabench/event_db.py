@@ -42,6 +42,9 @@ class EventDB:
     def __init__(self) -> None:
         self._entity_index: dict[str, list[Event]] = {}
         self._date_index: dict[date, list[Event]] = {}
+        self._type_index: dict[str, set[str]] = {}
+        self._predicate_index: dict[str, list[Event]] = {}
+        self._chunk_index: dict[int, list[Event]] = {}
 
     def add(
         self,
@@ -64,6 +67,18 @@ class EventDB:
 
         if event_date is not None:
             self._date_index.setdefault(event_date, []).append(event)
+
+        # Type index: (X, "type", Y) -> type_index[Y_lower] = {X_lower, ...}
+        pred_key = predicate.lower().strip()
+        if pred_key == "type" and obj_key:
+            self._type_index.setdefault(obj_key, set()).add(subj_key)
+
+        # Predicate index
+        if pred_key:
+            self._predicate_index.setdefault(pred_key, []).append(event)
+
+        # Chunk index
+        self._chunk_index.setdefault(chunk_id, []).append(event)
 
     def add_batch(
         self,
@@ -119,6 +134,55 @@ class EventDB:
             (cid, hits / max_hits)
             for cid, hits in chunk_hits.most_common(top_k)
         ]
+
+    def lookup_by_type(
+        self,
+        type_name: str,
+        top_k: int = 10,
+    ) -> list[tuple[int, float]]:
+        """Resolve a type name to entities, then look up those entities.
+
+        E.g. lookup_by_type("museum") finds entities typed as "museum"
+        (MoMA, Rijksmuseum, ...) and returns chunk_ids where they appear.
+        """
+        key = type_name.lower().strip()
+        entity_names = self._type_index.get(key, set())
+        if not entity_names:
+            return []
+        return self.lookup(entity_names, top_k=top_k)
+
+    def lookup_by_predicate(
+        self,
+        predicate: str,
+        top_k: int = 10,
+    ) -> list[tuple[int, float]]:
+        """Look up chunk_ids by predicate name."""
+        key = predicate.lower().strip()
+        events = self._predicate_index.get(key, [])
+        if not events:
+            return []
+        chunk_hits: Counter[int] = Counter()
+        for event in events:
+            chunk_hits[event.chunk_id] += 1
+        max_hits = chunk_hits.most_common(1)[0][1]
+        return [
+            (cid, hits / max_hits)
+            for cid, hits in chunk_hits.most_common(top_k)
+        ]
+
+    def get_facts_for_chunks(
+        self,
+        chunk_ids: list[int],
+    ) -> dict[int, list[str]]:
+        """Get human-readable facts for given chunk_ids."""
+        result: dict[int, list[str]] = {}
+        for cid in chunk_ids:
+            events = self._chunk_index.get(cid, [])
+            if events:
+                result[cid] = [
+                    f"{e.subject} {e.predicate} {e.object}" for e in events
+                ]
+        return result
 
     def n_events(self) -> int:
         """Count unique events (each event is counted once, not per index entry)."""

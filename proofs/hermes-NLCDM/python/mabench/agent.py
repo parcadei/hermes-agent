@@ -67,6 +67,20 @@ from mabench.relik_extractor import RelikExtractor
 from mabench.conversation_parser import parse_chunk
 from mabench.event_db import EventDB
 
+import re as _re
+
+_REFUSAL_PATTERNS = _re.compile(
+    r"I(?:'m| am) sorry|I don'?t know|not specified|not provided|no information|"
+    r"does not (?:specify|provide|mention)|not mentioned|no relevant|"
+    r"cannot (?:find|determine|recall)|no record|unable to (?:find|determine)",
+    _re.IGNORECASE,
+)
+
+
+def _is_refusal(text: str) -> bool:
+    """Detect LLM refusal/hedging in generated answers."""
+    return bool(_REFUSAL_PATTERNS.search(text))
+
 
 # Default V1 orchestrator params (validated in test_engine.py)
 _V1_PARAMS = ParameterSet(
@@ -75,6 +89,21 @@ _V1_PARAMS = ParameterSet(
     survival_threshold=0.05, feedback_sensitivity=0.1,
     w1=0.35, w2=0.25, w3=0.20, w4=0.20,
 )
+
+
+class _ScorerEmbedderAdapter:
+    """Bridges EmbeddingRelevanceScorer → ChronosEventIndex embedder interface.
+
+    ChronosEventIndex expects an embedder with .encode(texts) returning ndarray.
+    The scorer lazy-loads its SentenceTransformer, so we delegate to embed_batch().
+    """
+    def __init__(self, scorer):
+        self._scorer = scorer
+
+    def encode(self, texts):
+        import numpy as np
+        embeddings = self._scorer.embed_batch(texts)
+        return np.array(embeddings)
 
 
 class HermesAgent:
@@ -135,12 +164,22 @@ class HermesAgent:
         dynamic_prompting: bool = False,
         # Raw chunk mode: skip conversation parsing, store whole chunks
         raw_chunks: bool = False,
+        # Pre-computed triples cache (dict: md5_hash -> {triples, event_times})
+        triples_cache: dict | None = None,
         # LFM SVO extraction (local LM Studio, LME entity index enrichment)
         lfm_extraction_url: str | None = None,
         # Path to pre-extracted SVO cache (skips live extraction)
         svo_cache_path: str | None = None,
         # Structured fact store (SVO triple index as RRF retrieval channel)
         structured_store: StructuredStoreConfig | None = None,
+        # Chronos modules (reverse-engineered from arXiv 2603.16862)
+        chronos_event_index: bool = False,
+        chronos_dynamic_prompt: bool = False,
+        chronos_context_expansion: bool = False,
+        chronos_agent: bool = False,
+        # Remote embedding API (replaces local SentenceTransformer)
+        embed_url: str | None = None,
+        embed_model: str | None = None,
     ) -> None:
         # Store configs (frozen — safe to share across modules)
         self._retrieval_cfg = retrieval or RetrievalConfig()
@@ -184,9 +223,20 @@ class HermesAgent:
         self._raw_chunks = raw_chunks
         self._lfm_extraction_url = lfm_extraction_url
         self._svo_cache_path = svo_cache_path
+        self._triples_cache = triples_cache
+
+        # Chronos flags
+        self._chronos_event_index_flag = chronos_event_index
+        self._chronos_dynamic_prompt_flag = chronos_dynamic_prompt
+        self._chronos_context_expansion_flag = chronos_context_expansion
+        self._chronos_agent_flag = chronos_agent
 
         # -- Persistent resources (survive reset) --------------------------
-        self._scorer = EmbeddingRelevanceScorer()
+        self._embed_url = embed_url
+        self._embed_model = embed_model
+        self._scorer = EmbeddingRelevanceScorer.create(
+            embed_url=embed_url, embed_model=embed_model,
+        )
         try:
             import torch
             _dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -254,7 +304,7 @@ class HermesAgent:
         self._entity_index = ei
 
         # -- 3. Optional infrastructure -----------------------------------
-        _need_bm25 = self._bm25_hops or self._retrieval_cfg.bm25_rerank or self._retrieval_cfg.bm25_primary or self._structured_query_flag
+        _need_bm25 = self._bm25_hops or self._retrieval_cfg.bm25_rerank or self._retrieval_cfg.bm25_primary or self._structured_query_flag or self._chronos_agent_flag
         bm25 = BM25Index() if _need_bm25 else None
         chain = ChainCache(similarity_threshold=0.95) if self._chain_cache_flag else None
         tri = TriadicMemory(n=self._triadic_n, p=self._triadic_p) if self._triadic_flag else None
@@ -267,7 +317,11 @@ class HermesAgent:
 
         # -- 4. Leaf modules (no cross-module deps) -----------------------
         rebel = RebelKG() if self._rebel_kg_flag else None
-        outgester = Outgester(self._llm_cfg, dynamic_prompting=self._dynamic_prompting)
+        outgester = Outgester(
+            self._llm_cfg,
+            dynamic_prompting=self._dynamic_prompting,
+            exact_words_prompt=self._retrieval_cfg.exact_words_prompt,
+        )
         ent_reranker = (EntityReranker(
             self._scorer,
             nlp=getattr(self._ingestion, "_nlp", None),
@@ -327,7 +381,7 @@ class HermesAgent:
         # EventDB: entity-keyed structured event store (PRIMARY retrieval
         # path when --structured_primary is on). Populated during ingestion
         # from LLM triple extraction output. Requires llm_extraction_url.
-        event_db = EventDB() if self._retrieval_cfg.structured_primary else None
+        event_db = EventDB() if (self._retrieval_cfg.structured_primary or self._retrieval_cfg.structured_rrf or self._chronos_agent_flag) else None
         self._event_db = event_db
 
         # -- 5. Tier 1: entity ops + retriever ----------------------------
@@ -480,6 +534,28 @@ class HermesAgent:
         self.relik_extractor = relik_extractor
         self.cooc_kg = cooc_kg
 
+        # -- Chronos modules (arXiv 2603.16862) -----------------------------
+        if self._chronos_event_index_flag:
+            from mabench.chronos_event_index import ChronosEventIndex
+            self._chronos_event_idx = ChronosEventIndex(
+                embedder=_ScorerEmbedderAdapter(self._scorer),
+            )
+        else:
+            self._chronos_event_idx = None
+        if self._chronos_context_expansion_flag:
+            from mabench.chronos_context_expansion import ContextExpander
+            self._context_expander = ContextExpander()
+        else:
+            self._context_expander = None
+        # Chronos reranker: cross-encoder for initial retrieval + agent tool reranking
+        # Paper Section 3.3: "cross-encoder reranking to rescore the 100 candidates"
+        # Paper Section 3.4: "reranking is applied to the original question"
+        if self._chronos_agent_flag:
+            self._chronos_reranker = CrossEncoderReranker(top_k=15)
+        else:
+            self._chronos_reranker = None
+        self._chronos_turn_positions: dict[str, int] = {}
+
         # Wire EventDB to retriever for structured_primary query-time access.
         retriever._event_db = event_db
 
@@ -524,17 +600,151 @@ class HermesAgent:
         """
         if memorizing:
             return self._store_with_parser(message)
+        elif self._chronos_agent_flag:
+            return self._chronos_query(message)
         elif self._structured_query_flag:
-            result = self.structured_agent.answer(message)
-            return {
-                "output": result["output"],
-                "input_len": result.get("prompt_tokens", 0),
-                "output_len": result.get("completion_tokens", 0),
-            }
+            # Hybrid: run baseline first, fall back to SQ on refusal
+            baseline_result = self.query_engine._query(message)
+            output = baseline_result.get("output", "") if isinstance(baseline_result, dict) else str(baseline_result)
+            if _is_refusal(output):
+                sq_result = self.structured_agent.answer(message)
+                return {
+                    "output": sq_result["output"],
+                    "input_len": sq_result.get("prompt_tokens", 0),
+                    "output_len": sq_result.get("completion_tokens", 0),
+                }
+            return baseline_result
         elif self._iterative_flag:
             return self.iterative._iterative_query(message)
         else:
             return self.query_engine._query(message)
+
+    def _chronos_query(self, message: str) -> dict:
+        """Chronos pipeline: dynamic prompt -> initial retrieval -> context expansion -> agent.
+
+        Reverse-engineered from arXiv 2603.16862 Section 3.3-3.4.
+        """
+        from mabench.chronos_agent import ChronosAgent
+        from mabench.chronos_dynamic_prompt import generate_retrieval_guidance
+        from mabench.temporal import parse_query_date
+
+        # 0. Extract question date (paper: "agent is presented with the question and its date")
+        question_date = ""
+        qd = parse_query_date(message)
+        if qd:
+            question_date = qd.strftime("%Y-%m-%d")
+
+        # 1. Dynamic prompting (optional per-question LLM retrieval guidance)
+        guidance = ""
+        if self._chronos_dynamic_prompt_flag:
+            try:
+                client = self._ensure_openai_client()
+                guidance = generate_retrieval_guidance(
+                    message, client, model=self._llm_cfg.model,
+                )
+            except Exception:
+                pass  # fall back to empty guidance
+
+        # 2. Initial retrieval: top-100 via FAISS → rerank → top-15
+        #    Paper Section 3.3: "cross-encoder reranking to rescore the 100
+        #    retrieved candidates... top-15 most relevant turns are selected"
+        q_emb = self._scorer.embed(message)
+        hits = self.engine.query(q_emb, top_k=100)
+        reranker = getattr(self, "_chronos_reranker", None)
+        if reranker and len(hits) > 15:
+            rerank_input = []
+            for h in hits:
+                if isinstance(h, dict) and "index" in h:
+                    idx = int(h["index"])
+                    entry = self.engine.memory_store[idx] if idx < len(self.engine.memory_store) else None
+                    text = entry.text if entry and hasattr(entry, "text") else ""
+                    rerank_input.append({"text": text, "score": float(h.get("score", 0)), "index": idx})
+            reranked = reranker.rerank(message, rerank_input, top_k=15)
+            top_indices = [r["index"] for r in reranked]
+        else:
+            top_indices = [
+                int(h["index"]) for h in hits[:15]
+                if isinstance(h, dict) and "index" in h
+            ]
+
+        # 3. Context expansion (+-1 turn from same session)
+        if self._context_expander is not None and top_indices:
+            top_indices = self._context_expander.expand(top_indices, k=1)
+
+        # 4. Format pre-retrieved context with session headers
+        pre_context = self._format_session_context(top_indices)
+
+        # 5. Construct ChronosAgent and run ReAct loop
+        agent = ChronosAgent(
+            memory_store=self.engine.memory_store,
+            event_index=self._chronos_event_idx,
+            event_db=self._event_db,
+            engine=self.engine,
+            scorer=self._scorer,
+            bm25_index=getattr(self.store, "_bm25_index", None),
+            llm_config=self._llm_cfg,
+            max_hops=5,
+            pre_context=pre_context,
+            retrieval_guidance=guidance,
+            reranker=reranker,
+            original_question=message,
+            question_date=question_date,
+        )
+        result = agent.answer(message)
+        return {
+            "output": result["output"],
+            "input_len": result.get("prompt_tokens", 0),
+            "output_len": result.get("completion_tokens", 0),
+        }
+
+    def _ensure_openai_client(self):
+        """Get or create OpenAI-compatible client for Chronos dynamic prompting."""
+        if not hasattr(self, "_openai_client") or self._openai_client is None:
+            import os
+            from openai import OpenAI
+            self._openai_client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=os.environ.get("OPENROUTER_API_KEY", ""),
+            )
+        return self._openai_client
+
+    def _format_session_context(self, indices: list[int]) -> str:
+        """Format retrieved turns grouped by session date with headers.
+
+        Paper Section 3.3: 'Retrieved turns are formatted into hierarchical
+        natural language context blocks organized by conversation date.
+        Turns group by session with date headers.'
+        """
+        if not indices:
+            return ""
+
+        session_groups: dict[str, list[str]] = {}
+        ms = self.engine.memory_store
+
+        for idx in indices:
+            if idx < 0 or idx >= len(ms):
+                continue
+            entry = ms[idx]
+            text = entry.text if hasattr(entry, "text") else str(entry)
+            session_time = getattr(entry, "session_time", None)
+            session_date = (
+                session_time.strftime("%Y-%m-%d") if session_time else "Unknown"
+            )
+            session_groups.setdefault(session_date, []).append(text)
+
+        parts: list[str] = []
+        for i, (date_str, texts) in enumerate(sorted(session_groups.items()), 1):
+            parts.append(f"Session {i} ({date_str})")
+            for text in texts:
+                parts.append(f"  {text}")
+            parts.append("")  # blank line between sessions
+
+        return "\n".join(parts).strip()
+
+    def finalize_ingestion(self) -> None:
+        """Called after all chunks are ingested. Builds deferred indexes."""
+        if self._chronos_event_idx is not None:
+            self._chronos_event_idx.build_index()
 
     @staticmethod
     def _is_conversation_chunk(text: str) -> bool:
@@ -626,6 +836,17 @@ class HermesAgent:
         for ug in extract_content_unigrams(message):
             store._unigram_inv_idx.setdefault(ug, set()).add(ms_idx)
 
+        # Noun-chunk inverted index (when enabled)
+        nc_inv = getattr(store, "_noun_chunk_inv_idx", None)
+        if nc_inv is not None and nc_inv is not ...:
+            from mabench.noun_chunk_index import extract_noun_chunks
+            for chunk in extract_noun_chunks(message):
+                nc_inv.setdefault(chunk, set()).add(ms_idx)
+                if " " in chunk:
+                    for word in chunk.split():
+                        if len(word) > 2:
+                            nc_inv.setdefault(word, set()).add(ms_idx)
+
         # Event calendar: extract all Chat Time timestamps from raw chunk
         from mabench.event_calendar import (
             parse_all_chat_times, extract_event_keywords, extract_inline_dates,
@@ -652,41 +873,95 @@ class HermesAgent:
                 cal_lme.ingest_turn(ms_idx, message, chunk_date)
 
         # LLM triple extraction for raw chunks (populates subject_index + EventDB).
-        # Only fires when LLM extractor is available (RunPod with vLLM).
-        llm_ext = getattr(
-            getattr(store, '_ingestion', None), '_llm_extractor', None,
-        )
-        ss = getattr(store, '_supersession_state', None)
-        if llm_ext is not None and ss is not None:
-            try:
-                triples = llm_ext.extract(message, mode="conversation")
+        # Checks pre-computed triples cache first; falls back to live LLM extraction.
+        import hashlib as _hashlib
+        triples = None
+        event_times_raw = None
+        cache_hit = False
+
+        if self._triples_cache is not None:
+            chunk_hash = _hashlib.md5(message.encode()).hexdigest()
+            cached = self._triples_cache.get(chunk_hash)
+            if cached is not None:
+                triples = [tuple(t) for t in cached.get("triples", [])]
+                event_times_raw = cached.get("event_times", [])
+                cache_hit = True
+
+        if triples is None:
+            llm_ext = getattr(
+                getattr(store, '_ingestion', None), '_llm_extractor', None,
+            )
+            if llm_ext is not None:
+                try:
+                    triples = llm_ext.extract(message, mode="conversation")
+                    event_times_raw = llm_ext.last_event_times
+                except Exception as e:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"LLM triple extraction (raw chunk) failed: {e}"
+                    )
+
+        if triples:
+            ss = getattr(store, '_supersession_state', None)
+            if ss is not None:
                 for subj, pred, obj in triples:
-                    subj_key = subj.lower().strip()
-                    pred_key = pred.lower().strip()
+                    subj_key = str(subj).lower().strip()
+                    pred_key = str(pred).lower().strip()
                     if not subj_key or not pred_key or len(subj_key) < 3:
                         continue
                     if subj_key not in ss.subject_index:
                         ss.subject_index[subj_key] = {}
                     ss.subject_index[subj_key][pred_key] = (obj, message)
-                    obj_key = obj.lower().strip()
+                    obj_key = str(obj).lower().strip()
                     if obj_key and len(obj_key) >= 3:
                         if obj_key not in ss.subject_index:
                             ss.subject_index[obj_key] = {}
                         ss.subject_index[obj_key][pred_key] = (subj, message)
-                # Populate EventDB from LLM triples
-                if self._event_db is not None and triples:
-                    event_times = llm_ext.last_event_times
-                    et = event_times[0] if event_times else None
-                    self._event_db.add_batch(
-                        triples,
-                        chunk_id=ms_idx,
-                        event_date=session_time.date() if session_time else None,
-                        event_times=et,
-                    )
-            except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(
-                    f"LLM triple extraction (raw chunk) failed: {e}"
+
+            if self._event_db is not None:
+                # Parse event_times from cache (ISO strings) or live extractor
+                parsed_times = None
+                if cache_hit and event_times_raw:
+                    from datetime import datetime as _dt
+                    parsed_times = []
+                    for et_str in event_times_raw:
+                        if et_str and isinstance(et_str, str):
+                            try:
+                                parsed_times.append(_dt.fromisoformat(et_str))
+                            except (ValueError, TypeError):
+                                parsed_times.append(None)
+                        else:
+                            parsed_times.append(None)
+                elif not cache_hit and event_times_raw:
+                    parsed_times = event_times_raw[0] if event_times_raw else None
+
+                self._event_db.add_batch(
+                    triples,
+                    chunk_id=ms_idx,
+                    event_date=session_time.date() if session_time else None,
+                    event_times=parsed_times,
+                )
+
+        # Chronos ContextExpander: register this chunk for +-k expansion
+        if self._context_expander is not None:
+            session_date_str = session_time.strftime("%Y-%m-%d") if session_time else "unknown"
+            pos = self._chronos_turn_positions.get(session_date_str, 0)
+            self._context_expander.register(
+                chunk_id=ms_idx, session_id=session_date_str, position=pos,
+            )
+            self._chronos_turn_positions[session_date_str] = pos + 1
+
+        # Chronos EventIndex: populate from extracted triples
+        if self._chronos_event_idx is not None and triples:
+            session_date_str_ev = session_time.strftime("%Y-%m-%d") if session_time else "unknown"
+            for subj, pred, obj in triples:
+                event_text = f"{subj} {pred} {obj}"
+                event_date = session_time.date() if session_time else None
+                self._chronos_event_idx.add_event(
+                    text=event_text,
+                    chunk_id=ms_idx,
+                    start_date=event_date,
+                    session_id=session_date_str_ev,
                 )
 
         store._store_count += 1
@@ -778,6 +1053,17 @@ class HermesAgent:
                 store._bigram_inv_idx.setdefault(bg, set()).add(ms_idx)
             for ug in extract_content_unigrams(turn_text):
                 store._unigram_inv_idx.setdefault(ug, set()).add(ms_idx)
+
+            # Noun-chunk inverted index (when enabled)
+            nc_inv = getattr(store, "_noun_chunk_inv_idx", None)
+            if nc_inv is not None and nc_inv is not ...:
+                from mabench.noun_chunk_index import extract_noun_chunks
+                for nc in extract_noun_chunks(turn_text):
+                    nc_inv.setdefault(nc, set()).add(ms_idx)
+                    if " " in nc:
+                        for word in nc.split():
+                            if len(word) > 2:
+                                nc_inv.setdefault(word, set()).add(ms_idx)
 
             # Event calendar (temporal resolution — parse date + keywords)
             turn_date = parse_turn_date(turn_text)
