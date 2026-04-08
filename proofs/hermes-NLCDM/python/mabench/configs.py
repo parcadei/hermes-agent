@@ -120,6 +120,32 @@ class RetrievalConfig:
     # directly. Otherwise falls through to BM25 path.
     structured_primary: bool = False
     structured_min_results: int = 3
+    # structured_rrf: add EventDB (LLM query terms) as RRF channel alongside BM25+entity.
+    # Unlike structured_primary (which replaces BM25), this fuses EventDB results into
+    # the existing entity_prefilter RRF — EventDB supplements, never replaces.
+    # Requires entity_prefilter=True, bm25_primary=True, and LLM extraction for EventDB population.
+    # Uses gpt-4o-mini at query time to extract search terms (~$0.001/q, ~0.5s).
+    structured_rrf: bool = False
+    # set_union_merge: use set-union instead of RRF for entity_prefilter fusion.
+    # Omni-SimpleMem discovery: score-based reranking disrupts semantic ordering.
+    # R(q) = BM25(q) ∪ (Entity(q) \ BM25(q)) — BM25 keeps its ranking,
+    # entity-only results are appended. Requires entity_prefilter + bm25_primary.
+    set_union_merge: bool = False
+    # exact_words_prompt: add "Use exact words and phrases from the context"
+    # instruction to answer generation prompts. Targets wrong_fact ansgen failures
+    # where LLM paraphrases instead of quoting retrieved text.
+    exact_words_prompt: bool = False
+    # noun_chunk_retrieval: add spaCy noun-chunk inverted index as 3rd RRF channel.
+    # Extracts multi-word noun phrases + content lemmas (NOUN/PROPN/VERB) to find
+    # chunks that BM25 misses due to common-word dilution. Requires entity_prefilter
+    # + bm25_primary. Disc test: 17/17, finds all targets BM25 misses.
+    noun_chunk_retrieval: bool = False
+    # entity_graph: add per-entity knowledge graph as RRF channel.
+    # Builds an EntityGraph during ingestion from extracted triples.
+    # At query time, resolves entity mentions via alias/substring matching
+    # and returns evidence turn indices as an additional RRF signal.
+    # Requires entity_prefilter + bm25_primary + triples (cache or LLM).
+    entity_graph: bool = False
 
 
 @dataclass(frozen=True)

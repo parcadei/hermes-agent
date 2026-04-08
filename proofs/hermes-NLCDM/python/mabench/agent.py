@@ -66,6 +66,7 @@ from mabench.cooccurrence_extractor import CooccurrenceExtractor
 from mabench.relik_extractor import RelikExtractor
 from mabench.conversation_parser import parse_chunk
 from mabench.event_db import EventDB
+from mabench.entity_graph import EntityGraph
 
 import re as _re
 
@@ -384,6 +385,11 @@ class HermesAgent:
         event_db = EventDB() if (self._retrieval_cfg.structured_primary or self._retrieval_cfg.structured_rrf or self._chronos_agent_flag) else None
         self._event_db = event_db
 
+        # EntityGraph: per-entity knowledge graph built from triples during ingestion.
+        # Used as an additional RRF retrieval channel in entity_prefilter.
+        entity_graph = EntityGraph() if self._retrieval_cfg.entity_graph else None
+        self._entity_graph = entity_graph
+
         # -- 5. Tier 1: entity ops + retriever ----------------------------
         entity_ops = EntityOps(
             self.engine, self._scorer,
@@ -571,6 +577,10 @@ class HermesAgent:
         # Wire event calendar (mutable list, shared reference)
         retriever._event_calendar = self.store._event_calendar
         self.pipeline._event_calendar = self.store._event_calendar
+
+        # Wire entity graph (shared mutable object, populated during ingestion)
+        retriever._entity_graph = entity_graph
+        self.pipeline._entity_graph = entity_graph
 
         # LME date-mention calendar — lazily constructed so the module import
         # and dateparser warmup are paid only when the flag is on. Wired to
@@ -940,6 +950,16 @@ class HermesAgent:
                     chunk_id=ms_idx,
                     event_date=session_time.date() if session_time else None,
                     event_times=parsed_times,
+                )
+
+        # EntityGraph: feed extracted triples into per-entity knowledge graph
+        if self._entity_graph is not None and triples:
+            for subj, pred, obj in triples:
+                self._entity_graph.ingest_triple(
+                    subj=str(subj), pred=str(pred), obj=str(obj),
+                    turn_idx=ms_idx, chunk_idx=ms_idx,
+                    timestamp=session_time,
+                    source_text=message[:200],
                 )
 
         # Chronos ContextExpander: register this chunk for +-k expansion

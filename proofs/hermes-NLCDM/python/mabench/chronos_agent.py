@@ -78,6 +78,10 @@ CHRONOS_SYSTEM_PROMPT: str = (
     "3. Use search_events_by_date for temporal queries (date ranges).\n"
     "4. Use search_turns for broad semantic/topic search when entity lookup misses.\n"
     "5. Once confident, call finalize_answer with a concise answer.\n\n"
+    "TEMPORAL: Results include pre-computed time deltas in brackets like "
+    "[Date: 2023-07-15, 21 days ago / ~3.0 weeks ago]. Use these directly "
+    "to answer 'how long ago', 'how many days/weeks', or 'which happened first' "
+    "questions. Do NOT try to compute dates yourself — use the provided deltas.\n\n"
     "You have up to {max_hops} tool calls. Be efficient.\n"
     "If the pre-retrieved context already answers the question, finalize immediately."
 )
@@ -159,6 +163,56 @@ class ChronosAgent:
         self._client: Any | None = None
 
     # ------------------------------------------------------------------
+    # Temporal enrichment
+    # ------------------------------------------------------------------
+
+    def _enrich_text_temporal(self, idx: int, text: str) -> str:
+        """Prepend temporal delta to text if question_date is available.
+
+        Produces: "[Date: 2023-07-15, 21 days ago / ~3.0 weeks ago] original text..."
+        so the LLM can answer temporal queries by reading the pre-computed deltas.
+        """
+        if not self._question_date:
+            return text
+        entry = self._memory_store[idx] if 0 <= idx < len(self._memory_store) else None
+        if entry is None:
+            return text
+        session_time = getattr(entry, "session_time", None)
+        if session_time is None:
+            # Try parsing from text header: "[2022/11/17 (Thu) 12:04]"
+            from mabench.temporal import parse_chat_time
+            session_time = parse_chat_time(text)
+        if session_time is None:
+            return text
+        try:
+            from datetime import date as _date
+            q_date = _date.fromisoformat(self._question_date)
+            e_date = session_time.date() if hasattr(session_time, "date") else session_time
+            delta_days = (q_date - e_date).days
+            date_str = e_date.isoformat()
+            if delta_days > 0:
+                # Aligned with temporal.py enrich_with_temporal() format.
+                # LLM-validated: all 4 local models (3B-27B) reason correctly
+                # from this format for temporal questions.
+                parts = [f"{delta_days} days ago"]
+                if delta_days >= 7:
+                    weeks = delta_days / 7
+                    parts.append(f"~{weeks:.1f} weeks ago")
+                if delta_days >= 30:
+                    months = delta_days / 30.44
+                    parts.append(f"~{months:.1f} months ago")
+                if delta_days >= 365:
+                    years = delta_days / 365.25
+                    parts.append(f"~{years:.1f} years ago")
+                return f"[Date: {date_str}, {' / '.join(parts)}] {text}"
+            elif delta_days < 0:
+                return f"[Date: {date_str}, {abs(delta_days)} days in the future] {text}"
+            else:
+                return f"[Date: {date_str}, same day] {text}"
+        except (ValueError, TypeError, AttributeError):
+            return text
+
+    # ------------------------------------------------------------------
     # Tool implementations
     # ------------------------------------------------------------------
 
@@ -190,11 +244,12 @@ class ChronosAgent:
         else:
             indices = [int(h["index"]) for h in hits if isinstance(h, dict) and "index" in h]
         indices = indices[:top_k]
-        # Build turns with text snippets for the agent to read
+        # Build turns with text snippets + temporal enrichment for the agent
         turns = []
         for idx in indices:
             text = self._get_text(idx)
             if text:
+                text = self._enrich_text_temporal(idx, text)
                 turns.append({"idx": idx, "text": text[:self._max_read_chars]})
         return {"indices": indices, "turns": turns, "query": query}
 
@@ -235,14 +290,17 @@ class ChronosAgent:
                     pred_chunks.add(cid)
             hits = [(cid, score) for cid, score in hits if cid in pred_chunks]
 
-        # Get facts for result chunks
+        # Get facts for result chunks, enriched with temporal deltas
         chunk_ids = [cid for cid, _ in hits[:top_k]]
         facts_map = self._event_db.get_facts_for_chunks(chunk_ids)
 
-        return {"results": [
-            {"chunk_id": cid, "score": round(score, 4), "facts": facts_map.get(cid, [])}
-            for cid, score in hits[:top_k]
-        ]}
+        results = []
+        for cid, score in hits[:top_k]:
+            facts = facts_map.get(cid, [])
+            # Enrich each fact string with temporal delta
+            enriched_facts = [self._enrich_text_temporal(cid, f) for f in facts]
+            results.append({"chunk_id": cid, "score": round(score, 4), "facts": enriched_facts})
+        return {"results": results}
 
     def _tool_search_events_by_date(
         self, start_date: str, end_date: str, top_k: int = 50
@@ -260,7 +318,10 @@ class ChronosAgent:
         except (ValueError, TypeError):
             return {"results": [], "message": f"invalid date format: {start_date} / {end_date}"}
         hits = self._event_index.search_by_date(sd, ed, top_k=top_k)
-        return {"results": [{"chunk_id": cid, "text": txt} for cid, txt in hits], "count": len(hits)}
+        return {"results": [
+            {"chunk_id": cid, "text": self._enrich_text_temporal(cid, txt)}
+            for cid, txt in hits
+        ], "count": len(hits)}
 
     def _get_text(self, idx: int) -> str | None:
         """Fetch fact text from memory store by index."""

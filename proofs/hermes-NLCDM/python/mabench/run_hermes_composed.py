@@ -118,6 +118,16 @@ def _save_context(agent: HermesAgent, path: Path, context_idx: int) -> None:
     if event_db is not None:
         state["event_db"] = event_db
 
+    chronos_evt = getattr(agent, '_chronos_event_idx', None)
+    if chronos_evt is not None:
+        state["chronos_event_idx"] = chronos_evt
+    ctx_exp = getattr(agent, '_context_expander', None)
+    if ctx_exp is not None:
+        state["context_expander"] = ctx_exp
+    chronos_positions = getattr(agent, '_chronos_turn_positions', None)
+    if chronos_positions:
+        state["chronos_turn_positions"] = chronos_positions
+
     state_file = ctx_dir / "state.pkl"
     with open(state_file, "wb") as f:
         pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
@@ -213,6 +223,22 @@ def _load_context(agent: HermesAgent, path: Path, context_idx: int) -> bool:
     agent.pipeline._bigram_inv_idx = bigram_inv
     agent.pipeline._unigram_inv_idx = unigram_inv
 
+    # Noun-chunk inverted index: spaCy noun phrases + content lemmas
+    if getattr(args, "noun_chunk_retrieval", False):
+        from mabench.noun_chunk_index import extract_noun_chunks
+        nc_inv: dict[str, set[int]] = {}
+        for i, m in enumerate(agent.engine.memory_store):
+            for chunk in extract_noun_chunks(m.text):
+                nc_inv.setdefault(chunk, set()).add(i)
+                # Also index individual words from multi-word chunks
+                if " " in chunk:
+                    for word in chunk.split():
+                        if len(word) > 2:
+                            nc_inv.setdefault(word, set()).add(i)
+        agent.store._noun_chunk_inv_idx = nc_inv
+        agent.retriever._noun_chunk_inv_idx = nc_inv
+        agent.pipeline._noun_chunk_inv_idx = nc_inv
+
     # Event calendar: rebuild from memory_store
     from mabench.event_calendar import (
         parse_turn_date, extract_event_keywords, extract_inline_dates,
@@ -277,6 +303,14 @@ def _load_context(agent: HermesAgent, path: Path, context_idx: int) -> bool:
         agent._event_db = state["event_db"]
         agent.retriever._event_db = state["event_db"]
 
+    # Chronos modules (pickle-safe: dataclasses + numpy arrays)
+    if "chronos_event_idx" in state:
+        agent._chronos_event_idx = state["chronos_event_idx"]
+    if "context_expander" in state:
+        agent._context_expander = state["context_expander"]
+    if "chronos_turn_positions" in state:
+        agent._chronos_turn_positions = state["chronos_turn_positions"]
+
     # CoocKG (pickle-safe: pure Python dicts)
     if "cooc_kg" in state and agent.store._cooc_kg is not None:
         agent.store._cooc_kg = state["cooc_kg"]
@@ -321,6 +355,10 @@ def parse_args():
     parser = ArgumentParser(description="MABench eval with composed HermesAgent")
     parser.add_argument("--dataset_config", type=str, required=True)
     parser.add_argument("--model", type=str, default="gpt-4o-mini")
+    parser.add_argument("--embed_url", type=str, default="",
+                        help="Remote embedding API URL (vLLM or OpenAI). Overrides local SentenceTransformer.")
+    parser.add_argument("--embed_model", type=str, default="",
+                        help="Embedding model name for --embed_url (default: Qwen/Qwen3-Embedding-8B)")
     parser.add_argument("--retrieve_num", type=int, default=10)
     parser.add_argument("--contradiction_threshold", type=float, default=0.95)
     parser.add_argument("--dream_interval", type=int, default=0)
@@ -534,12 +572,49 @@ def parse_args():
                              "BM25+entity_prefilter become FALLBACK when EventDB returns < min_results.")
     parser.add_argument("--structured_min_results", type=int, default=3,
                         help="Min EventDB results before falling through to BM25 (default 3)")
+    parser.add_argument("--structured_rrf", action="store_true",
+                        help="Add EventDB (LLM query terms) as RRF channel in entity_prefilter. "
+                             "Supplements BM25+entity instead of replacing. Requires --entity_prefilter + --triples_cache.")
+
+    # Set-union merge: BM25 keeps ranking, entity-only results appended (no RRF scoring)
+    parser.add_argument("--set_union_merge", action="store_true",
+                        help="Use set-union instead of RRF for entity_prefilter+BM25 fusion. "
+                             "BM25 results keep their ranking; entity-only results are appended.")
+    # Exact words prompt: instruct LLM to quote context rather than paraphrase
+    parser.add_argument("--exact_words_prompt", action="store_true",
+                        help="Add 'use exact words from the context' instruction to answer prompts.")
+    # Noun-chunk retrieval: spaCy noun-phrase inverted index as 3rd RRF channel
+    parser.add_argument("--noun_chunk_retrieval", action="store_true",
+                        help="Add spaCy noun-chunk inverted index as 3rd RRF channel. "
+                             "Finds chunks BM25 misses due to common-word dilution. "
+                             "Requires --entity_prefilter + --bm25_primary.")
+
+    # Entity graph: per-entity knowledge graph as RRF channel
+    parser.add_argument("--entity_graph", action="store_true",
+                        help="Add per-entity knowledge graph as RRF channel. "
+                             "Builds EntityGraph during ingestion from extracted triples, "
+                             "resolves entity mentions via alias/substring matching at query time. "
+                             "Requires --entity_prefilter + --bm25_primary + triples (--triples_cache or LLM extraction).")
+
+    parser.add_argument("--triples_cache", type=str, default=None,
+                        help="Path to pre-computed triples JSON cache (from precompute_triples.py). "
+                             "Skips live LLM extraction during ingestion.")
 
     # Structured event-DB tool-calling query (Chronos-style)
     parser.add_argument("--structured_query", action="store_true",
                         help="Use LLM tool-calling loop over entity/date/BM25 indexes (Chronos-style structured retrieval)")
     parser.add_argument("--structured_query_max_hops", type=int, default=3,
                         help="Max tool calls per question in structured query mode (default 3)")
+
+    # Chronos modules (reverse-engineered from arXiv 2603.16862)
+    parser.add_argument("--chronos_event_index", action="store_true",
+                        help="Enable Chronos event calendar vector index (separate FAISS over extracted events)")
+    parser.add_argument("--chronos_dynamic_prompt", action="store_true",
+                        help="Enable Chronos per-question LLM retrieval guidance (replaces classify-then-prompt)")
+    parser.add_argument("--chronos_context_expansion", action="store_true",
+                        help="Enable Chronos +-1 turn context expansion on initial retrieval results")
+    parser.add_argument("--chronos_agent", action="store_true",
+                        help="Enable Chronos ReAct agent (6-tool iterative retrieval loop)")
 
     # Cache
     parser.add_argument("--no_cache", action="store_true")
@@ -594,6 +669,11 @@ def _build_agent(args):
         temporal_alpha=args.temporal_alpha,
         structured_primary=args.structured_primary,
         structured_min_results=args.structured_min_results,
+        structured_rrf=args.structured_rrf,
+        set_union_merge=args.set_union_merge,
+        exact_words_prompt=args.exact_words_prompt,
+        noun_chunk_retrieval=args.noun_chunk_retrieval,
+        entity_graph=args.entity_graph,
     )
     cr = CRConfig(
         enabled=args.conflict_resolution,
@@ -671,8 +751,30 @@ def _build_agent(args):
         enabled=False,  # not exposed via CLI yet
     )
 
+    # Load pre-computed triples cache if provided
+    triples_cache = None
+    if getattr(args, "triples_cache", None):
+        import json as _json
+        with open(args.triples_cache) as _f:
+            triples_cache = _json.load(_f)
+        n_with = sum(1 for v in triples_cache.values() if v.get("triples"))
+        print(f"Triples cache: {len(triples_cache)} chunks, {n_with} with triples")
+
+    # Auto-detect embedding dimension from embedder
+    embed_dim = 768
+    if args.embed_url:
+        from mabench.scoring import APIEmbeddingScorer
+        _probe = APIEmbeddingScorer(
+            api_url=args.embed_url,
+            model_name=args.embed_model or "Qwen/Qwen3-Embedding-8B",
+        )
+        _vec = _probe.embed("dimension probe")
+        embed_dim = len(_vec)
+        print(f"Remote embedder: {args.embed_model or 'Qwen/Qwen3-Embedding-8B'} dim={embed_dim}")
+        del _probe
+
     return HermesAgent(
-        dim=768,
+        dim=embed_dim,
         contradiction_threshold=args.contradiction_threshold,
         recency_alpha=args.recency_alpha,
         dream_params=dream_params,
@@ -705,6 +807,13 @@ def _build_agent(args):
         structured_store=structured_store_cfg,
         structured_query=args.structured_query,
         structured_query_max_hops=args.structured_query_max_hops,
+        triples_cache=triples_cache,
+        chronos_event_index=args.chronos_event_index,
+        chronos_dynamic_prompt=args.chronos_dynamic_prompt,
+        chronos_context_expansion=args.chronos_context_expansion,
+        chronos_agent=args.chronos_agent,
+        embed_url=args.embed_url or None,
+        embed_model=args.embed_model or None,
     )
 
 
@@ -806,8 +915,24 @@ def main():
         config_parts.append("lfm")
     if args.svo_cache_path:
         config_parts.append("svocache")
+    if args.structured_rrf:
+        config_parts.append("structrrf")
     if args.structured_store:
         config_parts.append("structstore")
+    if args.set_union_merge:
+        config_parts.append("setunion")
+    if args.exact_words_prompt:
+        config_parts.append("exactwords")
+    if args.noun_chunk_retrieval:
+        config_parts.append("nchunk")
+    if args.chronos_event_index:
+        config_parts.append("cevt")
+    if args.chronos_dynamic_prompt:
+        config_parts.append("cdyn")
+    if args.chronos_context_expansion:
+        config_parts.append("cexp")
+    if args.chronos_agent:
+        config_parts.append("cagent")
     if args.temperature > 0:
         config_parts.append(f"t{args.temperature}")
     if args.chunk_size > 0:
@@ -933,6 +1058,7 @@ def main():
                 agent.send_message(chunk, memorizing=True)
             # Finalize CoocKG NPMI weights after all facts are ingested
             agent.store.finalize_cooc_kg()
+            agent.finalize_ingestion()
             agent._scorer.save_disk_cache()
 
             # Always save cache (--no_cache saves with timestamped label)

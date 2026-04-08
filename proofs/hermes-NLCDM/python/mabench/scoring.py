@@ -299,6 +299,20 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
 
         return None
 
+    # ------------------------------------------------------------------
+    # Factory: construct from --embed_url if provided
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def create(cls, embed_url: str | None = None, embed_model: str | None = None):
+        """Factory that returns an APIEmbeddingScorer if embed_url is set."""
+        if embed_url:
+            return APIEmbeddingScorer(
+                api_url=embed_url,
+                model_name=embed_model or "Qwen/Qwen3-Embedding-8B",
+            )
+        return cls(model_name=embed_model or "sentence-transformers/all-mpnet-base-v2")
+
     def score(self, query: str, content: str) -> float:
         """Cosine similarity between query and content embeddings.
 
@@ -316,3 +330,78 @@ class EmbeddingRelevanceScorer(RelevanceScorer):
         if cos > 1.0:
             return 1.0
         return cos
+
+
+class APIEmbeddingScorer(EmbeddingRelevanceScorer):
+    """Embedding scorer that calls a remote OpenAI-compatible embedding API.
+
+    Drops the local SentenceTransformer — all embedding is done via HTTP.
+    Compatible with vLLM ``--task embedding`` and OpenAI's embedding API.
+    """
+
+    def __init__(
+        self,
+        api_url: str,
+        model_name: str = "Qwen/Qwen3-Embedding-8B",
+        api_key: str = "",
+    ):
+        # Intentionally skip parent __init__ (no local model, no disk cache)
+        self._model_name = model_name
+        self._api_url = api_url
+        self._api_key = api_key or "dummy"
+        self._model = None  # not used — API-based
+        self._tokenizer = None
+        self._cache: dict[str, np.ndarray] = {}
+        self._client = None
+
+    def _ensure_client(self):
+        if self._client is not None:
+            return
+        from openai import OpenAI
+        self._client = OpenAI(base_url=self._api_url, api_key=self._api_key)
+
+    def _ensure_model(self):
+        pass  # no local model
+
+    def embed_batch(self, texts: list[str], batch_size: int = 64) -> list[np.ndarray]:
+        results: list[np.ndarray | None] = [None] * len(texts)
+        uncached_indices: list[int] = []
+        uncached_texts: list[str] = []
+
+        for i, t in enumerate(texts):
+            if t in self._cache:
+                results[i] = self._cache[t]
+            else:
+                uncached_indices.append(i)
+                uncached_texts.append(t)
+
+        if uncached_texts:
+            self._ensure_client()
+            for start in range(0, len(uncached_texts), batch_size):
+                batch = uncached_texts[start : start + batch_size]
+                resp = self._client.embeddings.create(
+                    model=self._model_name, input=batch,
+                )
+                for j, emb_data in enumerate(resp.data):
+                    vec = np.array(emb_data.embedding, dtype=np.float64)
+                    norm = np.linalg.norm(vec)
+                    if norm > 1e-12:
+                        vec = vec / norm
+                    idx = uncached_indices[start + j]
+                    results[idx] = vec
+                    self._cache[uncached_texts[start + j]] = vec
+
+        return results
+
+    def _load_disk_cache(self):
+        pass  # API scorer does not use disk cache (different model = different dims)
+
+    def __getstate__(self):
+        """Make picklable by excluding the OpenAI client (has thread locks)."""
+        state = self.__dict__.copy()
+        state["_client"] = None
+        return state
+
+    @property
+    def _raw_model(self):
+        raise NotImplementedError("APIEmbeddingScorer has no local model")

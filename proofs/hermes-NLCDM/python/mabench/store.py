@@ -88,6 +88,7 @@ class FactStore:
         self._entity_inv_idx: dict[str, set[int]] = {}
         self._bigram_inv_idx: dict[str, set[int]] = {}
         self._unigram_inv_idx: dict[str, set[int]] = {}
+        self._noun_chunk_inv_idx: dict[str, set[int]] = {}
 
         # Event calendar for temporal question resolution (list of event dicts)
         self._event_calendar: list[dict] = []

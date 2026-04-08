@@ -24,6 +24,77 @@ import numpy as np
 
 from mabench.configs import BeliefConfig, CRConfig, DedupConfig, RetrievalConfig
 
+import json as _json
+import logging as _logging
+import os as _os
+
+_log = _logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# LLM query-term extraction (replaces regex extract_entities for EventDB)
+# ---------------------------------------------------------------------------
+
+_LLM_QUERY_PROMPT = """\
+Given this question about a user's personal history, extract search terms \
+that would match entities stored in a conversation knowledge graph. \
+The graph stores (subject, predicate, object) triples extracted from chat messages.
+
+Return a JSON object: {{"search_terms": ["term1", "term2", ...]}}
+
+Rules:
+- Include the key nouns, named entities, and concepts from the question.
+- Add plausible synonyms or related terms (e.g., "cat" -> also "pet", "feline").
+- Include compound terms when relevant (e.g., "bedroom walls", "BBQ sauce").
+- Do NOT include generic words like "the", "a", "what", "is", "my", "your".
+- Return 3-8 terms. Fewer is fine if the question is simple.
+
+Question: {question}"""
+
+# Module-level singleton client (lazy-initialized)
+_query_llm_client = None
+
+
+def _get_query_llm_client():
+    global _query_llm_client
+    if _query_llm_client is None:
+        from openai import OpenAI
+        _query_llm_client = OpenAI(
+            base_url="https://openrouter.ai/api/v1",
+            api_key=_os.environ["OPENROUTER_API_KEY"],
+        )
+    return _query_llm_client
+
+
+def llm_extract_query_terms(question: str) -> list[str]:
+    """Use gpt-4o-mini to extract search terms from a question for EventDB lookup.
+
+    Returns a list of lowercased search terms, or an empty list on failure.
+    Cost: ~$0.001/call, ~0.5s latency.
+    """
+    if not question or not question.strip():
+        return []
+    try:
+        client = _get_query_llm_client()
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": _LLM_QUERY_PROMPT.format(question=question.strip())}],
+            temperature=0.0,
+            max_tokens=200,
+        )
+        text = resp.choices[0].message.content.strip()
+        # Parse JSON — handle markdown fenced blocks
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+        data = _json.loads(text)
+        terms = data.get("search_terms", [])
+        return [t.lower().strip() for t in terms if isinstance(t, str) and len(t.strip()) >= 2]
+    except Exception as exc:
+        _log.warning("llm_extract_query_terms failed: %s", exc)
+        return []
+
+
 # Query-time Current Date marker. Matches the LME evaluator's prompt format
 # ("Current Date: 2023/06/15" or with trailing "(Day) HH:MM"). We only need
 # year/month/day — intra-day resolution is not required for the calendar
@@ -496,6 +567,38 @@ class Retriever:
             return self._cfg.structured_min_results
         return getattr(self, "structured_min_results", 3)
 
+    @property
+    def _resolve_structured_rrf(self) -> bool:
+        """Whether to add EventDB as RRF channel in entity_prefilter."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.structured_rrf
+        return getattr(self, "structured_rrf", False)
+
+    def _resolve_set_union_merge(self) -> bool:
+        """Whether to use set-union instead of RRF for entity+BM25 fusion."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.set_union_merge
+        return getattr(self, "set_union_merge", False)
+
+    def _resolve_noun_chunk_retrieval(self) -> bool:
+        """Whether to add noun-chunk inverted index as 3rd RRF channel."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.noun_chunk_retrieval
+        return getattr(self, "noun_chunk_retrieval", False)
+
+    @property
+    def _resolve_entity_graph(self) -> bool:
+        """Whether to add entity graph as RRF channel."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.entity_graph
+        return getattr(self, "entity_graph", False)
+
+    def _resolve_exact_words_prompt(self) -> bool:
+        """Whether to add 'use exact words' instruction to answer prompts."""
+        if hasattr(self, "_cfg"):
+            return self._cfg.exact_words_prompt
+        return getattr(self, "exact_words_prompt", False)
+
     # ------------------------------------------------------------------
     # Core retrieval methods
     # ------------------------------------------------------------------
@@ -562,13 +665,19 @@ class Retriever:
             effective_k = agg_k
         engine = self._resolve_engine
 
-        # Structured primary: entity-keyed EventDB as PRIMARY retrieval path.
-        # Falls through to BM25/entity_prefilter if not enough results.
+        # Structured primary (Chronos-style): EventDB-only lookup.
+        # LLM extracts query terms → EventDB dict lookup → return directly.
+        # Falls through to BM25 only when EventDB returns zero hits.
+        _eventdb_scored: list[tuple[int, float]] | None = None
         if self._resolve_structured_primary and query_text:
             event_db = getattr(self, "_event_db", None)
             if event_db is not None and event_db.n_events() > 0:
-                from mabench.entity_index import extract_entities
-                q_entities = extract_entities(query_text)
+                q_core = query_text
+                if "Now Answer the Question:" in q_core:
+                    q_core = q_core.split("Now Answer the Question:", 1)[1]
+                    if "\n" in q_core:
+                        q_core = q_core.split("\n")[0]
+                q_entities = llm_extract_query_terms(q_core.strip())
                 if q_entities:
                     q_date = _parse_current_date_from_query(query_text)
                     scored = event_db.lookup(
@@ -577,7 +686,7 @@ class Retriever:
                         date_center=q_date,
                         date_window_days=180,
                     )
-                    if len(scored) >= self._resolve_structured_min_results:
+                    if scored:
                         results = []
                         for chunk_id, score in scored:
                             if chunk_id < len(engine.memory_store):
@@ -589,7 +698,7 @@ class Retriever:
                                 })
                         if results:
                             return results
-            # Fall through to BM25/entity_prefilter path
+            # Fall through to BM25 when EventDB has no hits
 
         # Entity primary: regex-based entity/bigram/unigram inverted index.
         # Discriminative test (2026-04-02): 72.2% oracle match on LME,
@@ -693,23 +802,83 @@ class Retriever:
                     n_turns, top_k=rrf_k,
                 )
                 bm25_hits = bm25_idx.query(query_text, top_k=rrf_k)
-                # RRF fusion (k=60 is standard)
-                rrf_scores: dict[int, float] = defaultdict(float)
-                for rank, (doc_id, _) in enumerate(bm25_hits):
-                    rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
-                for rank, (doc_id, _) in enumerate(entity_scored):
-                    rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
-                # 3rd RRF channel: event calendar keyword retrieval
-                if self._resolve_event_calendar_retrieval:
-                    cal = getattr(self, "_event_calendar", None)
-                    if cal:
-                        from mabench.event_calendar import event_calendar_retrieve
-                        cal_hits = event_calendar_retrieve(
-                            query_text, cal, top_k=rrf_k,
-                        )
-                        for rank, (doc_id, _) in enumerate(cal_hits):
-                            rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
-                fused = sorted(rrf_scores.items(), key=lambda x: -x[1])[:effective_k]
+
+                # --- Set-union merge (Omni-SimpleMem discovery) ---
+                # BM25 keeps its ranking; entity-only results appended.
+                # R(q) = BM25(q) ∪ (Entity(q) \ BM25(q))
+                if self._resolve_set_union_merge:
+                    bm25_ids = [doc_id for doc_id, _ in bm25_hits]
+                    bm25_set = set(bm25_ids)
+                    # Entity-only: docs found by entity but not BM25
+                    entity_only = [
+                        doc_id for doc_id, _ in entity_scored
+                        if doc_id not in bm25_set
+                    ]
+                    # BM25 results first (in BM25 rank order), then entity-only
+                    fused_ids = bm25_ids[:effective_k]
+                    remaining = effective_k - len(fused_ids)
+                    if remaining > 0:
+                        fused_ids.extend(entity_only[:remaining])
+                    fused = [(doc_id, 1.0) for doc_id in fused_ids]
+                else:
+                    # RRF fusion (k=60 is standard)
+                    rrf_scores: dict[int, float] = defaultdict(float)
+                    for rank, (doc_id, _) in enumerate(bm25_hits):
+                        rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
+                    for rank, (doc_id, _) in enumerate(entity_scored):
+                        rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
+                    # 3rd RRF channel: event calendar keyword retrieval
+                    if self._resolve_event_calendar_retrieval:
+                        cal = getattr(self, "_event_calendar", None)
+                        if cal:
+                            from mabench.event_calendar import event_calendar_retrieve
+                            cal_hits = event_calendar_retrieve(
+                                query_text, cal, top_k=rrf_k,
+                            )
+                            for rank, (doc_id, _) in enumerate(cal_hits):
+                                rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
+                    # Noun-chunk RRF channel: spaCy noun phrases + content lemmas.
+                    # Finds chunks BM25 misses due to common-word dilution.
+                    if self._resolve_noun_chunk_retrieval:
+                        nc_inv = getattr(self, "_noun_chunk_inv_idx", None)
+                        if nc_inv:
+                            from mabench.noun_chunk_index import noun_chunk_retrieve_scored
+                            nc_hits = noun_chunk_retrieve_scored(
+                                query_text, nc_inv, n_turns, top_k=rrf_k,
+                            )
+                            for rank, (doc_id, _) in enumerate(nc_hits):
+                                rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
+                    # EventDB RRF channel: LLM-extracted query terms → entity-keyed lookup.
+                    # Adds structured triple-store hits as additional RRF signal.
+                    if self._resolve_structured_rrf:
+                        event_db = getattr(self, "_event_db", None)
+                        if event_db is not None and event_db.n_events() > 0:
+                            q_core = query_text
+                            if "Now Answer the Question:" in q_core:
+                                q_core = q_core.split("Now Answer the Question:", 1)[1]
+                                if "\n" in q_core:
+                                    q_core = q_core.split("\n")[0]
+                            q_terms = llm_extract_query_terms(q_core.strip())
+                            if q_terms:
+                                q_date = _parse_current_date_from_query(query_text)
+                                eventdb_hits = event_db.lookup(
+                                    q_terms, top_k=rrf_k,
+                                    date_center=q_date, date_window_days=180,
+                                )
+                                for rank, (chunk_id, _) in enumerate(eventdb_hits):
+                                    rrf_scores[chunk_id] += 1.0 / (60 + rank + 1)
+                    # EntityGraph RRF channel: per-entity knowledge graph retrieval.
+                    # Resolves entity mentions in query via alias/substring matching,
+                    # then returns evidence turn indices from non-superseded facts.
+                    if self._resolve_entity_graph:
+                        eg = getattr(self, "_entity_graph", None)
+                        if eg is not None and eg.entities:
+                            eg_turns = eg.retrieve_for_question(
+                                query_text, max_turns=rrf_k,
+                            )
+                            for rank, turn_idx in enumerate(eg_turns):
+                                rrf_scores[turn_idx] += 1.0 / (60 + rank + 1)
+                    fused = sorted(rrf_scores.items(), key=lambda x: -x[1])[:effective_k]
                 results = []
                 for doc_id, score in fused:
                     if doc_id < len(engine.memory_store):

@@ -629,30 +629,21 @@ class QueryPipeline:
             final_chunks, metadata_by_key,
         )
 
-        # Always-on temporal enrichment (neutral for non-temporal queries)
-        # Gated on temporal_alpha > 0 so --temporal_alpha 0 disables everything temporal
-        _temporal_alpha = getattr(getattr(self, '_retrieval', None), '_cfg', None)
-        _temporal_alpha = getattr(_temporal_alpha, 'temporal_alpha', 0.01) if _temporal_alpha else 0.01
-        from mabench.temporal import parse_query_date, enrich_with_temporal, format_temporal_context
-        query_date = parse_query_date(question) if _temporal_alpha > 0 else None
-        if query_date is not None:
-            engine = self._resolve_engine
-            text_to_idx = getattr(engine, '_text_to_store_idx', {})
-            facts_for_enrichment = []
-            for chunk_text in final_chunks:
-                idx = text_to_idx.get(chunk_text)
-                session_time = None
-                if idx is not None and idx < len(engine.memory_store):
-                    session_time = getattr(engine.memory_store[idx], 'session_time', None)
-                facts_for_enrichment.append({"text": chunk_text, "session_time": session_time})
-            enriched = enrich_with_temporal(facts_for_enrichment, query_date)
-            temporal_ctx = format_temporal_context(enriched)
-            memory_context = temporal_ctx
-            outgestion_instructions = (
-                "Temporal context for each fact is shown in brackets [date, N days before query]. "
-                "Use pre-computed time differences to answer temporal questions accurately. "
-                + outgestion_instructions
-            )
+        # Temporal enrichment DISABLED in production pipeline.
+        # Eval results (2026-04-08): date prefixes on ALL chunks cause -2.3% SubEM
+        # regression (77/300 vs 83/300 baseline). The [Date: ...] prefixes add noise
+        # that disrupts gpt-4o-mini's factual answers even when temporal instructions
+        # are gated to temporal-only questions. The re-sorting by session_time also
+        # destroys BM25 relevance ranking.
+        #
+        # The enrichment format IS correct (validated with 4 local LLMs for temporal
+        # questions). But at the production level, the ~10 temporal questions gained
+        # don't offset the ~16 factual questions lost from prefix noise.
+        #
+        # TODO: Re-enable when temporal enrichment can be applied ONLY to the
+        # temporal question's answer generation, not injected into chunk text that
+        # the LLM sees for ALL questions. Possible approach: separate temporal
+        # context section in the prompt (not inline prefixes).
 
         memory_time = time.time() - query_start
 

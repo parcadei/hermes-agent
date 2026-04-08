@@ -114,8 +114,9 @@ DYNAMIC_PROMPTS: dict[str, str] = {
     "temporal": (
         "You are a helpful assistant answering from a knowledge pool. "
         "The user is asking about timing or temporal ordering. "
-        "Use dates and timestamps in the knowledge pool to compute your answer. "
-        "Give a very concise answer."
+        "Each memory starts with [Date: YYYY-MM-DD, N days ago / ~X weeks ago]. "
+        "USE these date prefixes to compute time differences. "
+        "Give a SHORT answer (a number, a name, a brief phrase)."
     ),
     "knowledge-update": (
         "You are a helpful assistant answering from a knowledge pool. "
@@ -125,7 +126,8 @@ DYNAMIC_PROMPTS: dict[str, str] = {
     "ordering": (
         "You are a helpful assistant answering from a knowledge pool. "
         "The user is asking about the order of events. "
-        "Use dates and context clues to determine chronological order. "
+        "Each memory starts with [Date: YYYY-MM-DD]. "
+        "Use these dates to determine chronological order. "
         "Give a very concise answer."
     ),
     "factual": (
@@ -154,6 +156,7 @@ class Outgester:
         contradiction_context: bool = False,
         contradiction_sim_threshold: float = 0.85,
         dynamic_prompting: bool = False,
+        exact_words_prompt: bool = False,
     ) -> None:
         # _cfg: LLMConfig(model="gpt-4o-mini", temperature=0.0, max_gen_tokens=64)
         self._cfg = llm_config
@@ -164,6 +167,7 @@ class Outgester:
         self._contradiction_context = contradiction_context
         self._contradiction_sim_threshold = contradiction_sim_threshold
         self._dynamic_prompting = dynamic_prompting
+        self._exact_words_prompt = exact_words_prompt
 
     # ------------------------------------------------------------------
     # Attribute resolution: new _cfg-based or old self.* fallback
@@ -381,6 +385,12 @@ class Outgester:
             )
         context_label = "Knowledge Pool"
 
+        if self._exact_words_prompt:
+            system_msg += (
+                " Use exact words and phrases from the context whenever possible"
+                " rather than paraphrasing. Provide a CONCISE answer"
+                " (short phrase, ideally under 10 words)."
+            )
         if extra_system_instructions:
             system_msg = system_msg + " " + extra_system_instructions
         # The MABench query already contains full instructions about serial
