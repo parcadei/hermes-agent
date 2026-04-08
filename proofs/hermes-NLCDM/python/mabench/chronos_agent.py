@@ -167,9 +167,10 @@ class ChronosAgent:
 
         Paper Section 3.4: reranking is applied to the ORIGINAL question,
         not the agent's reformulated query. Overfetch 100, rerank, take top_k.
+        Returns indices AND text snippets so the agent can read results.
         """
         if not query or self._scorer is None or self._engine is None:
-            return {"indices": [], "message": "search unavailable"}
+            return {"indices": [], "turns": [], "message": "search unavailable"}
         top_k = min(max(1, int(top_k)), self._max_results)
         # Overfetch for reranking (paper: top-100 → rerank → top-k)
         fetch_k = 100 if self._reranker else top_k
@@ -188,7 +189,14 @@ class ChronosAgent:
             indices = [r["index"] for r in reranked]
         else:
             indices = [int(h["index"]) for h in hits if isinstance(h, dict) and "index" in h]
-        return {"indices": indices[:top_k], "query": query}
+        indices = indices[:top_k]
+        # Build turns with text snippets for the agent to read
+        turns = []
+        for idx in indices:
+            text = self._get_text(idx)
+            if text:
+                turns.append({"idx": idx, "text": text[:self._max_read_chars]})
+        return {"indices": indices, "turns": turns, "query": query}
 
     def _tool_query_events(
         self, entities: list[str], predicates: list[str] | None = None, top_k: int = 20,
@@ -385,7 +393,7 @@ class ChronosAgent:
                                  "result_summary": _summarize_result(result)})
                 messages.append({
                     "role": "tool", "tool_call_id": tc.id,
-                    "content": json.dumps(result)[:4000],
+                    "content": json.dumps(result)[:8000],
                 })
 
             if final_answer is not None:

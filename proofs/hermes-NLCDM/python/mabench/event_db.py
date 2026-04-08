@@ -55,6 +55,9 @@ class EventDB:
         event_date: date | None = None,
         session_id: str | None = None,
     ) -> None:
+        subject = str(subject)
+        predicate = str(predicate)
+        obj = str(obj)
         event = Event(subject, predicate, obj, chunk_id, event_date, session_id)
 
         subj_key = subject.lower().strip()
