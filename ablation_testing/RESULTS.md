@@ -253,6 +253,8 @@ Method: extract entities from question via Qwen2.5-7B → search faceted entity 
 | E1 | baseline (no layered graph) | 28.67% | — | Reference config |
 | E2 | + layered_graph + faceted (exact match) | 25.00% | **-3.67** | RRF dilution from weak exact match |
 | E3 | + layered_graph + faceted (BM25 entity search) | 25.33% | **-3.34** | BM25 better in isolation but RRF still dilutes |
+| E4 | + layered_graph + faceted (dampened RRF k=120) | 25.33% | **-3.34** | Same as E3 — weight doesn't matter, RRF itself is the problem |
+| E5 | + layered_graph + faceted (query expansion) | _running_ | — | Entity names expand BM25 query instead of RRF channel |
 
 ### Key Findings
 1. **Faceted extraction quality is excellent** — Qwen2.5-7B produces 3% hallucination, grounded entity names.
@@ -265,6 +267,94 @@ Method: extract entities from question via Qwen2.5-7B → search faceted entity 
 - **Qwen2.5-7B-Instruct** for faceted extraction (over Gemma 3 4B, Llama 3.1 8B, LFM 1.2B)
 - **BM25 over entity docs** for query-time matching (over exact, cosine, hybrid, rerank)
 - **Prompt-based extraction** with `response_format: json_object` (json_schema fails on vLLM 0.6.6)
+
+## Agentic Retrieval — Architecture Pivot (2026-04-13)
+
+### Motivation
+
+All single-pass entity integration experiments (E2-E6) failed because RRF dilutes
+the primary BM25 signal. The fundamental insight: **single-pass retrieval is the
+wrong framing**. Humans don't answer questions with one search — they iterate.
+
+### The Experiment: ReAct-based Iterative Search Agent
+
+Built `mabench/agentic_retrieval.py` — a 6-tool ReAct agent inspired by A-RAG
+(arxiv 2602.03442) and DSPy ReAct:
+
+| Tool | Description | Maps To |
+|------|-------------|---------|
+| search_memory(query) | BM25 over raw chunks | BM25Index |
+| search_entities(query) | BM25 over entity docs | LayeredMemory._entity_bm25 |
+| get_related(entity) | Graph walk: neighbors, co-mentions | EntityGraph |
+| search_temporal(query) | Date-based retrieval | EventDB |
+| read_turn(turn_id) | Full text of specific turn | memory_store |
+| answer(evidence) | Terminal: collected evidence | — |
+
+Agent uses gpt-4o-mini via OpenRouter, max 8 tool calls per question.
+Dedup: previously-returned turns excluded from subsequent BM25 calls.
+
+### Results (Context-0, 60 Questions)
+
+| Config | SubEM | Notes |
+|--------|-------|-------|
+| Baseline (BM25 primary, single-pass) | 28.67% | Previous best |
+| Agentic (10q POC, max_steps=8) | 30.0% (strict) / 50.0% (manual) | 2 correct answers failed SubEM |
+| **Agentic (60q, max_steps=8)** | **38.33%** | **+9.63pp over baseline** |
+
+Full 60-question breakdown:
+- Tool usage: search_memory=142, read_turn=55, answer=55, search_temporal=12, search_entities=11, get_related=3
+- Efficiency: 2-3 steps = 50-75% hit rate. 8 steps = 10% (budget exhaustion = data not found)
+- SubEM false negatives: ~5 additional correct answers (format mismatch: "3rd of June" vs "June 3rd")
+- Estimated true accuracy: ~43-45%
+- Avg latency: 6.8s/question, avg 4.6 tool calls
+- All traces: `output/agentic_retrieval_full60.json`
+
+**Key observations from 10-question POC:**
+- Agent correctly answers questions SubEM can't score ("3rd of June" vs "June 3rd", "7 days" in longer string)
+- Dedup across calls is critical — without it agent sees same BM25 results 5x
+- Average 4.4 tool calls per question, ~6.5s per question
+- Agent uses entity search and graph walk selectively, not every time
+- Temporal questions need date arithmetic tool (agent gets event but miscalculates weeks)
+
+### Entity Integration Experiments (E2-E6) — ALL FAILED
+
+| Exp | Approach | SubEM | vs Baseline | Root Cause |
+|-----|----------|-------|-------------|------------|
+| E2 | exact-match RRF | 25.00% | -3.67 | Entity channel always dilutes |
+| E3 | BM25 entity RRF | 25.33% | -3.34 | Same — RRF is the wrong fusion |
+| E4 | dampened RRF k=120 | 25.33% | -3.34 | Even dampened still dilutes |
+| E5 | query expansion | killed | — | — |
+| E6 | post-retrieval expansion | TBD | — | Replace bottom results with entity turns |
+
+**Lesson: Entity data isn't a retrieval channel. It's a tool in an agentic loop.**
+
+### Architecture Vision: Traces → Deterministic Pipelines → Distilled SLM
+
+The long-term architecture (from user discussion):
+
+1. **Phase 1** (now): Run agentic retrieval with gpt-4o-mini, capture all traces
+2. **Phase 2**: Analyze traces → extract retrieval patterns per question type
+3. **Phase 3**: Hardcode deterministic pipelines for common patterns (no LLM at query time)
+4. **Phase 4**: Fine-tune 0.6-1.4B SLM on traces for uncommon patterns (tool routing, not generation)
+
+```
+Question → Classifier (deterministic, <1ms)
+  ├─ pattern_match? → hardcoded pipeline (deterministic, <10ms)
+  └─ no pattern?    → SLM tool-loop (distilled, ~50ms per step)
+```
+
+This gives us:
+- **Parametric memory** = model weights learn common user patterns via fine-tuning
+- **Searchable memory** = structured queryable store (entity graph, BM25, temporal)
+- **Bridge** = frequent retrievals → cache → eventually parametric (Hebbian)
+- **Decay/supersession** = not everything becomes parametric; facts change
+
+### Trace Files
+
+All agentic retrieval traces saved for future analysis/fine-tuning:
+- `output/agentic_retrieval_poc5.json` — first 5 questions (pre-dedup)
+- `output/agentic_retrieval_poc10.json` — first 10 questions (with dedup)
+- `output/agentic_retrieval_full60.json` — full 60 questions (running)
 
 ## Files
 
