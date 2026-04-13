@@ -914,27 +914,10 @@ class Retriever:
                             )
                             for rank, turn_idx in enumerate(eg_turns):
                                 rrf_scores[turn_idx] += 1.0 / (60 + rank + 1)
-                    # LayeredMemory: query expansion via entity BM25.
-                    # Instead of adding a 3rd RRF channel (which dilutes),
-                    # find matching entities and add their names to the BM25 query.
-                    # This reinforces lexical overlap without rank fusion noise.
-                    if self._resolve_layered_graph:
-                        lm = getattr(self, "_layered_memory", None)
-                        if lm is not None and lm._entity_bm25._n > 0:
-                            lm_hits = lm._entity_bm25.query(q_core, top_k=5)
-                            if lm_hits:
-                                expansion_terms = {
-                                    canon for canon, _, _ in lm_hits
-                                }
-                                # Re-run BM25 with expanded query
-                                expanded_q = bm25_query + " " + " ".join(expansion_terms)
-                                bm25_hits = bm25_idx.query(expanded_q, top_k=rrf_k)
-                                # Rebuild RRF with expanded BM25 results
-                                rrf_scores.clear()
-                                for rank, (doc_id, _) in enumerate(bm25_hits):
-                                    rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
-                                for rank, (doc_id, _) in enumerate(entity_scored):
-                                    rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
+                    # LayeredMemory: post-retrieval context expansion.
+                    # Instead of RRF (which dilutes), use entity graph AFTER
+                    # retrieval to find connected turns via entity links.
+                    # Applied below after fused results are built.
                     fused = sorted(rrf_scores.items(), key=lambda x: -x[1])[:effective_k]
                 results = []
                 for doc_id, score in fused:
@@ -945,6 +928,41 @@ class Retriever:
                             "score": float(score),
                             "index": doc_id,
                         })
+
+                # Post-retrieval entity expansion: find entities in retrieved
+                # chunks, then pull in connected turns from the entity graph.
+                # Replaces retrieved-set items only if expansion finds turns
+                # that RRF missed entirely.
+                if self._resolve_layered_graph and results:
+                    lm = getattr(self, "_layered_memory", None)
+                    if lm is not None and lm._entity_bm25._n > 0:
+                        lm_hits = lm._entity_bm25.query(q_core, top_k=10)
+                        if lm_hits:
+                            retrieved_ids = {r["index"] for r in results}
+                            connected_turns: list[tuple[int, float]] = []
+                            for canon, turns, score in lm_hits:
+                                for t in turns:
+                                    if t not in retrieved_ids and t < len(engine.memory_store):
+                                        connected_turns.append((t, score))
+                            # Deduplicate, sort by entity score
+                            seen: set[int] = set()
+                            unique_connected = []
+                            for t, s in sorted(connected_turns, key=lambda x: -x[1]):
+                                if t not in seen:
+                                    unique_connected.append((t, s))
+                                    seen.add(t)
+                            # Replace lowest-scored results with connected turns
+                            n_expand = min(len(unique_connected), max(1, effective_k // 5))
+                            if n_expand > 0 and len(results) >= n_expand:
+                                for i in range(n_expand):
+                                    t_idx, t_score = unique_connected[i]
+                                    entry = engine.memory_store[t_idx]
+                                    results[-(i + 1)] = {
+                                        "text": entry.text,
+                                        "score": float(t_score),
+                                        "index": t_idx,
+                                    }
+
                 return results
 
         # BM25 primary: use lexical retrieval as the main channel.
