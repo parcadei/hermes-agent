@@ -593,6 +593,13 @@ class Retriever:
             return self._cfg.entity_graph
         return getattr(self, "entity_graph", False)
 
+    @property
+    def _resolve_layered_graph(self) -> bool:
+        """Whether to add LayeredMemory as RRF channel."""
+        if self._cfg is not None:
+            return self._cfg.layered_graph
+        return getattr(self, "layered_graph", False)
+
     def _resolve_exact_words_prompt(self) -> bool:
         """Whether to add 'use exact words' instruction to answer prompts."""
         if hasattr(self, "_cfg"):
@@ -801,7 +808,36 @@ class Retriever:
                     query_text, entity_inv, bigram_inv or {}, unigram_inv or {},
                     n_turns, top_k=rrf_k,
                 )
-                bm25_hits = bm25_idx.query(query_text, top_k=rrf_k)
+                # Reduce BM25 query to key terms only (entities + content words)
+                # to avoid generic chunks outranking specific ones.
+                # STEP 1: Strip dynamic prompt prefix so we extract from the
+                # ACTUAL question, not the 312-char wrapper.
+                q_core = query_text
+                if "Now Answer the Question:" in q_core:
+                    q_core = q_core.split("Now Answer the Question:", 1)[1]
+                    # Drop the trailing "\n\n Answer:" scaffold
+                    if "\n" in q_core:
+                        q_core = q_core.split("\n")[0]
+                    q_core = q_core.strip()
+                # STEP 2: spaCy noun-chunk extraction on clean question.
+                # Falls back to regex + raw content words if spaCy unavailable.
+                try:
+                    from mabench.noun_chunk_index import extract_noun_chunks
+                    nc_terms = extract_noun_chunks(q_core)
+                    reduced_terms = set(nc_terms)
+                except Exception:
+                    reduced_terms = set()
+                # Always supplement with regex entities (proper nouns, numbers+units)
+                # and content words to catch what spaCy misses.
+                from mabench.entity_index import extract_entities, _STOP
+                import re as _re
+                reduced_terms |= extract_entities(q_core)
+                reduced_terms |= {
+                    w for w in _re.findall(r"\w+", q_core.lower())
+                    if len(w) >= 4 and w not in _STOP
+                }
+                bm25_query = " ".join(reduced_terms) if reduced_terms else query_text
+                bm25_hits = bm25_idx.query(bm25_query, top_k=rrf_k)
 
                 # --- Set-union merge (Omni-SimpleMem discovery) ---
                 # BM25 keeps its ranking; entity-only results appended.
@@ -878,6 +914,18 @@ class Retriever:
                             )
                             for rank, turn_idx in enumerate(eg_turns):
                                 rrf_scores[turn_idx] += 1.0 / (60 + rank + 1)
+                    # LayeredMemory RRF channel: BM25 over entity name+facet docs.
+                    # Uses dampened RRF weight (k=120 vs k=60) to avoid diluting
+                    # the primary BM25 signal. Only boosts turns that entity search
+                    # also finds relevant, rather than dominating the ranking.
+                    if self._resolve_layered_graph:
+                        lm = getattr(self, "_layered_memory", None)
+                        if lm is not None and lm.stated.entities:
+                            lm_turns = lm.retrieve_for_question(
+                                query_text, max_turns=rrf_k,
+                            )
+                            for rank, turn_idx in enumerate(lm_turns):
+                                rrf_scores[turn_idx] += 1.0 / (120 + rank + 1)
                     fused = sorted(rrf_scores.items(), key=lambda x: -x[1])[:effective_k]
                 results = []
                 for doc_id, score in fused:
@@ -1061,6 +1109,40 @@ class Retriever:
             r["score"] = (1 - w) * r["score"] + w * (bs / max_bm25)
         results.sort(key=lambda r: -r["score"])
         return results
+
+    def _apply_route_role_boost(
+        self, results: list[dict], route: str | None,
+    ) -> list[dict]:
+        """Boost assistant-role entry scores when route is ``assistant_recall``.
+
+        When ``route="assistant_recall"``, entries whose corresponding
+        ``MemoryEntry.role`` is ``"assistant"`` have their score multiplied
+        by ``config.assistant_recall_boost`` (default 1.5). All other routes
+        (including ``None``) pass results through unchanged.
+
+        After boosting, results are re-sorted descending by score.
+        """
+        if route != "assistant_recall" or not results:
+            return results
+
+        boost = self._cfg.assistant_recall_boost if hasattr(self, "_cfg") else 1.5
+        engine = self._resolve_engine
+        ms = engine.memory_store
+
+        boosted = []
+        for r in results:
+            adjusted = dict(r)
+            idx = r.get("index")
+            role = "unknown"
+            if idx is not None and idx < len(ms):
+                entry = ms[idx]
+                role = getattr(entry, "role", "unknown")
+            if role == "assistant":
+                adjusted["score"] = r.get("score", 0.0) * boost
+            boosted.append(adjusted)
+
+        boosted.sort(key=lambda x: x.get("score", 0.0), reverse=True)
+        return boosted
 
     def _apply_role_weighting(self, results: list[dict]) -> list[dict]:
         """Multiply scores by role-based weights and re-sort.

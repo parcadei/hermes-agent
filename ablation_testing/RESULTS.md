@@ -252,7 +252,7 @@ Method: extract entities from question via Qwen2.5-7B → search faceted entity 
 |---|--------|-------|-------------|-------|
 | E1 | baseline (no layered graph) | 28.67% | — | Reference config |
 | E2 | + layered_graph + faceted (exact match) | 25.00% | **-3.67** | RRF dilution from weak exact match |
-| E3 | + layered_graph + faceted (BM25 entity search) | _running_ | — | BM25 wired into LayeredMemory |
+| E3 | + layered_graph + faceted (BM25 entity search) | 25.33% | **-3.34** | BM25 better in isolation but RRF still dilutes |
 
 ### Key Findings
 1. **Faceted extraction quality is excellent** — Qwen2.5-7B produces 3% hallucination, grounded entity names.
