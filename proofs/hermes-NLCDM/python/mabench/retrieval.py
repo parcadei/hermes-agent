@@ -914,18 +914,27 @@ class Retriever:
                             )
                             for rank, turn_idx in enumerate(eg_turns):
                                 rrf_scores[turn_idx] += 1.0 / (60 + rank + 1)
-                    # LayeredMemory RRF channel: BM25 over entity name+facet docs.
-                    # Uses dampened RRF weight (k=120 vs k=60) to avoid diluting
-                    # the primary BM25 signal. Only boosts turns that entity search
-                    # also finds relevant, rather than dominating the ranking.
+                    # LayeredMemory: query expansion via entity BM25.
+                    # Instead of adding a 3rd RRF channel (which dilutes),
+                    # find matching entities and add their names to the BM25 query.
+                    # This reinforces lexical overlap without rank fusion noise.
                     if self._resolve_layered_graph:
                         lm = getattr(self, "_layered_memory", None)
-                        if lm is not None and lm.stated.entities:
-                            lm_turns = lm.retrieve_for_question(
-                                query_text, max_turns=rrf_k,
-                            )
-                            for rank, turn_idx in enumerate(lm_turns):
-                                rrf_scores[turn_idx] += 1.0 / (120 + rank + 1)
+                        if lm is not None and lm._entity_bm25._n > 0:
+                            lm_hits = lm._entity_bm25.query(q_core, top_k=5)
+                            if lm_hits:
+                                expansion_terms = {
+                                    canon for canon, _, _ in lm_hits
+                                }
+                                # Re-run BM25 with expanded query
+                                expanded_q = bm25_query + " " + " ".join(expansion_terms)
+                                bm25_hits = bm25_idx.query(expanded_q, top_k=rrf_k)
+                                # Rebuild RRF with expanded BM25 results
+                                rrf_scores.clear()
+                                for rank, (doc_id, _) in enumerate(bm25_hits):
+                                    rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
+                                for rank, (doc_id, _) in enumerate(entity_scored):
+                                    rrf_scores[doc_id] += 1.0 / (60 + rank + 1)
                     fused = sorted(rrf_scores.items(), key=lambda x: -x[1])[:effective_k]
                 results = []
                 for doc_id, score in fused:
