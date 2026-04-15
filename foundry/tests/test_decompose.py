@@ -60,6 +60,21 @@ def test_parse_subqueries_validates_placeholders_and_skips_future_references() -
     ]
 
 
+def test_parse_subqueries_ignores_non_numbered_commentary_lines() -> None:
+    text = "\n".join(
+        [
+            "Here are the steps:",
+            "1. What sport did Christian Abbiati play?",
+            "2. What is the country of origin of {answer_1}?",
+        ]
+    )
+
+    assert _parse_subqueries(text) == [
+        "What sport did Christian Abbiati play?",
+        "What is the country of origin of {answer_1}?",
+    ]
+
+
 def test_decompose_query_calls_openai_compatible_endpoint_and_parses_response() -> None:
     captured: dict[str, object] = {}
 

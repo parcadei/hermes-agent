@@ -886,10 +886,9 @@ def _parse_subqueries(text: str, max_hops: int = 3) -> list[str]:
         if not line:
             continue
         match = _SUBQUERY_PREFIX_RE.match(line)
-        if match:
-            line = match.group("body").strip()
-        elif line[:1] in {"-", "*"}:
-            line = line[1:].strip()
+        if match is None:
+            continue
+        line = match.group("body").strip()
         placeholder_refs = [int(ref) for ref in _ANSWER_PLACEHOLDER_RE.findall(line)]
         current_position = len(subqueries) + 1
         if any(ref <= 0 or ref >= current_position for ref in placeholder_refs):
