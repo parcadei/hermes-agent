@@ -38,6 +38,7 @@ from foundry.storage import (
     _normalize_name,
     _tokenize,
 )
+from foundry.writeback import ConflictDetector
 
 
 _RRF_K = 60.0
@@ -402,6 +403,8 @@ def search_memory(
         chunk_store=store.chunks,
         embed_fn=embed_fn,
     )
+    if results and len(store.entity_graph) > 0 and len(store.chunks) > 0:
+        results = ConflictDetector(store).filter_conflicts(results)
     if dedup is not None:
         return dedup.filter_new(results)
     return results
