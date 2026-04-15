@@ -20,6 +20,7 @@ from foundry.ingestion import (
     ExtractedTriple,
     FacetEntity,
     IngestionReport,
+    _extract_entities_and_triples_with_mode,
     chunk_turns,
     extract_entities_and_triples,
     extract_faceted_entities,
@@ -545,9 +546,10 @@ class Foundry:
 
         auto_entities: list[FacetEntity] = []
         auto_triples: list[ExtractedTriple] = []
+        auto_used_regex = False
         llm_enabled = bool(self.config.extraction_url)
         if entities is None or triples is None:
-            auto_entities, auto_triples = extract_entities_and_triples(
+            auto_entities, auto_triples, auto_used_regex = _extract_entities_and_triples_with_mode(
                 chunk,
                 self.config.extraction_url or "",
                 self.config.extraction_model,
@@ -555,7 +557,7 @@ class Foundry:
 
         entity_started = time.perf_counter()
         extracted_entities = list(entities if entities is not None else auto_entities)
-        if not llm_enabled:
+        if not llm_enabled or auto_used_regex:
             extracted_entities.extend(self._supplemental_entities(chunk))
 
         chunk_entities: list[str] = []
@@ -587,7 +589,7 @@ class Foundry:
 
         triple_started = time.perf_counter()
         extracted_triples = list(triples if triples is not None else auto_triples)
-        if not llm_enabled:
+        if not llm_enabled or auto_used_regex:
             extracted_triples.extend(self._supplemental_triples(chunk))
 
         facts_added = 0

@@ -846,11 +846,116 @@ def _as_string(value: Any, *, default: str = "") -> str:
     return str(value)
 
 
-def _validate_required_keys(item: dict[str, Any], required: tuple[str, ...], label: str) -> None:
+def _validate_schema_row(item: dict[str, Any], required: tuple[str, ...], label: str) -> None:
     missing = [key for key in required if key not in item]
     if missing:
         joined = ", ".join(sorted(missing))
-        raise ValueError(f"LLM extraction {label} row missing required keys: {joined}")
+        raise ValueError(f"LLM extraction {label} missing required keys: {joined}")
+    unexpected = sorted(key for key in item if key not in required)
+    if unexpected:
+        joined = ", ".join(unexpected)
+        raise ValueError(f"LLM extraction {label} has unexpected keys: {joined}")
+
+
+def _value_is_grounded(value: str, source_text: str) -> bool:
+    if not source_text:
+        return True
+    source = source_text.casefold()
+    candidate = (value or "").casefold().strip()
+    if not candidate:
+        return False
+    if candidate in source:
+        return True
+    content_words = [word for word in re.findall(r"\w+", candidate) if len(word) >= 2]
+    return bool(content_words) and all(word in source for word in content_words)
+
+
+def _parse_llm_response(response_payload: dict[str, Any], chunk_text: str) -> tuple[list[FacetEntity], list[ExtractedTriple]]:
+    if isinstance(response_payload, dict) and response_payload.get("error"):
+        raise RuntimeError(f"LLM extraction endpoint returned an error: {response_payload['error']}")
+
+    content = _extract_completion_payload(response_payload)
+    if isinstance(content, str):
+        try:
+            structured = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ValueError("LLM extraction content was not valid JSON") from exc
+    else:
+        structured = content
+
+    if not isinstance(structured, dict):
+        raise ValueError("LLM extraction content must be a JSON object")
+
+    _validate_schema_row(structured, ("entities", "relations"), "payload")
+    raw_entities = structured.get("entities", [])
+    raw_relations = structured.get("relations", [])
+    if not isinstance(raw_entities, list) or not isinstance(raw_relations, list):
+        raise ValueError("LLM extraction content must contain entity and relation arrays")
+
+    default_turn_idx, source_text = _llm_source_context(chunk_text)
+
+    entities: list[FacetEntity] = []
+    for item in raw_entities:
+        if not isinstance(item, dict):
+            raise ValueError("LLM extraction entity rows must be objects")
+        _validate_schema_row(item, ("name", "entity_type"), "entity row")
+        name = _as_string(item.get("name")).strip()
+        entity_type = EntityType.normalize(_as_string(item.get("entity_type")).strip())
+        if not name or not _value_is_grounded(name, source_text):
+            continue
+        facets = {"what": entity_type} if entity_type else {}
+        entities.append(FacetEntity(name=name, facets=facets, turn_idx=default_turn_idx, source_text=source_text))
+
+    triples: list[ExtractedTriple] = []
+    for item in raw_relations:
+        if not isinstance(item, dict):
+            raise ValueError("LLM extraction relation rows must be objects")
+        _validate_schema_row(
+            item,
+            (
+                "subject",
+                "predicate",
+                "object",
+                "role",
+                "when",
+                "when_type",
+                "quantity",
+                "unit",
+                "confidence",
+                "sentiment",
+                "source_turn",
+            ),
+            "relation row",
+        )
+        subject = _as_string(item.get("subject")).strip()
+        predicate = _as_string(item.get("predicate")).strip()
+        obj = _as_string(item.get("object")).strip()
+        if not subject or not predicate or not obj:
+            continue
+        source_turn = item.get("source_turn", default_turn_idx)
+        try:
+            turn_idx = int(source_turn)
+        except (TypeError, ValueError):
+            turn_idx = default_turn_idx
+        triples.append(
+            ExtractedTriple(
+                subject=subject,
+                predicate=predicate,
+                object=obj,
+                when=_as_string(item.get("when")).strip(),
+                when_type=_as_string(item.get("when_type")).strip(),
+                quantity=_as_string(item.get("quantity"), default="0").strip(),
+                unit=_as_string(item.get("unit")).strip(),
+                confidence=_as_string(item.get("confidence")).strip(),
+                sentiment=_as_string(item.get("sentiment")).strip(),
+                source_turn=turn_idx,
+                role=_as_string(item.get("role")).strip(),
+                source_text=source_text,
+                turn_idx=turn_idx,
+            )
+        )
+
+    return entities, triples
 
 
 def extract_via_llm(
@@ -897,91 +1002,32 @@ def extract_via_llm(
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("LLM extraction endpoint returned invalid JSON") from exc
 
-    if isinstance(response_payload, dict) and response_payload.get("error"):
-        raise RuntimeError(f"LLM extraction endpoint returned an error: {response_payload['error']}")
+    return _parse_llm_response(response_payload, chunk_text)
 
-    content = _extract_completion_payload(response_payload)
-    if isinstance(content, str):
+
+def _extract_entities_and_triples_with_mode(
+    chunk: RawChunk,
+    extraction_url: str,
+    extraction_model: str,
+) -> tuple[list[FacetEntity], list[ExtractedTriple], bool]:
+    if extraction_url:
+        if not chunk.text.strip() or chunk.role != "user":
+            return [], [], False
+        wrapped_text = f"[Turn {chunk.turn_idx}] User: {chunk.text}"
         try:
-            structured = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise ValueError("LLM extraction content was not valid JSON") from exc
-    else:
-        structured = content
-
-    if not isinstance(structured, dict):
-        raise ValueError("LLM extraction content must be a JSON object")
-
-    _validate_required_keys(structured, ("entities", "relations"), "payload")
-    raw_entities = structured.get("entities", [])
-    raw_relations = structured.get("relations", [])
-    if not isinstance(raw_entities, list) or not isinstance(raw_relations, list):
-        raise ValueError("LLM extraction content must contain entity and relation arrays")
-
-    default_turn_idx, source_text = _llm_source_context(chunk_text)
-
-    entities: list[FacetEntity] = []
-    for item in raw_entities:
-        if not isinstance(item, dict):
-            raise ValueError("LLM extraction entity rows must be objects")
-        _validate_required_keys(item, ("name", "entity_type"), "entity")
-        name = _as_string(item.get("name")).strip()
-        entity_type = EntityType.normalize(_as_string(item.get("entity_type")).strip())
-        if not name:
-            continue
-        facets = {"what": entity_type} if entity_type else {}
-        entities.append(FacetEntity(name=name, facets=facets, turn_idx=default_turn_idx, source_text=source_text))
-
-    triples: list[ExtractedTriple] = []
-    for item in raw_relations:
-        if not isinstance(item, dict):
-            raise ValueError("LLM extraction relation rows must be objects")
-        _validate_required_keys(
-            item,
-            (
-                "subject",
-                "predicate",
-                "object",
-                "role",
-                "when",
-                "when_type",
-                "quantity",
-                "unit",
-                "confidence",
-                "sentiment",
-                "source_turn",
-            ),
-            "relation",
-        )
-        subject = _as_string(item.get("subject")).strip()
-        predicate = _as_string(item.get("predicate")).strip()
-        obj = _as_string(item.get("object")).strip()
-        if not subject or not predicate or not obj:
-            continue
-        source_turn = item.get("source_turn", default_turn_idx)
-        try:
-            turn_idx = int(source_turn)
-        except (TypeError, ValueError):
-            turn_idx = default_turn_idx
-        triples.append(
-            ExtractedTriple(
-                subject=subject,
-                predicate=predicate,
-                object=obj,
-                when=_as_string(item.get("when")).strip(),
-                when_type=_as_string(item.get("when_type")).strip(),
-                quantity=_as_string(item.get("quantity"), default="0").strip(),
-                unit=_as_string(item.get("unit")).strip(),
-                confidence=_as_string(item.get("confidence")).strip(),
-                sentiment=_as_string(item.get("sentiment")).strip(),
-                source_turn=turn_idx,
-                role=_as_string(item.get("role")).strip(),
-                source_text=source_text,
-                turn_idx=turn_idx,
-            )
-        )
-
-    return entities, triples
+            entities, triples = extract_via_llm(wrapped_text, extraction_url, extraction_model)
+        except (RuntimeError, TimeoutError, ValueError):
+            return extract_faceted_entities(chunk, "", ""), extract_triples(chunk, "", ""), True
+        for entity in entities:
+            entity.turn_idx = chunk.turn_idx
+            entity.source_text = chunk.text
+        for triple in triples:
+            triple.turn_idx = chunk.turn_idx
+            triple.source_turn = chunk.turn_idx
+            triple.chunk_idx = chunk.chunk_idx
+            triple.source_text = chunk.text
+        return entities, triples, False
+    return extract_faceted_entities(chunk, "", ""), extract_triples(chunk, "", ""), True
 
 
 def extract_entities_and_triples(
@@ -991,21 +1037,8 @@ def extract_entities_and_triples(
 ) -> tuple[list[FacetEntity], list[ExtractedTriple]]:
     """Dispatch to LLM extraction if configured, else use regex extraction."""
 
-    if extraction_url:
-        if not chunk.text.strip() or chunk.role != "user":
-            return [], []
-        wrapped_text = f"[Turn {chunk.turn_idx}] User: {chunk.text}"
-        entities, triples = extract_via_llm(wrapped_text, extraction_url, extraction_model)
-        for entity in entities:
-            entity.turn_idx = chunk.turn_idx
-            entity.source_text = chunk.text
-        for triple in triples:
-            triple.turn_idx = chunk.turn_idx
-            triple.source_turn = chunk.turn_idx
-            triple.chunk_idx = chunk.chunk_idx
-            triple.source_text = chunk.text
-        return entities, triples
-    return extract_faceted_entities(chunk, "", ""), extract_triples(chunk, "", "")
+    entities, triples, _used_regex = _extract_entities_and_triples_with_mode(chunk, extraction_url, extraction_model)
+    return entities, triples
 
 
 def extract_faceted_entities(
