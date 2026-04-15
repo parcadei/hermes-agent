@@ -360,9 +360,13 @@ class ConflictDetector:
 
         groups = self._grouped_result_facts(results)
         removable = self._removable_chunk_ids(results, groups)
-        if not removable:
-            return list(results)
-        return [result for result in results if self._result_chunk_id(result) not in removable]
+        filtered = [result for result in results if self._result_chunk_id(result) not in removable]
+        return self._dedupe_results(filtered)
+
+    def detect(self, results: list[dict]) -> list[tuple[str, str, str, str]]:
+        """Backward-compatible alias for conflict detection."""
+
+        return self.detect_conflicts(results)
 
     def detect_conflicts(self, results: list[dict]) -> list[tuple[str, str, str, str]]:
         """Return list of detected conflicts as (entity, predicate, old_object, new_object)."""
@@ -382,6 +386,11 @@ class ConflictDetector:
                 continue
             conflicts.add((fact.subject, fact.predicate, fact.object, winner.object))
         return sorted(conflicts)
+
+    def group_by_subject_predicate(self, results: list[dict]) -> dict[tuple[str, str], list[Fact]]:
+        """Return retrieved facts grouped by (subject, predicate)."""
+
+        return self._grouped_result_facts(results)
 
     def cosine_dedup(self, results: list[dict], threshold: float = 0.95) -> list[dict]:
         """Remove near-duplicate retrieved chunks, keeping the most recent."""
@@ -421,6 +430,18 @@ class ConflictDetector:
             if any(self._fact_is_obsolete(fact, groups) for fact in chunk_facts):
                 removable.add(chunk_id)
         return removable
+
+    def _dedupe_results(self, results: list[dict]) -> list[dict]:
+        seen_chunk_ids: set[int] = set()
+        deduped: list[dict] = []
+        for result in results:
+            chunk_id = self._result_chunk_id(result)
+            if chunk_id is not None:
+                if chunk_id in seen_chunk_ids:
+                    continue
+                seen_chunk_ids.add(chunk_id)
+            deduped.append(result)
+        return deduped
 
     def _iter_result_facts(self, results: list[dict]) -> list[Fact]:
         facts_by_chunk = self._facts_by_chunk()
@@ -474,10 +495,13 @@ class ConflictDetector:
         if not bucket:
             return fact, False
 
-        objects = {self._normalize_object(candidate.object) for candidate in bucket}
-        if len(objects) <= 1:
+        if not self._is_conflicting(bucket):
             return max(bucket, key=self._fact_order_key), False
         return max(bucket, key=self._fact_order_key), True
+
+    def _is_conflicting(self, facts: list[Fact]) -> bool:
+        objects = {self._normalize_object(candidate.object) for candidate in facts}
+        return len(objects) > 1
 
     def _result_chunk_id(self, result: dict[str, Any]) -> Optional[int]:
         try:
