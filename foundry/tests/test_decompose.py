@@ -244,6 +244,26 @@ def test_deterministic_router_executes_multi_hop_subqueries_sequentially() -> No
     assert meta["fallback"] is None
 
 
+def test_deterministic_router_spatial_pipeline_handles_birth_predicates() -> None:
+    router = DeterministicRouter(FoundryStore())
+    hits = [
+        {
+            "entity": "jesus",
+            "facts": [
+                {"predicate": "born", "object": "Bethlehem"},
+                {"predicate": "birthplace", "object": "Bethlehem"},
+            ],
+        }
+    ]
+
+    with patch("foundry.retrieval.search_entities", return_value=hits):
+        evidence, meta = router.execute("Where was Jesus born?", "spatial")
+
+    assert "jesus: born Bethlehem" in evidence
+    assert meta["pipeline"] == "spatial"
+    assert meta["fallback"] is None
+
+
 def test_deterministic_router_routes_reference_multi_hop_example_to_multi_hop() -> None:
     router = DeterministicRouter()
 

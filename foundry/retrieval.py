@@ -114,6 +114,18 @@ _ANSWER_FROM_EVIDENCE_PATTERNS = (
     re.compile(r"\bfrom\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
     re.compile(r"\b(?:is|are|was|were)\s+(?P<answer>[^.?!]+)", re.IGNORECASE),
 )
+_SPATIAL_FACT_PREDICATES = {
+    "at",
+    "birth_place",
+    "birthplace",
+    "born",
+    "born_in",
+    "from",
+    "lives_in",
+    "location",
+    "place_of_birth",
+    "visited",
+}
 
 
 TOOLS: dict[str, dict[str, str]] = {
@@ -958,7 +970,7 @@ class DeterministicRouter:
         lines = []
         for hit in hits:
             for fact in hit["facts"]:
-                if fact["predicate"] in {"location", "lives_in", "visited", "from", "at"}:
+                if fact["predicate"] in _SPATIAL_FACT_PREDICATES:
                     lines.append(f"{hit['entity']}: {fact['predicate']} {fact['object']}")
         evidence = "\n".join(lines)
         trace.evidence = evidence
