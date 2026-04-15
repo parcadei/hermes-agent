@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+import math
+import re
 from typing import Any, Optional
 
 from foundry.storage import (
@@ -331,6 +333,224 @@ class SupersessionEngine:
         return max(0.0, min(1.0, score))
 
 
+_TOKEN_RE = re.compile(r"\w+", re.UNICODE)
+
+
+class ConflictDetector:
+    """Query-time conflict resolution for retrieved chunks.
+
+    Detects contradictions in retrieved facts by grouping on (subject, predicate)
+    and keeping only the most recent object when conflicts exist.
+    """
+
+    def __init__(self, store: FoundryStore):
+        self._store = store
+
+    def filter_conflicts(self, results: list[dict]) -> list[dict]:
+        """Remove chunks containing superseded/conflicting facts.
+
+        Args:
+            results: Retrieved chunks, each with {"turn_id", "chunk_id", "text", "score"}.
+        Returns:
+            Filtered list with conflicting older chunks removed.
+        """
+
+        if not results:
+            return []
+
+        groups = self._grouped_result_facts(results)
+        removable = self._removable_chunk_ids(results, groups)
+        filtered = [result for result in results if self._result_chunk_id(result) not in removable]
+        return self._dedupe_results(filtered)
+
+    def detect(self, results: list[dict]) -> list[tuple[str, str, str, str]]:
+        """Backward-compatible alias for conflict detection."""
+
+        return self.detect_conflicts(results)
+
+    def detect_conflicts(self, results: list[dict]) -> list[tuple[str, str, str, str]]:
+        """Return list of detected conflicts as (entity, predicate, old_object, new_object)."""
+
+        if not results:
+            return []
+
+        conflicts: set[tuple[str, str, str, str]] = set()
+        groups = self._grouped_result_facts(results)
+        for fact in self._iter_result_facts(results):
+            winner, has_conflict = self._winner_for_fact(fact, groups)
+            if not has_conflict or winner is None:
+                continue
+            if self._is_same_object(fact.object, winner.object):
+                continue
+            if self._fact_order_key(fact) >= self._fact_order_key(winner):
+                continue
+            conflicts.add((fact.subject, fact.predicate, fact.object, winner.object))
+        return sorted(conflicts)
+
+    def group_by_subject_predicate(self, results: list[dict]) -> dict[tuple[str, str], list[Fact]]:
+        """Return retrieved facts grouped by (subject, predicate)."""
+
+        return self._grouped_result_facts(results)
+
+    def cosine_dedup(self, results: list[dict], threshold: float = 0.95) -> list[dict]:
+        """Remove near-duplicate retrieved chunks, keeping the most recent."""
+
+        if len(results) <= 1:
+            return list(results)
+
+        kept: list[dict] = []
+        for candidate in sorted(results, key=self._result_order_key, reverse=True):
+            candidate_text = str(candidate.get("text", ""))
+            duplicate = False
+            for existing in kept:
+                existing_text = str(existing.get("text", ""))
+                if self._cosine_similarity(candidate_text, existing_text) >= threshold:
+                    duplicate = True
+                    break
+            if not duplicate:
+                kept.append(candidate)
+
+        kept_ids = {id(result) for result in kept}
+        return [result for result in results if id(result) in kept_ids]
+
+    def _removable_chunk_ids(
+        self,
+        results: list[dict],
+        groups: dict[tuple[str, str], list[Fact]],
+    ) -> set[int]:
+        removable: set[int] = set()
+        facts_by_chunk = self._facts_by_chunk()
+        for result in results:
+            chunk_id = self._result_chunk_id(result)
+            if chunk_id is None:
+                continue
+            chunk_facts = facts_by_chunk.get(chunk_id, [])
+            if not chunk_facts:
+                continue
+            if any(self._fact_is_obsolete(fact, groups) for fact in chunk_facts):
+                removable.add(chunk_id)
+        return removable
+
+    def _dedupe_results(self, results: list[dict]) -> list[dict]:
+        seen_chunk_ids: set[int] = set()
+        deduped: list[dict] = []
+        for result in results:
+            chunk_id = self._result_chunk_id(result)
+            if chunk_id is not None:
+                if chunk_id in seen_chunk_ids:
+                    continue
+                seen_chunk_ids.add(chunk_id)
+            deduped.append(result)
+        return deduped
+
+    def _iter_result_facts(self, results: list[dict]) -> list[Fact]:
+        facts_by_chunk = self._facts_by_chunk()
+        seen_fact_ids: set[str] = set()
+        rows: list[Fact] = []
+        for result in results:
+            chunk_id = self._result_chunk_id(result)
+            if chunk_id is None:
+                continue
+            for fact in facts_by_chunk.get(chunk_id, []):
+                if fact.id in seen_fact_ids:
+                    continue
+                seen_fact_ids.add(fact.id)
+                rows.append(fact)
+        return rows
+
+    def _grouped_result_facts(self, results: list[dict]) -> dict[tuple[str, str], list[Fact]]:
+        groups: dict[tuple[str, str], list[Fact]] = defaultdict(list)
+        for fact in self._iter_result_facts(results):
+            groups[(fact.subject, fact.predicate)].append(fact)
+        return groups
+
+    def _facts_by_chunk(self) -> dict[int, list[Fact]]:
+        chunk_map: dict[int, list[Fact]] = defaultdict(list)
+        for entity in self._store.entity_graph.all_entities():
+            for facts in entity.facts.values():
+                for fact in facts:
+                    if fact.chunk_idx < 0:
+                        continue
+                    chunk_map[int(fact.chunk_idx)].append(fact)
+        return chunk_map
+
+    def _fact_is_obsolete(
+        self,
+        fact: Fact,
+        groups: dict[tuple[str, str], list[Fact]],
+    ) -> bool:
+        winner, has_conflict = self._winner_for_fact(fact, groups)
+        if not has_conflict or winner is None:
+            return False
+        if self._is_same_object(fact.object, winner.object):
+            return False
+        return self._fact_order_key(fact) < self._fact_order_key(winner)
+
+    def _winner_for_fact(
+        self,
+        fact: Fact,
+        groups: dict[tuple[str, str], list[Fact]],
+    ) -> tuple[Optional[Fact], bool]:
+        bucket = list(groups.get((fact.subject, fact.predicate), []))
+        if not bucket:
+            return fact, False
+
+        if not self._is_conflicting(bucket):
+            return max(bucket, key=self._fact_order_key), False
+        return max(bucket, key=self._fact_order_key), True
+
+    def _is_conflicting(self, facts: list[Fact]) -> bool:
+        objects = {self._normalize_object(candidate.object) for candidate in facts}
+        return len(objects) > 1
+
+    def _result_chunk_id(self, result: dict[str, Any]) -> Optional[int]:
+        try:
+            return int(result.get("chunk_id"))
+        except (TypeError, ValueError):
+            return None
+
+    def _result_order_key(self, result: dict[str, Any]) -> tuple[int, int, float]:
+        turn_id = result.get("turn_id")
+        chunk_id = result.get("chunk_id")
+        score = result.get("score", 0.0)
+        try:
+            normalized_turn = int(turn_id)
+        except (TypeError, ValueError):
+            normalized_turn = -1
+        try:
+            normalized_chunk = int(chunk_id)
+        except (TypeError, ValueError):
+            normalized_chunk = -1
+        try:
+            normalized_score = float(score)
+        except (TypeError, ValueError):
+            normalized_score = 0.0
+        return (normalized_turn, normalized_chunk, normalized_score)
+
+    def _fact_order_key(self, fact: Fact) -> tuple[int, int, str]:
+        return (int(fact.turn_idx), int(fact.chunk_idx), str(fact.id))
+
+    def _normalize_object(self, value: str) -> str:
+        return " ".join(str(value or "").strip().lower().split())
+
+    def _is_same_object(self, left: str, right: str) -> bool:
+        return self._normalize_object(left) == self._normalize_object(right)
+
+    def _cosine_similarity(self, left: str, right: str) -> float:
+        left_counts = Counter(_TOKEN_RE.findall(str(left).lower()))
+        right_counts = Counter(_TOKEN_RE.findall(str(right).lower()))
+        if not left_counts or not right_counts:
+            return 0.0
+
+        shared = set(left_counts) & set(right_counts)
+        numerator = sum(left_counts[token] * right_counts[token] for token in shared)
+        left_norm = math.sqrt(sum(count * count for count in left_counts.values()))
+        right_norm = math.sqrt(sum(count * count for count in right_counts.values()))
+        if left_norm == 0.0 or right_norm == 0.0:
+            return 0.0
+        return numerator / (left_norm * right_norm)
+
+
 class EntityMerger:
     """Merge entities while preserving referential integrity."""
 
@@ -502,6 +722,7 @@ class EntityMerger:
 
 __all__ = [
     "ACTION_TYPES",
+    "ConflictDetector",
     "DeletionPolicy",
     "EditVersion",
     "EntityMerger",

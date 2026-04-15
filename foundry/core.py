@@ -398,6 +398,14 @@ class Foundry:
             rows.append((hit["entity"], set(hit.get("turns", [])), float(hit.get("score", 0.0))))
         return rows
 
+    def resolve_conflicts(self, results: list[dict]) -> list[dict]:
+        """Apply conflict resolution to retrieved results."""
+
+        from foundry.writeback import ConflictDetector
+
+        detector = ConflictDetector(self._store)
+        return detector.filter_conflicts(results)
+
     def search_temporal(self, query: str, reference_date: datetime | None = None) -> dict[str, Any]:
         del reference_date
         return retrieval_search_temporal(self._store, str(query or ""))

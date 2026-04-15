@@ -39,6 +39,7 @@ from foundry.storage import (
     _normalize_name,
     _tokenize,
 )
+from foundry.writeback import ConflictDetector
 
 
 _RRF_K = 60.0
@@ -545,20 +546,23 @@ def search_memory(
     reranker: Optional[RerankerFn] = None,
     embed_fn: Optional[Callable[[str], np.ndarray]] = None,
 ) -> list[dict[str, Any]]:
+    expanded_top_k = max(top_k, top_k * 2)
     results = search_memory_hybrid(
         query,
         store.bm25_chunks,
         store.vectors,
         reranker=reranker,
         seen_turns=dedup.seen_turns if dedup is not None else None,
-        top_k=top_k,
+        top_k=expanded_top_k,
         chunk_store=store.chunks,
         embed_fn=embed_fn,
         triadic=store.triadic,
     )
+    if results and len(store.entity_graph) > 0 and len(store.chunks) > 0:
+        results = ConflictDetector(store).filter_conflicts(results)
     if dedup is not None:
-        return dedup.filter_new(results)
-    return results
+        results = dedup.filter_new(results)
+    return results[:top_k]
 
 
 def search_entities(
