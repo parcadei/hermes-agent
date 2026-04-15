@@ -51,13 +51,14 @@ _NAMED_ANIMAL_RE = re.compile(
     re.IGNORECASE,
 )
 _LOCATION_FACT_RE = re.compile(
-    r"\b(?:i|we)\s+(?P<verb>live in|lives in|moved to|relocated to)\s+(?P<place>[A-Z][A-Za-z\s-]+?)\b(?:[.,]|$)",
+    r"\b(?:i|we)(?:\s+\w+){0,2}\s+(?P<verb>live in|lives in|moved to|relocated to)\s+(?P<place>[A-Z][A-Za-z\s-]+?)(?:\s+(?:last|this|next)\s+\w+)?(?:[.,]|$)",
     re.IGNORECASE,
 )
 _FAVORITE_RESTAURANT_RE = re.compile(
     r"\b(?:favorite restaurant(?: used to be)?|new favorite(?: restaurant)?(?: is| called)?)\s+(?P<restaurant>[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)\b",
     re.IGNORECASE,
 )
+_CALLED_PLACE_RE = re.compile(r"\bcalled\s+(?P<restaurant>[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)\b")
 _BIKE_LIST_RE = re.compile(
     r"\b(?:i|we)\s+have\s+\w+\s+bikes?\s*-\s*a\s+(?P<first>[a-z]+)\s+bike,\s*a\s+(?P<second>[a-z]+)\s+bike,\s+and\s+a\s+(?P<third>[a-z]+)\s+bike\b",
     re.IGNORECASE,
@@ -813,6 +814,19 @@ class Foundry:
                     chunk_idx=chunk.chunk_idx,
                 )
             )
+
+        if "favorite" in chunk.text.casefold():
+            for match in _CALLED_PLACE_RE.finditer(chunk.text):
+                rows.append(
+                    ExtractedTriple(
+                        subject="user",
+                        predicate="favorite_restaurant",
+                        object=match.group("restaurant").strip(),
+                        source_text=chunk.text,
+                        turn_idx=chunk.turn_idx,
+                        chunk_idx=chunk.chunk_idx,
+                    )
+                )
 
         bike_list = _BIKE_LIST_RE.search(chunk.text)
         if bike_list:

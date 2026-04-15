@@ -473,7 +473,11 @@ class QueryPlan:
         return list(self._result_cache)
 
     def count(self) -> int:
-        return len(self.execute())
+        if self._result_cache is not None:
+            return len(self._result_cache)
+        canonicals = self._evaluate_canonicals()
+        effective_limit = DEFAULT_EXECUTE_LIMIT if self._limit is None else min(self._limit, DEFAULT_EXECUTE_LIMIT)
+        return min(len(canonicals), effective_limit)
 
     def first(self) -> Optional[EntityNode]:
         rows = self.limit(1).execute()
@@ -560,6 +564,14 @@ class QueryPlan:
         raise ValueError(f"Unsupported set op: {self._set_op.kind}")
 
     def _apply_filter(self, canonicals: list[str], op: Union[FilterOp, LogicalOp]) -> list[str]:
+        if isinstance(op, FilterOp):
+            field = _normalize_predicate(op.field)
+            if field == "type" and op.operator == "$eq" and not op.negate:
+                indexed = self._store.types.lookup(str(op.value))
+                if len(canonicals) == len(self._store.entity_graph):
+                    return indexed
+                indexed_set = set(indexed)
+                return [canonical for canonical in canonicals if canonical in indexed_set]
         return [canonical for canonical in canonicals if self._entity_matches_op(canonical, op)]
 
     def _entity_matches_op(self, canonical: str, op: Union[FilterOp, LogicalOp]) -> bool:

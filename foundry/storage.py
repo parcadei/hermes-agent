@@ -11,6 +11,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
+import heapq
 import json
 import math
 import os
@@ -393,25 +394,49 @@ class BM25Index:
             return []
 
         avgdl = self._total_doc_length / len(self._texts) if self._texts else 0.0
-        scores: dict[int, float] = defaultdict(float)
+        scores: dict[int, float] = {}
         n_docs = len(self._texts)
+        score_get = scores.get
+        doc_lengths = self._doc_lengths
+        doc_freqs = self._doc_freqs
+        postings_index = self._postings
+        k1 = self.k1
+        b = self.b
 
         for term in query_terms:
-            doc_freq = self._doc_freqs.get(term, 0)
+            doc_freq = doc_freqs.get(term, 0)
             if doc_freq == 0:
                 continue
             idf = math.log(1.0 + (n_docs - doc_freq + 0.5) / (doc_freq + 0.5))
-            postings = self._postings[term]
+            postings = postings_index[term]
             for doc_id, freq in postings.items():
-                doc_len = self._doc_lengths.get(doc_id, 0)
-                denom = freq + self.k1 * (1.0 - self.b + self.b * doc_len / (avgdl or 1.0))
+                doc_len = doc_lengths.get(doc_id, 0)
+                denom = freq + k1 * (1.0 - b + b * doc_len / (avgdl or 1.0))
                 if denom <= 0:
                     continue
-                scores[doc_id] += idf * ((freq * (self.k1 + 1.0)) / denom)
+                scores[doc_id] = score_get(doc_id, 0.0) + (idf * ((freq * (k1 + 1.0)) / denom))
 
-        ranked = [(doc_id, score) for doc_id, score in scores.items() if score >= 0.0]
-        ranked.sort(key=lambda item: (-item[1], item[0]))
-        return ranked[:top_k]
+        if not scores:
+            return []
+
+        if len(scores) <= top_k:
+            ranked = [(doc_id, score) for doc_id, score in scores.items() if score >= 0.0]
+            ranked.sort(key=lambda item: (-item[1], item[0]))
+            return ranked
+
+        heap: list[tuple[float, int, int]] = []
+        for doc_id, score in scores.items():
+            if score < 0.0:
+                continue
+            item = (score, -doc_id, doc_id)
+            if len(heap) < top_k:
+                heapq.heappush(heap, item)
+                continue
+            if item > heap[0]:
+                heapq.heapreplace(heap, item)
+
+        heap.sort(key=lambda item: (-item[0], item[2]))
+        return [(doc_id, score) for score, _neg_doc_id, doc_id in heap]
 
     def __len__(self) -> int:
         return len(self._texts)
@@ -645,11 +670,12 @@ class TemporalIndex:
         end_dt = _parse_datetime(end)
         if start_dt is None or end_dt is None:
             return []
-        return [
+        results = [
             event
             for event in self._events
             if event.start_dt <= end_dt and event.end_dt >= start_dt
         ]
+        return sorted(results, key=lambda event: (event.start_dt, event.end_dt, event.event))
 
     def allen_before(self, a: TemporalEvent, b: TemporalEvent) -> bool:
         return a.end_dt < b.start_dt
@@ -763,7 +789,9 @@ class TemporalIndex:
             bucket = "unknown"
         return {
             "bucket": bucket,
+            "operation": bucket,
             "results": [event.to_dict() for event in self.match_events(query, top_k=5)],
+            "matched_events": [event.to_dict() for event in self.match_events(query, top_k=5)],
             "reference_date": _serialize_datetime(reference_date),
         }
 

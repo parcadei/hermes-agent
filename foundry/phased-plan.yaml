@@ -1,0 +1,543 @@
+name: Engram Build Plan
+created: 2026-04-15
+spec: foundry/spec.md
+
+package_scaffold:
+  - foundry/__init__.py
+
+import_contract:
+  foundry.ontology:
+    - Cardinality
+    - EntityType
+    - Facet
+    - GroundingLayer
+    - LinkType
+    - PropertyType
+    - infer_property_type
+  foundry.storage:
+    - BM25Index
+    - CooccurrenceIndex
+    - EntityNode
+    - Fact
+    - FoundryStore
+    - PropertyIndex
+    - RawChunk
+    - RawChunkStore
+    - TemporalEvent
+    - TemporalIndex
+    - TypeIndex
+    - VectorIndex
+  foundry.query:
+    - FilterOp
+    - LogicalOp
+    - QueryPlan
+    - TraversalOp
+  foundry.ingestion:
+    - ConversationTurn
+    - EntityResolver
+    - ExtractedTriple
+    - FacetEntity
+    - IngestionReport
+    - VerbClassification
+    - chunk_turns
+    - classify_verb
+    - infer_type
+    - parse_conversation
+    - route_to_layer
+    - track_cooccurrences
+    - verify_grounding
+  foundry.retrieval:
+    - AgenticRetriever
+    - DeduplicationTracker
+    - DeterministicRouter
+    - RetrievalBudget
+    - RetrievalTrace
+    - TOOLS
+  foundry.writeback:
+    - DeletionPolicy
+    - EntityMerger
+    - SupersessionEngine
+    - TemporalValidity
+    - Tombstone
+  foundry.dynamics:
+    - DecayFunction
+    - DreamConsolidator
+    - HebbianBridge
+    - ImportanceScore
+    - MemorySystem
+  foundry.core:
+    - Foundry
+    - FoundryConfig
+
+module_graph:
+  foundry/ontology.py: []
+  foundry/storage.py:
+    - foundry/ontology.py
+  foundry/query.py:
+    - foundry/ontology.py
+    - foundry/storage.py
+  foundry/ingestion.py:
+    - foundry/ontology.py
+    - foundry/storage.py
+  foundry/writeback.py:
+    - foundry/ontology.py
+    - foundry/storage.py
+  foundry/retrieval.py:
+    - foundry/ontology.py
+    - foundry/storage.py
+    - foundry/query.py
+  foundry/core.py:
+    - foundry/ontology.py
+    - foundry/storage.py
+    - foundry/query.py
+    - foundry/ingestion.py
+    - foundry/writeback.py
+    - foundry/retrieval.py
+  foundry/dynamics.py:
+    - foundry/storage.py
+    - foundry/core.py
+
+implementation_order:
+  - foundry/ontology.py
+  - foundry/storage.py
+  - foundry/query.py
+  - foundry/ingestion.py
+  - foundry/writeback.py
+  - foundry/retrieval.py
+  - foundry/core.py
+  - foundry/dynamics.py
+
+critical_path:
+  - foundry/ontology.py
+  - foundry/storage.py
+  - foundry/query.py
+  - foundry/retrieval.py
+  - foundry/core.py
+  - foundry/dynamics.py
+
+planning_notes:
+  - QueryPlan should remain resolver-agnostic at the module boundary. The spec defines resolution semantics in section 3.4, but tests require EntityResolver to be exported from foundry.ingestion; inject that behavior through core/store wiring to avoid a query-ingestion import cycle.
+  - estimated_tests is the sum of test functions in files that directly import the module, using AST counts from foundry/tests.
+  - Spec appendices materially change implementation order. Appendix A/B/C/D sections listed below are treated as normative refinements, not optional extras.
+
+phases:
+  - name: "Phase 1: Ontology"
+    module: foundry/ontology.py
+    spec_sections:
+      - "1.1"
+      - "1.2"
+      - "1.3"
+      - "1.4"
+      - "1.5"
+      - "1.6"
+      - "1.7"
+      - "1.8"
+      - "1.9"
+      - "A.1"
+      - "A.12"
+      - "C.3"
+    exports:
+      - Facet
+      - PropertyType
+      - infer_property_type
+      - EntityType
+      - Cardinality
+      - LinkType
+      - GroundingLayer
+    internals:
+      - Interface
+      - BUILTIN_INTERFACES
+      - ValueType
+    test_files:
+      - test_behavioral_queries.py
+      - test_benchmark_ingestion.py
+      - test_fuzz_entities.py
+      - test_idempotency.py
+      - test_property_graph.py
+      - test_regression_aggregation.py
+      - test_regression_resolution.py
+      - test_serialization.py
+      - test_temporal_supersession.py
+      - test_unit_ingestion.py
+      - test_unit_ontology.py
+      - test_unit_storage.py
+      - test_unit_writeback.py
+    estimated_tests: 292
+    depends_on: []
+
+  - name: "Phase 2: Storage"
+    module: foundry/storage.py
+    spec_sections:
+      - "2.1"
+      - "2.2"
+      - "2.3.1"
+      - "2.3.2"
+      - "2.3.3"
+      - "2.3.4"
+      - "2.3.5"
+      - "2.3.6"
+      - "2.3.7"
+      - "2.4"
+      - "2.5"
+      - "2.6"
+      - "A.13"
+      - "A.14"
+      - "B.1"
+      - "B.3"
+      - "B.6"
+      - "B.9"
+      - "B.13"
+      - "C.11"
+      - "C.12"
+      - "D.5"
+      - "D.15"
+      - "D.20"
+    exports:
+      - Fact
+      - EntityNode
+      - RawChunk
+      - TemporalEvent
+      - BM25Index
+      - VectorIndex
+      - TypeIndex
+      - PropertyIndex
+      - TemporalIndex
+      - CooccurrenceIndex
+      - RawChunkStore
+      - FoundryStore
+    internals:
+      - EntityGraph
+      - DerivedGraph
+      - PropertySearchability
+    test_files:
+      - test_adversarial_input.py
+      - test_adversarial_scale.py
+      - test_behavioral_queries.py
+      - test_behavioral_retrieval.py
+      - test_benchmark_ingestion.py
+      - test_benchmark_query.py
+      - test_composability.py
+      - test_fuzz_entities.py
+      - test_fuzz_queries.py
+      - test_idempotency.py
+      - test_integration_layers.py
+      - test_property_graph.py
+      - test_property_query.py
+      - test_regression_aggregation.py
+      - test_regression_resolution.py
+      - test_serialization.py
+      - test_temporal_allen.py
+      - test_temporal_queries.py
+      - test_temporal_supersession.py
+      - test_unit_dynamics.py
+      - test_unit_ingestion.py
+      - test_unit_query.py
+      - test_unit_storage.py
+      - test_unit_writeback.py
+    estimated_tests: 452
+    depends_on:
+      - foundry/ontology.py
+
+  - name: "Phase 3: Query Language"
+    module: foundry/query.py
+    spec_sections:
+      - "3.1"
+      - "3.2"
+      - "3.2a"
+      - "3.2b"
+      - "3.2c"
+      - "3.3"
+      - "3.4"
+      - "3.5"
+      - "3.6"
+      - "3.7"
+      - "A.2"
+      - "A.4"
+      - "A.8"
+      - "A.10"
+      - "A.11"
+      - "B.10"
+      - "C.1"
+      - "C.9"
+      - "C.25"
+      - "D.2"
+      - "D.6"
+    exports:
+      - FilterOp
+      - LogicalOp
+      - TraversalOp
+      - QueryPlan
+    internals:
+      - PageResult
+      - GroupedQueryPlan
+      - TemporalQueryPlan
+      - pivot_to
+      - group_by
+      - page
+      - take
+      - iter
+    test_files:
+      - test_adversarial_scale.py
+      - test_benchmark_query.py
+      - test_composability.py
+      - test_fuzz_queries.py
+      - test_idempotency.py
+      - test_property_query.py
+      - test_serialization.py
+      - test_temporal_queries.py
+      - test_unit_query.py
+    estimated_tests: 152
+    depends_on:
+      - foundry/ontology.py
+      - foundry/storage.py
+
+  - name: "Phase 4: Ingestion Pipeline"
+    module: foundry/ingestion.py
+    spec_sections:
+      - "4.1"
+      - "4.2"
+      - "4.3.1"
+      - "4.3.2"
+      - "4.3.3"
+      - "4.3.4"
+      - "4.3.5"
+      - "4.3.6"
+      - "4.3.7"
+      - "4.3.8"
+      - "4.3.9"
+      - "4.3.10"
+      - "4.3.11"
+      - "4.4"
+      - "A.2"
+      - "A.8"
+      - "B.2"
+      - "B.11"
+      - "B.14"
+      - "B.15"
+      - "C.18"
+      - "C.19"
+      - "D.3"
+      - "D.10"
+      - "D.14"
+      - "D.17"
+      - "F.1"
+      - "F.2"
+      - "F.3"
+    exports:
+      - ConversationTurn
+      - parse_conversation
+      - chunk_turns
+      - ExtractedTriple
+      - FacetEntity
+      - infer_type
+      - EntityResolver
+      - verify_grounding
+      - VerbClassification
+      - classify_verb
+      - route_to_layer
+      - track_cooccurrences
+      - IngestionReport
+    internals:
+      - extract_triples
+      - extract_faceted_entities
+      - extract_temporal
+      - DerivedLayerBuilder
+    test_files:
+      - test_adversarial_input.py
+      - test_benchmark_query.py
+      - test_fuzz_entities.py
+      - test_idempotency.py
+      - test_property_graph.py
+      - test_regression_resolution.py
+      - test_unit_ingestion.py
+      - test_unit_query.py
+    estimated_tests: 164
+    depends_on:
+      - foundry/ontology.py
+      - foundry/storage.py
+
+  - name: "Phase 5: Writeback"
+    module: foundry/writeback.py
+    spec_sections:
+      - "6.1"
+      - "6.2"
+      - "6.3"
+      - "6.4"
+      - "6.5"
+      - "6.6"
+      - "6.7"
+      - "B.12"
+      - "B.16"
+      - "C.5"
+      - "C.17"
+      - "C.26"
+      - "D.11"
+      - "D.18"
+    exports:
+      - SupersessionEngine
+      - TemporalValidity
+      - EntityMerger
+      - DeletionPolicy
+      - Tombstone
+    internals:
+      - MemoryAction
+      - ACTION_TYPES
+      - EditVersion
+      - VersionTracker
+    test_files:
+      - test_temporal_supersession.py
+      - test_unit_writeback.py
+    estimated_tests: 32
+    depends_on:
+      - foundry/ontology.py
+      - foundry/storage.py
+
+  - name: "Phase 6: Retrieval"
+    module: foundry/retrieval.py
+    spec_sections:
+      - "5.1"
+      - "5.2"
+      - "5.3"
+      - "5.4"
+      - "5.5"
+      - "5.6"
+      - "5.7"
+      - "5.8"
+      - "5.9"
+      - "5.10"
+      - "A.9"
+      - "B.4"
+      - "C.2"
+      - "C.7"
+      - "C.8"
+      - "C.10"
+      - "C.16"
+      - "C.21"
+      - "D.7"
+      - "D.8"
+      - "D.9"
+      - "D.12"
+      - "D.16"
+      - "D.24"
+      - "D.25"
+    exports:
+      - TOOLS
+      - DeduplicationTracker
+      - AgenticRetriever
+      - RetrievalTrace
+      - DeterministicRouter
+      - RetrievalBudget
+    internals:
+      - search_memory_hybrid
+      - search_memory
+      - search_entities
+      - get_related
+      - search_temporal
+      - read_turn
+      - aggregate
+      - execute_python
+      - answer
+    test_files:
+      - test_idempotency.py
+      - test_unit_retrieval.py
+    estimated_tests: 33
+    depends_on:
+      - foundry/ontology.py
+      - foundry/storage.py
+      - foundry/query.py
+
+  - name: "Phase 7: Core API"
+    module: foundry/core.py
+    spec_sections:
+      - "10.1"
+      - "10.2"
+      - "10.3"
+      - "10.4"
+      - "10.5"
+      - "10.6"
+      - "11.1"
+      - "11.2"
+      - "11.3"
+      - "11.4"
+      - "11.5"
+      - "11.6"
+      - "11.7"
+      - "11.8"
+      - "12.1"
+      - "12.2"
+      - "12.3"
+      - "D.1"
+      - "D.3"
+      - "D.4"
+      - "D.8"
+      - "D.15"
+      - "D.21"
+      - "D.22"
+      - "D.23"
+      - "D.26"
+      - "D.27"
+    exports:
+      - FoundryConfig
+      - Foundry
+    internals:
+      - grounding_report
+      - retrieve_deterministic
+      - export_graph
+      - import_graph
+      - ConversationNode
+      - StorageManifest
+      - SessionContext
+      - PipelinePerformanceTracker
+    test_files:
+      - test_adversarial_input.py
+      - test_adversarial_scale.py
+      - test_behavioral_ingestion.py
+      - test_behavioral_queries.py
+      - test_behavioral_retrieval.py
+      - test_idempotency.py
+      - test_integration_layers.py
+      - test_integration_pipeline.py
+      - test_regression_aggregation.py
+      - test_snapshot_complex.py
+      - test_snapshot_contradictory.py
+      - test_snapshot_simple.py
+      - test_temporal_supersession.py
+    estimated_tests: 161
+    depends_on:
+      - foundry/ontology.py
+      - foundry/storage.py
+      - foundry/query.py
+      - foundry/ingestion.py
+      - foundry/writeback.py
+      - foundry/retrieval.py
+
+  - name: "Phase 8: Dynamics"
+    module: foundry/dynamics.py
+    spec_sections:
+      - "7.1"
+      - "7.2"
+      - "7.3"
+      - "7.4"
+      - "7.5"
+      - "B.17"
+      - "C.6"
+      - "C.14"
+      - "C.15"
+      - "C.24"
+      - "D.13"
+      - "D.19"
+    exports:
+      - MemorySystem
+      - ImportanceScore
+      - DecayFunction
+      - HebbianBridge
+      - DreamConsolidator
+    internals: []
+    test_files:
+      - test_integration_layers.py
+      - test_temporal_supersession.py
+      - test_unit_dynamics.py
+    estimated_tests: 45
+    depends_on:
+      - foundry/storage.py
+      - foundry/core.py
