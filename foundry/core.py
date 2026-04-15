@@ -444,7 +444,12 @@ class Foundry:
         return evidence, trace
 
     def retrieve_deterministic(self, question: str) -> tuple[str, Any]:
-        router = DeterministicRouter(self._store, budget=self._retrieval_budget())
+        router = DeterministicRouter(
+            self._store,
+            budget=self._retrieval_budget(),
+            llm_url=self.config.extraction_url,
+            llm_model=self.config.agent_model,
+        )
         pipeline = router.route(question)
         evidence, meta = router.execute(question, pipeline)
         if meta.get("fallback") == "agentic":
@@ -453,6 +458,19 @@ class Foundry:
         if evidence.strip():
             self._retrieval_counts[_normalize_name(question)] += 1
         return evidence, meta
+
+    def decompose(self, question: str) -> list[str]:
+        """Decompose a multi-hop question into chained sub-queries."""
+
+        if not self.config.extraction_url:
+            return [question]
+        from foundry.query import decompose_query
+
+        return decompose_query(
+            question,
+            llm_url=self.config.extraction_url,
+            llm_model=self.config.agent_model,
+        )
 
     def save(self, path: str) -> None:
         self._store.save(path)

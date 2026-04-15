@@ -9,6 +9,8 @@ import base64
 import json
 import re
 from typing import Any, Iterator, Optional, Union
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 import warnings
 
 from foundry.ontology import EntityType, PropertyType
@@ -871,6 +873,104 @@ def _event_point(reference: TemporalEvent | datetime, boundary: str) -> datetime
     return parsed
 
 
+_SUBQUERY_PREFIX_RE = re.compile(r"^\s*(?:\d+[\.\)]|[-*])\s*(?P<body>.+?)\s*$")
+_ANSWER_PLACEHOLDER_RE = re.compile(r"\{answer_(\d+)\}")
+
+
+def _parse_subqueries(text: str, max_hops: int = 3) -> list[str]:
+    """Parse numbered sub-queries from raw LLM text."""
+
+    subqueries: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = _SUBQUERY_PREFIX_RE.match(line)
+        if match:
+            line = match.group("body").strip()
+        elif line[:1] in {"-", "*"}:
+            line = line[1:].strip()
+        placeholder_refs = [int(ref) for ref in _ANSWER_PLACEHOLDER_RE.findall(line)]
+        current_position = len(subqueries) + 1
+        if any(ref <= 0 or ref >= current_position for ref in placeholder_refs):
+            continue
+        if line:
+            subqueries.append(line)
+        if len(subqueries) >= max(1, int(max_hops)):
+            break
+    return subqueries
+
+
+def decompose_query(
+    question: str,
+    llm_url: str,
+    llm_model: str = "gpt-4o-mini",
+    max_hops: int = 3,
+    temperature: float = 0.0,
+) -> list[str]:
+    """Decompose a question into chained sub-queries via an OpenAI-compatible API."""
+
+    original_question = str(question or "")
+    if not original_question.strip() or not str(llm_url or "").strip():
+        return [original_question]
+
+    prompt = (
+        "Break this question into simple sub-questions that each require looking up a single fact. "
+        "Start from the innermost entity and work outward. Use {answer_1}, {answer_2}, etc. as "
+        "placeholders for prior answers. Use the actual entity names from the question, not pronouns.\n\n"
+        "Example:\n"
+        "Q: What is the country of origin of the sport played by Christian Abbiati?\n"
+        "1. What sport did Christian Abbiati play?\n"
+        "2. What is the country of origin of {answer_1}?\n\n"
+        "Example:\n"
+        "Q: Where was the creator of the religion Karl Lueger followed born?\n"
+        "1. What religion did Karl Lueger follow?\n"
+        "2. Who created {answer_1}?\n"
+        "3. Where was {answer_2} born?\n\n"
+        f"Q: {original_question}\n"
+    )
+
+    payload = json.dumps(
+        {
+            "model": llm_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You decompose multi-hop questions into chained sub-questions. "
+                        "Use {answer_N} placeholders. Be concise."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": float(temperature),
+            "max_tokens": 256,
+        }
+    ).encode("utf-8")
+    request = urllib_request.Request(
+        f"{str(llm_url).rstrip('/')}/chat/completions",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(request, timeout=15) as response:
+            body = response.read().decode("utf-8")
+        parsed = json.loads(body)
+        content = parsed.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if isinstance(content, list):
+            content = "\n".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+        subqueries = _parse_subqueries(str(content or ""), max_hops=max_hops)
+        return subqueries if subqueries else [original_question]
+    except (OSError, ValueError, KeyError, IndexError, TypeError, urllib_error.URLError):
+        return [original_question]
+
+
 __all__ = [
     "FilterOp",
     "GroupedQueryPlan",
@@ -879,4 +979,6 @@ __all__ = [
     "QueryPlan",
     "TemporalQueryPlan",
     "TraversalOp",
+    "_parse_subqueries",
+    "decompose_query",
 ]
