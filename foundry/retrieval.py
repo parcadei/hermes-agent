@@ -26,7 +26,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 import numpy as np
 
 from foundry.ontology import GroundingLayer
-from foundry.query import QueryPlan
+from foundry.query import QueryPlan, decompose_query
 from foundry.storage import (
     BM25Index,
     EntityNode,
@@ -69,13 +69,64 @@ _SPATIAL_PATTERNS = (
     re.compile(r"\blocated\b|\blives?\b|\bstays?\b|\bvisited\b", re.IGNORECASE),
 )
 _SOCIAL_PATTERNS = (
-    re.compile(r"\bwho\b", re.IGNORECASE),
     re.compile(r"\bfriend\b|\bfamily\b|\bcolleague\b|\bknows?\b", re.IGNORECASE),
+    re.compile(r"\bconnected\b|\brelationship\b|\brelated to\b", re.IGNORECASE),
 )
 _META_PATTERNS = (
     re.compile(r"\bdo(es)? (the )?user know\b", re.IGNORECASE),
     re.compile(r"\bhas\b|\bhave\b", re.IGNORECASE),
 )
+_MULTI_HOP_START_RE = re.compile(r"^(what|which|who|where|when|how)\b", re.IGNORECASE)
+_MULTI_HOP_PHRASES = (
+    "country of origin",
+    "creator of",
+    "founder of",
+    "parent of",
+    "spouse of",
+    "capital of",
+    "birthplace of",
+    "played by",
+    "followed by",
+    "created by",
+    "founded by",
+    "written by",
+    "directed by",
+)
+_MULTI_HOP_RELATION_TERMS = (
+    "born",
+    "followed",
+    "played",
+    "created",
+    "founded",
+    "written",
+    "directed",
+)
+_TURN_PREFIX_RE = re.compile(r"^turn\s+\d+\s*:\s*", re.IGNORECASE)
+_ANSWER_FROM_EVIDENCE_PATTERNS = (
+    re.compile(r"\bplayed\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
+    re.compile(r"\bfollow(?:ed|s)?\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
+    re.compile(r"\blaunch(?:ed|es)?\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
+    re.compile(r"\bcreated by\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
+    re.compile(r"\bfounded by\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
+    re.compile(r"\bwritten by\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
+    re.compile(r"\bdirected by\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
+    re.compile(r"\bborn in\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
+    re.compile(r"\boriginated in\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
+    re.compile(r"\bfrom\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
+    re.compile(r"\b(?:is|are|was|were)\s+(?P<answer>[^.?!]+)", re.IGNORECASE),
+)
+_SPATIAL_FACT_PREDICATES = {
+    "at",
+    "birth_place",
+    "birthplace",
+    "born",
+    "born_in",
+    "from",
+    "lives_in",
+    "location",
+    "place_of_birth",
+    "visited",
+}
 
 
 TOOLS: dict[str, dict[str, str]] = {
@@ -731,6 +782,45 @@ def _summarize_memory_hits(hits: list[dict[str, Any]], *, limit: int = 5) -> str
     return "\n".join(lines)
 
 
+def _looks_multi_hop(question: str) -> bool:
+    normalized = str(question or "").strip().lower()
+    if not normalized or _MULTI_HOP_START_RE.search(normalized) is None:
+        return False
+    phrase_hits = sum(1 for phrase in _MULTI_HOP_PHRASES if phrase in normalized)
+    if phrase_hits >= 2:
+        return True
+    if phrase_hits >= 1 and any(term in normalized for term in _MULTI_HOP_RELATION_TERMS):
+        return True
+    if phrase_hits >= 1 and normalized.count(" of ") >= 2:
+        return True
+    return bool(re.search(r"\bof the\b.*\b(?:by|followed by|played by|created by|founded by)\b", normalized))
+
+
+def _substitute_answers(template: str, answers: Sequence[str]) -> str:
+    resolved = str(template or "")
+    for index, answer in enumerate(answers, start=1):
+        resolved = resolved.replace(f"{{answer_{index}}}", answer)
+    return resolved
+
+
+def _extract_short_answer(question: str, evidence: str) -> str:
+    del question
+    lines = [line.strip() for line in str(evidence or "").splitlines() if line.strip()]
+    for line in lines:
+        normalized = _TURN_PREFIX_RE.sub("", line)
+        candidate_segments = [normalized]
+        if ":" in normalized:
+            candidate_segments.append(normalized.split(":", 1)[1].strip())
+        for segment in candidate_segments:
+            for pattern in _ANSWER_FROM_EVIDENCE_PATTERNS:
+                match = pattern.search(segment)
+                if match:
+                    answer = match.group("answer").strip(" .,:;!?\"'")
+                    if answer:
+                        return answer
+    return ""
+
+
 class DeterministicRouter:
     """Routes questions to hardcoded retrieval pipelines."""
 
@@ -741,13 +831,27 @@ class DeterministicRouter:
         budget: RetrievalBudget = RetrievalBudget(),
         reranker: Optional[Callable[[str, list[dict[str, Any]]], list[dict[str, Any]]]] = None,
         embed_fn: Optional[Callable[[str], np.ndarray]] = None,
+        llm_url: Optional[str] = None,
+        llm_model: str = "gpt-4o-mini",
     ) -> None:
         self.store = store
         self.budget = budget
         self.reranker = reranker
         self.embed_fn = embed_fn
+        self.llm_url = llm_url
+        self.llm_model = llm_model
 
     def route(self, question: str) -> str:
+        normalized = str(question or "").strip()
+        if not normalized:
+            return "agentic"
+
+        lowered = normalized.lower()
+        if _looks_multi_hop(lowered):
+            return "multi_hop"
+        return self._route_without_multi_hop(normalized)
+
+    def _route_without_multi_hop(self, question: str) -> str:
         normalized = str(question or "").strip()
         if not normalized:
             return "agentic"
@@ -764,7 +868,7 @@ class DeterministicRouter:
         if _contains_pattern(lowered, _SPATIAL_PATTERNS):
             return "spatial" if "where" in lowered else "fact_lookup"
         if _contains_pattern(lowered, _SOCIAL_PATTERNS):
-            return "social_relational" if "who" in lowered else "fact_lookup"
+            return "social_relational"
         if _contains_pattern(lowered, _META_PATTERNS) and ("remember" in lowered or "know" in lowered or "have" in lowered):
             return "meta_cognitive"
         if re.search(r"^(what|which|who|where|does|is|are|did|do)\b", lowered):
@@ -924,7 +1028,7 @@ class DeterministicRouter:
         lines = []
         for hit in hits:
             for fact in hit["facts"]:
-                if fact["predicate"] in {"location", "lives_in", "visited", "from", "at"}:
+                if fact["predicate"] in _SPATIAL_FACT_PREDICATES:
                     lines.append(f"{hit['entity']}: {fact['predicate']} {fact['object']}")
         evidence = "\n".join(lines)
         trace.evidence = evidence
@@ -951,18 +1055,68 @@ class DeterministicRouter:
         return evidence
 
     def _execute_multi_hop(self, question: str, trace: RetrievalTrace) -> str:
-        candidates = _extract_entity_candidates(question)
-        if not candidates:
+        subqueries = [question]
+        if self.llm_url:
+            subqueries = decompose_query(
+                question,
+                llm_url=self.llm_url,
+                llm_model=self.llm_model,
+                max_hops=3,
+            )
+        self._record(trace, "decompose_query", {"question": question}, subqueries)
+        if not subqueries:
             trace.terminated_by = "no_action"
             return ""
-        plan = QueryPlan(self.store, seed={candidates[0]}).related(max_hops=3)
-        neighbors = plan.execute()
-        payload = [entity.canonical for entity in neighbors]
-        self._record(trace, "get_related", {"entity": candidates[0], "max_hops": 3}, payload)
-        evidence = ", ".join(payload[:15])
-        trace.evidence = evidence
-        trace.terminated_by = "answer" if evidence else "budget"
-        return evidence
+        if len(subqueries) == 1 and str(subqueries[0]).strip() == str(question).strip():
+            trace.terminated_by = "no_action"
+            return ""
+        handlers: dict[str, Callable[[str, RetrievalTrace], str]] = {
+            "fact_lookup": self._execute_fact_lookup,
+            "temporal": self._execute_temporal,
+            "aggregation": self._execute_aggregation,
+            "preference": self._execute_preference,
+            "comparison": self._execute_comparison,
+            "spatial": self._execute_spatial,
+            "social_relational": self._execute_social_relational,
+            "meta_cognitive": self._execute_meta_cognitive,
+        }
+        answers: list[str] = []
+        final_evidence = ""
+        for index, template in enumerate(subqueries, start=1):
+            resolved_question = _substitute_answers(template, answers)
+            if "{answer_" in resolved_question:
+                trace.terminated_by = "budget"
+                break
+            pipeline = self._route_without_multi_hop(resolved_question)
+            if pipeline == "agentic":
+                trace.terminated_by = "no_action"
+                final_evidence = ""
+                break
+            handler = handlers.get(pipeline)
+            if handler is None:
+                trace.terminated_by = "no_action"
+                final_evidence = ""
+                break
+            final_evidence = handler(resolved_question, trace)
+            if not final_evidence.strip():
+                trace.terminated_by = "budget"
+                break
+            if index < len(subqueries):
+                answer = _extract_short_answer(resolved_question, final_evidence)
+                self._record(
+                    trace,
+                    "resolve_subquery",
+                    {"query": resolved_question, "pipeline": pipeline},
+                    {"answer": answer},
+                )
+                if not answer:
+                    trace.terminated_by = "budget"
+                    final_evidence = ""
+                    break
+                answers.append(answer)
+        trace.evidence = final_evidence
+        trace.terminated_by = "answer" if final_evidence else (trace.terminated_by or "budget")
+        return final_evidence
 
 
 class AgenticRetriever:

@@ -676,7 +676,12 @@ class TemporalIndex:
             for event in self._events
             if event.start_dt <= end_dt and event.end_dt >= start_dt
         ]
-        matches.sort(key=lambda event: (event.start_dt, event.end_dt, event.event))
+        matches.sort(key=lambda event: (
+            event.start_dt,
+            event.end_dt,
+            -1 if event.turn_id is None else int(event.turn_id),
+            event.event,
+        ))
         return matches
 
     def allen_before(self, a: TemporalEvent, b: TemporalEvent) -> bool:
