@@ -132,6 +132,20 @@ def test_extract_via_llm_posts_structured_request_and_maps_fields(monkeypatch: p
     assert triple.turn_idx == 7
 
 
+def test_extract_via_llm_accepts_full_chat_completions_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+
+    def _fake_urlopen(request, timeout: int = 0):
+        captured["url"] = request.full_url
+        return _completion_response({"entities": [], "relations": []})
+
+    monkeypatch.setattr("foundry.ingestion.urllib_request.urlopen", _fake_urlopen)
+
+    extract_via_llm("[Turn 0] User: hello", "http://localhost:1234/v1/chat/completions")
+
+    assert captured["url"] == "http://localhost:1234/v1/chat/completions"
+
+
 def test_extract_entities_and_triples_dispatches_to_llm_with_wrapped_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, str] = {}
     expected_entities = [FacetEntity(name="Luna", facets={"what": "animal"}, turn_idx=-1, source_text="wrapped")]
@@ -193,6 +207,21 @@ def test_extract_via_llm_rejects_invalid_content_json(monkeypatch: pytest.Monkey
     monkeypatch.setattr("foundry.ingestion.urllib_request.urlopen", _fake_urlopen)
 
     with pytest.raises(ValueError, match="content was not valid JSON"):
+        extract_via_llm("[Turn 0] User: I have a cat named Luna.", "http://localhost:1234/v1")
+
+
+def test_extract_via_llm_rejects_relation_missing_required_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_urlopen(request, timeout: int = 0):
+        return _completion_response(
+            {
+                "entities": [{"name": "Luna", "entity_type": "animal"}],
+                "relations": [{"subject": "user", "predicate": "has", "object": "Luna"}],
+            }
+        )
+
+    monkeypatch.setattr("foundry.ingestion.urllib_request.urlopen", _fake_urlopen)
+
+    with pytest.raises(ValueError, match="relation row missing required keys"):
         extract_via_llm("[Turn 0] User: I have a cat named Luna.", "http://localhost:1234/v1")
 
 

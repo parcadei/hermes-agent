@@ -808,7 +808,10 @@ def _llm_completion_url(llm_url: str) -> str:
     base = str(llm_url or "").strip()
     if not base:
         raise ValueError("llm_url must be provided for LLM extraction")
-    return base.rstrip("/") + "/chat/completions"
+    normalized = base.rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    return normalized + "/chat/completions"
 
 
 def _extract_completion_payload(payload: dict[str, Any]) -> Any:
@@ -841,6 +844,13 @@ def _as_string(value: Any, *, default: str = "") -> str:
     if value is None:
         return default
     return str(value)
+
+
+def _validate_required_keys(item: dict[str, Any], required: tuple[str, ...], label: str) -> None:
+    missing = [key for key in required if key not in item]
+    if missing:
+        joined = ", ".join(sorted(missing))
+        raise ValueError(f"LLM extraction {label} row missing required keys: {joined}")
 
 
 def extract_via_llm(
@@ -913,6 +923,7 @@ def extract_via_llm(
     for item in raw_entities:
         if not isinstance(item, dict):
             raise ValueError("LLM extraction entity rows must be objects")
+        _validate_required_keys(item, ("name", "entity_type"), "entity")
         name = _as_string(item.get("name")).strip()
         entity_type = EntityType.normalize(_as_string(item.get("entity_type")).strip())
         if not name:
@@ -924,6 +935,23 @@ def extract_via_llm(
     for item in raw_relations:
         if not isinstance(item, dict):
             raise ValueError("LLM extraction relation rows must be objects")
+        _validate_required_keys(
+            item,
+            (
+                "subject",
+                "predicate",
+                "object",
+                "role",
+                "when",
+                "when_type",
+                "quantity",
+                "unit",
+                "confidence",
+                "sentiment",
+                "source_turn",
+            ),
+            "relation",
+        )
         subject = _as_string(item.get("subject")).strip()
         predicate = _as_string(item.get("predicate")).strip()
         obj = _as_string(item.get("object")).strip()
