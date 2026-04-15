@@ -20,7 +20,9 @@ from foundry.ingestion import (
     ExtractedTriple,
     FacetEntity,
     IngestionReport,
+    _extract_entities_and_triples_with_mode,
     chunk_turns,
+    extract_entities_and_triples,
     extract_faceted_entities,
     extract_temporal,
     extract_triples,
@@ -581,9 +583,21 @@ class Foundry:
         self._store.bm25_chunks.add(chunk.chunk_idx, chunk.text)
         tracker.mark("store_chunk", store_started)
 
+        auto_entities: list[FacetEntity] = []
+        auto_triples: list[ExtractedTriple] = []
+        auto_used_regex = False
+        llm_enabled = bool(self.config.extraction_url)
+        if entities is None or triples is None:
+            auto_entities, auto_triples, auto_used_regex = _extract_entities_and_triples_with_mode(
+                chunk,
+                self.config.extraction_url or "",
+                self.config.extraction_model,
+            )
+
         entity_started = time.perf_counter()
-        extracted_entities = list(entities or extract_faceted_entities(chunk, self.config.extraction_url or "", self.config.extraction_model))
-        extracted_entities.extend(self._supplemental_entities(chunk))
+        extracted_entities = list(entities if entities is not None else auto_entities)
+        if not llm_enabled or auto_used_regex:
+            extracted_entities.extend(self._supplemental_entities(chunk))
 
         chunk_entities: list[str] = []
         for extracted in extracted_entities:
@@ -613,8 +627,9 @@ class Foundry:
         tracker.mark("temporal", temporal_started)
 
         triple_started = time.perf_counter()
-        extracted_triples = list(triples or extract_triples(chunk, self.config.extraction_url or "", self.config.extraction_model))
-        extracted_triples.extend(self._supplemental_triples(chunk))
+        extracted_triples = list(triples if triples is not None else auto_triples)
+        if not llm_enabled or auto_used_regex:
+            extracted_triples.extend(self._supplemental_triples(chunk))
 
         facts_added = 0
         facts_superseded = 0

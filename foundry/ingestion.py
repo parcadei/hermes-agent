@@ -8,12 +8,16 @@ core ingestion contract remains available without runtime model dependencies.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import hashlib
 import re
-from typing import Callable, Iterable, Optional
+import socket
+from typing import Any, Callable, Iterable, Optional
 import unicodedata
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 from foundry.ontology import EntityType, GroundingLayer, PropertyType, infer_property_type
 from foundry.storage import CooccurrenceIndex, EntityNode, Fact, FoundryStore, RawChunk, TemporalEvent
@@ -175,6 +179,10 @@ _NUMBER_WORDS = {
     "ninety": 90,
 }
 _NUMBER_SCALES = {"hundred": 100, "thousand": 1000, "million": 1_000_000, "billion": 1_000_000_000}
+_TURN_PAYLOAD_RE = re.compile(r"^\s*\[Turn\s+(?P<turn>\d+)\]\s+User:\s*(?P<text>.*)$", re.IGNORECASE | re.DOTALL)
+
+V9_SYSTEM_PROMPT = 'You are a precise information extraction system.\n\nFollow these steps in order:\n\nSTEP 1 — ENTITY SCAN\nRead the entire text. Identify every named entity mentioned: people, animals, places, restaurants, products, objects, organizations. Record each with its type. Only record entities that have a proper name or are directly referenced as distinct things. Do NOT create separate entities for descriptions.\n\nSTEP 2 — PER-ENTITY RELATION EXTRACTION\nFor EACH entity from Step 1, ask: "What was said about this entity?"\nFor each fact or claim, create a relation:\n- subject: who or what. Use "user" for the person speaking. Use the person\'s NAME for third parties (e.g., "Sarah" not "user"). For unnamed third parties, use the descriptor: "my friend"→"friend", "my neighbor"→"neighbor", "my coworker"→"coworker".\n- predicate: short normalized verb phrase, MAX 4 words (e.g., "lives in", "costs", "got for", "works at"). Strip surrounding context — just the core verb.\n- object: the target entity name or literal value\n\nHEARSAY AND REPORTED SPEECH:\nWhen someone reports what ANOTHER person said, thought, or believes:\n- "My friend told me X is overrated" → subject="friend", NOT "user"\n- "Maria says the Thai place is amazing" → subject="Maria"\n- "CEO said the company plans to launch Y" → subject="company", role=intent\n- The subject is ALWAYS who holds the opinion, not who relays it.\n- For unnamed people: "my friend"→"friend", "my boss"→"boss", "a colleague"→"colleague".\n\nPRICES AND COUNTS — ALWAYS EMIT BOTH:\nWhen a purchase mentions BOTH a count AND a price, you MUST create TWO relations:\n1. A count relation: subject | bought/got/ordered | object (quantity=COUNT, unit="")\n2. A cost relation: object | cost/cost each | $PRICE (quantity=PRICE_AMOUNT, unit="dollars")\n\nExamples:\n- "bought five apples for $3" →\n  user | bought | apples (quantity="5", unit="")\n  apples | cost | $3 (quantity="3", unit="dollars")\n- "three oranges for $2.50" →\n  user | bought | oranges (quantity="3", unit="")\n  oranges | cost | $2.50 (quantity="2.50", unit="dollars")\n- "ordered 100 widgets at $4.99 each" →\n  user | ordered | widgets (quantity="100", unit="")\n  widgets | cost each | $4.99 (quantity="4.99", unit="dollars")\n\nBoth the count AND cost relation are MANDATORY. Never skip the count.\n\nSTEP 3 — CLASSIFY EACH RELATION\nFor each relation from Step 2, assign:\n- role: what kind of statement?\n    event = something that happened (bought, moved, sold, started, got, announced, reported, dropped)\n    state = an ongoing condition (has, owns, lives in, is, costs)\n    opinion = subjective view or feeling (loves, hates, prefers, favorite, thinks is overrated)\n    intent = future plan or desire (wants to, planning, plans to, considering, aims to)\n- confidence: how certain is the speaker? CHECK FOR NEGATION FIRST.\n    negated = ANY of these patterns:\n      - "don\'t", "doesn\'t", "not", "no", "never", "no longer" in the statement\n      - "used to X" (implies X is no longer true)\n      - explicit denial or contradiction of a previous claim\n      - "forgotten", "stopped", "quit", "gave up"\n    hedged = uncertain (maybe, might, thinking about, not sure, I guess)\n    definite = stated as fact with no negation or uncertainty markers\n- sentiment: what is the emotional valence of this statement?\n    positive = favorable, good, happy, love, amazing, best, favorite, exciting\n    negative = unfavorable, bad, hate, overrated, worst, annoying, frustrating\n    neutral = factual, no emotional charge (has, lives in, moved to, costs)\n    Note: Most events and states are neutral. Opinions usually have positive or negative sentiment.\n\nSTEP 4 — TEMPORAL GROUNDING\nFor each relation, check: was a time, date, or frequency mentioned?\n- when: copy the exact temporal phrase. Include frequency phrases like "every morning", "every Friday". Empty string if none.\n- when_type: classify it:\n    point = specific moment (March 2024, last Tuesday, Tuesday)\n    interval = range (from 2020 to 2023, during college, in college)\n    recurring = repeating (every Friday, every morning, weekly, twice a month)\n    relative = relative to now (recently, just, last month, last summer)\n    Empty string if no temporal phrase.\n\nSTEP 5 — QUANTITY + UNIT CHECK\nFor each relation, find the number that MEASURES THIS SPECIFIC RELATION\'S action or object:\n- For purchase/ownership/count relations: quantity = the COUNT of items.\n    "bought five apples" → quantity="5"\n    "has three cats" → quantity="3"\n    "three oranges" → quantity="3"\n- For cost/price relations: quantity = the PRICE AMOUNT.\n    "costs $4.99 each" → quantity="4.99"\n    "cost $8" → quantity="8"\n    "priced at $12.50" → quantity="12.50"\n- For measurements: quantity = the measured value.\n    "two hours" → quantity="2"\n    "15,000 miles" → quantity="15000"\n    "8%" → quantity="8"\n- Convert number words to digits. Strip currency symbols. Digits only.\n- Write "0" if no number applies to THIS relation.\n- unit: what is being measured (dollars, hours, percent, miles, etc). Empty string if none.\n\nSTEP 6 — PROVENANCE\n- source_turn: the integer N from [Turn N] where this fact appears.\n\nRULES:\n- ONLY extract what was explicitly said. NEVER infer or interpret.\n- Process User turns ONLY. SKIP Assistant turns completely.\n- The speaker is always "user". Other people get their mentioned name as subject.\n- Predicates must be short verb phrases (1-4 words), not full sentences.\n- Each entity should appear only once in the entities list.\n- If text contains nothing extractable, return empty arrays.\n\nEXAMPLE 1:\n[Turn 0] User: I used to love Olive Garden but now Bamboo Sushi is my favorite. We go there every Friday. I have two cats named Luna and Mochi.\n\nOutput:\n{\n  "entities": [\n    {"name": "Olive Garden", "entity_type": "restaurant"},\n    {"name": "Bamboo Sushi", "entity_type": "restaurant"},\n    {"name": "Luna", "entity_type": "animal"},\n    {"name": "Mochi", "entity_type": "animal"}\n  ],\n  "relations": [\n    {"subject": "user", "predicate": "used to love", "object": "Olive Garden", "role": "opinion", "when": "", "when_type": "", "quantity": "0", "unit": "", "confidence": "negated", "sentiment": "positive", "source_turn": 0},\n    {"subject": "user", "predicate": "favorite restaurant", "object": "Bamboo Sushi", "role": "opinion", "when": "", "when_type": "", "quantity": "0", "unit": "", "confidence": "definite", "sentiment": "positive", "source_turn": 0},\n    {"subject": "user", "predicate": "visits", "object": "Bamboo Sushi", "role": "event", "when": "every Friday", "when_type": "recurring", "quantity": "0", "unit": "", "confidence": "definite", "sentiment": "neutral", "source_turn": 0},\n    {"subject": "user", "predicate": "has", "object": "Luna", "role": "state", "when": "", "when_type": "", "quantity": "2", "unit": "", "confidence": "definite", "sentiment": "neutral", "source_turn": 0},\n    {"subject": "user", "predicate": "has", "object": "Mochi", "role": "state", "when": "", "when_type": "", "quantity": "2", "unit": "", "confidence": "definite", "sentiment": "neutral", "source_turn": 0}\n  ]\n}\n\nEXAMPLE 2:\n[Turn 0] User: I have a dog named Buddy.\n[Turn 1] User: Actually I don\'t have any pets. Buddy is my neighbor\'s dog.\n\nOutput:\n{\n  "entities": [\n    {"name": "Buddy", "entity_type": "animal"}\n  ],\n  "relations": [\n    {"subject": "user", "predicate": "has", "object": "Buddy", "role": "state", "when": "", "when_type": "", "quantity": "0", "unit": "", "confidence": "definite", "sentiment": "neutral", "source_turn": 0},\n    {"subject": "user", "predicate": "doesn\'t have", "object": "pets", "role": "state", "when": "", "when_type": "", "quantity": "0", "unit": "", "confidence": "negated", "sentiment": "neutral", "source_turn": 1},\n    {"subject": "Buddy", "predicate": "belongs to", "object": "neighbor", "role": "state", "when": "", "when_type": "", "quantity": "0", "unit": "", "confidence": "definite", "sentiment": "neutral", "source_turn": 1}\n  ]\n}\n\nNotice: "used to love"→negated, sentiment=positive (surface word). "don\'t have"→negated. "two cats"→quantity:"2". "every Friday"→recurring.'
+V9_JSON_SCHEMA = {'name': 'extraction', 'strict': True, 'schema': {'type': 'object', 'required': ['entities', 'relations'], 'additionalProperties': False, 'properties': {'entities': {'type': 'array', 'items': {'type': 'object', 'required': ['name', 'entity_type'], 'additionalProperties': False, 'properties': {'name': {'type': 'string', 'description': 'Short canonical name from the text'}, 'entity_type': {'type': 'string', 'description': 'What kind of thing: person, animal, restaurant, city, etc.'}}}}, 'relations': {'type': 'array', 'items': {'type': 'object', 'required': ['subject', 'predicate', 'object', 'role', 'when', 'when_type', 'quantity', 'unit', 'confidence', 'sentiment', 'source_turn'], 'additionalProperties': False, 'properties': {'subject': {'type': 'string', 'description': "Who or what (use 'user' for the speaker)"}, 'predicate': {'type': 'string', 'description': 'Short verb phrase: lives in, works at, cost each'}, 'object': {'type': 'string', 'description': 'Target entity name or literal value'}, 'role': {'type': 'string', 'enum': ['event', 'state', 'opinion', 'intent']}, 'when': {'type': 'string', 'description': 'Exact temporal phrase from text, or empty string'}, 'when_type': {'type': 'string', 'enum': ['point', 'interval', 'recurring', 'relative', '']}, 'quantity': {'type': 'string', 'description': "Numeric value as string (count, price amount, measurement). '0' if none."}, 'unit': {'type': 'string', 'description': 'What is measured: dollars, hours, percent, miles, etc. Empty if none.'}, 'confidence': {'type': 'string', 'enum': ['definite', 'hedged', 'negated']}, 'sentiment': {'type': 'string', 'enum': ['positive', 'negative', 'neutral']}, 'source_turn': {'type': 'integer', 'description': 'The turn number [Turn N] where this fact appears'}}}}}}}
 
 
 @dataclass
@@ -195,6 +203,12 @@ class ExtractedTriple:
     predicate: str
     object: str
     when: str = ""
+    when_type: str = ""
+    quantity: str = ""
+    unit: str = ""
+    confidence: str = ""
+    sentiment: str = ""
+    source_turn: int = -1
     role: str = ""
     sub_role: str = ""
     source_text: str = ""
@@ -327,7 +341,7 @@ def _split_text_by_token_budget(text: str, chunk_size: int) -> list[str]:
 
 
 def chunk_turns(turns: list[ConversationTurn], chunk_size: int = 512) -> list[RawChunk]:
-    """Split turns into `RawChunk` objects with continuation support."""
+    """Split turns into `RawChunk` objects while preserving turn role."""
 
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
@@ -344,7 +358,7 @@ def chunk_turns(turns: list[ConversationTurn], chunk_size: int = 512) -> list[Ra
                     chunk_idx=next_chunk_idx,
                     text=piece,
                     turn_idx=turn.turn_idx,
-                    role=turn.role if piece_idx == 0 else "continuation",
+                    role=turn.role,
                     session_time=turn.session_time,
                 )
             )
@@ -783,6 +797,264 @@ def _named_entities_from_text(text: str) -> list[str]:
     return results
 
 
+def _llm_source_context(chunk_text: str) -> tuple[int, str]:
+    match = _TURN_PAYLOAD_RE.match(chunk_text or "")
+    if not match:
+        return -1, chunk_text
+    return int(match.group("turn")), match.group("text").strip()
+
+
+def _llm_completion_url(llm_url: str) -> str:
+    base = str(llm_url or "").strip()
+    if not base:
+        raise ValueError("llm_url must be provided for LLM extraction")
+    normalized = base.rstrip("/")
+    if normalized.endswith("/chat/completions"):
+        return normalized
+    return normalized + "/chat/completions"
+
+
+def _extract_completion_payload(payload: dict[str, Any]) -> Any:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise ValueError("LLM extraction response did not include choices")
+    message = choices[0].get("message", {})
+    if not isinstance(message, dict):
+        raise ValueError("LLM extraction response did not include a valid message")
+    parsed = message.get("parsed")
+    if parsed is not None:
+        return parsed
+    content = message.get("content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            text_value = part.get("text")
+            if isinstance(text_value, str):
+                parts.append(text_value)
+        if parts:
+            return "".join(parts)
+    raise ValueError("LLM extraction response did not include textual content")
+
+
+def _as_string(value: Any, *, default: str = "") -> str:
+    if value is None:
+        return default
+    return str(value)
+
+
+def _validate_schema_row(item: dict[str, Any], required: tuple[str, ...], label: str) -> None:
+    missing = [key for key in required if key not in item]
+    if missing:
+        joined = ", ".join(sorted(missing))
+        raise ValueError(f"LLM extraction {label} missing required keys: {joined}")
+    unexpected = sorted(key for key in item if key not in required)
+    if unexpected:
+        joined = ", ".join(unexpected)
+        raise ValueError(f"LLM extraction {label} has unexpected keys: {joined}")
+
+
+def _value_is_grounded(value: str, source_text: str) -> bool:
+    if not source_text:
+        return True
+    source = source_text.casefold()
+    candidate = (value or "").casefold().strip()
+    if not candidate:
+        return False
+    if candidate in source:
+        return True
+    content_words = [word for word in re.findall(r"\w+", candidate) if len(word) >= 2]
+    return bool(content_words) and all(word in source for word in content_words)
+
+
+def _relation_value_is_grounded(value: str, source_text: str) -> bool:
+    if _value_is_grounded(value, source_text):
+        return True
+    numeric = _parse_numeric_token(value)
+    if numeric is None:
+        return False
+    return any(abs(candidate - numeric) < 1e-9 for candidate in _numbers_in_source(source_text))
+
+
+def _parse_llm_response(response_payload: dict[str, Any], chunk_text: str) -> tuple[list[FacetEntity], list[ExtractedTriple]]:
+    if isinstance(response_payload, dict) and response_payload.get("error"):
+        raise RuntimeError(f"LLM extraction endpoint returned an error: {response_payload['error']}")
+
+    content = _extract_completion_payload(response_payload)
+    if isinstance(content, str):
+        try:
+            structured = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ValueError("LLM extraction content was not valid JSON") from exc
+    else:
+        structured = content
+
+    if not isinstance(structured, dict):
+        raise ValueError("LLM extraction content must be a JSON object")
+
+    _validate_schema_row(structured, ("entities", "relations"), "payload")
+    raw_entities = structured.get("entities", [])
+    raw_relations = structured.get("relations", [])
+    if not isinstance(raw_entities, list) or not isinstance(raw_relations, list):
+        raise ValueError("LLM extraction content must contain entity and relation arrays")
+
+    default_turn_idx, source_text = _llm_source_context(chunk_text)
+
+    entities: list[FacetEntity] = []
+    for item in raw_entities:
+        if not isinstance(item, dict):
+            raise ValueError("LLM extraction entity rows must be objects")
+        _validate_schema_row(item, ("name", "entity_type"), "entity row")
+        name = _as_string(item.get("name")).strip()
+        entity_type = EntityType.normalize(_as_string(item.get("entity_type")).strip())
+        if not name or not _value_is_grounded(name, source_text):
+            continue
+        facets = {"what": entity_type} if entity_type else {}
+        entities.append(FacetEntity(name=name, facets=facets, turn_idx=default_turn_idx, source_text=source_text))
+
+    triples: list[ExtractedTriple] = []
+    for item in raw_relations:
+        if not isinstance(item, dict):
+            raise ValueError("LLM extraction relation rows must be objects")
+        _validate_schema_row(
+            item,
+            (
+                "subject",
+                "predicate",
+                "object",
+                "role",
+                "when",
+                "when_type",
+                "quantity",
+                "unit",
+                "confidence",
+                "sentiment",
+                "source_turn",
+            ),
+            "relation row",
+        )
+        subject = _as_string(item.get("subject")).strip()
+        predicate = _as_string(item.get("predicate")).strip()
+        obj = _as_string(item.get("object")).strip()
+        if not subject or not predicate or not obj:
+            continue
+        source_turn = item.get("source_turn", default_turn_idx)
+        try:
+            turn_idx = int(source_turn)
+        except (TypeError, ValueError):
+            turn_idx = default_turn_idx
+        normalized_subject = subject.casefold()
+        if normalized_subject != "user" and not _relation_value_is_grounded(subject, source_text):
+            continue
+        if not _relation_value_is_grounded(obj, source_text):
+            continue
+        triples.append(
+            ExtractedTriple(
+                subject=subject,
+                predicate=predicate,
+                object=obj,
+                when=_as_string(item.get("when")).strip(),
+                when_type=_as_string(item.get("when_type")).strip(),
+                quantity=_as_string(item.get("quantity"), default="0").strip(),
+                unit=_as_string(item.get("unit")).strip(),
+                confidence=_as_string(item.get("confidence")).strip(),
+                sentiment=_as_string(item.get("sentiment")).strip(),
+                source_turn=turn_idx,
+                role=_as_string(item.get("role")).strip(),
+                source_text=source_text,
+                turn_idx=turn_idx,
+            )
+        )
+
+    return entities, triples
+
+
+def extract_via_llm(
+    chunk_text: str,
+    llm_url: str,
+    llm_model: str = "qwen/qwen3.5-9b",
+    max_tokens: int = 16000,
+    temperature: float = 0.0,
+) -> tuple[list[FacetEntity], list[ExtractedTriple]]:
+    """Extract entities and triples using the v9 LLM prompt."""
+
+    if not str(chunk_text or "").strip():
+        return [], []
+
+    request_payload = {
+        "model": llm_model,
+        "messages": [
+            {"role": "system", "content": V9_SYSTEM_PROMPT},
+            {"role": "user", "content": chunk_text},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "response_format": {"type": "json_schema", "json_schema": V9_JSON_SCHEMA},
+    }
+    request = urllib_request.Request(
+        _llm_completion_url(llm_url),
+        data=json.dumps(request_payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(request, timeout=60) as response:
+            raw_response = response.read()
+    except TimeoutError as exc:
+        raise TimeoutError("LLM extraction request timed out") from exc
+    except urllib_error.URLError as exc:
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            raise TimeoutError("LLM extraction request timed out") from exc
+        raise RuntimeError(f"LLM extraction request failed: {exc}") from exc
+
+    try:
+        response_payload = json.loads(raw_response.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("LLM extraction endpoint returned invalid JSON") from exc
+
+    return _parse_llm_response(response_payload, chunk_text)
+
+
+def _extract_entities_and_triples_with_mode(
+    chunk: RawChunk,
+    extraction_url: str,
+    extraction_model: str,
+) -> tuple[list[FacetEntity], list[ExtractedTriple], bool]:
+    if extraction_url:
+        if not chunk.text.strip() or chunk.role != "user":
+            return [], [], False
+        wrapped_text = f"[Turn {chunk.turn_idx}] User: {chunk.text}"
+        try:
+            entities, triples = extract_via_llm(wrapped_text, extraction_url, extraction_model)
+        except (RuntimeError, TimeoutError, ValueError):
+            return extract_faceted_entities(chunk, "", ""), extract_triples(chunk, "", ""), True
+        for entity in entities:
+            entity.turn_idx = chunk.turn_idx
+            entity.source_text = chunk.text
+        for triple in triples:
+            triple.turn_idx = chunk.turn_idx
+            triple.source_turn = chunk.turn_idx
+            triple.chunk_idx = chunk.chunk_idx
+            triple.source_text = chunk.text
+        return entities, triples, False
+    return extract_faceted_entities(chunk, "", ""), extract_triples(chunk, "", ""), True
+
+
+def extract_entities_and_triples(
+    chunk: RawChunk,
+    extraction_url: str,
+    extraction_model: str,
+) -> tuple[list[FacetEntity], list[ExtractedTriple]]:
+    """Dispatch to LLM extraction if configured, else use regex extraction."""
+
+    entities, triples, _used_regex = _extract_entities_and_triples_with_mode(chunk, extraction_url, extraction_model)
+    return entities, triples
+
+
 def extract_faceted_entities(
     chunk: RawChunk,
     llm_url: str,
@@ -990,6 +1262,12 @@ def fact_from_triple(
         source_text=triple.source_text,
         layer=layer,
         when=triple.when,
+        when_type=triple.when_type,
+        quantity=triple.quantity,
+        unit=triple.unit,
+        confidence=triple.confidence,
+        sentiment=triple.sentiment,
+        source_turn=triple.source_turn if triple.source_turn >= 0 else triple.turn_idx,
         role=triple.role,
         sub_role=triple.sub_role,
     )
@@ -1004,13 +1282,17 @@ __all__ = [
     "VerbClassification",
     "chunk_turns",
     "classify_verb",
+    "extract_entities_and_triples",
     "extract_faceted_entities",
     "extract_temporal",
     "extract_triples",
+    "extract_via_llm",
     "fact_from_triple",
     "infer_type",
     "parse_conversation",
     "route_to_layer",
     "track_cooccurrences",
     "verify_grounding",
+    "V9_JSON_SCHEMA",
+    "V9_SYSTEM_PROMPT",
 ]
