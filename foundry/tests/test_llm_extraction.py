@@ -227,6 +227,16 @@ def test_extract_via_llm_rejects_relation_missing_required_keys(monkeypatch: pyt
         extract_via_llm("[Turn 0] User: I have a cat named Luna.", "http://localhost:1234/v1")
 
 
+def test_extract_via_llm_rejects_payload_missing_required_top_level_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_urlopen(request, timeout: int = 0):
+        return _completion_response({"entities": [{"name": "Luna", "entity_type": "animal"}]})
+
+    monkeypatch.setattr("foundry.ingestion.urllib_request.urlopen", _fake_urlopen)
+
+    with pytest.raises(ValueError, match="payload row missing required keys|payload missing required keys"):
+        extract_via_llm("[Turn 0] User: I have a cat named Luna.", "http://localhost:1234/v1")
+
+
 def test_extract_via_llm_handles_endpoint_unreachable(monkeypatch: pytest.MonkeyPatch) -> None:
     def _fake_urlopen(request, timeout: int = 0):
         raise urllib_error.URLError("connection refused")

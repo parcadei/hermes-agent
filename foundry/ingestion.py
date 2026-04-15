@@ -912,6 +912,7 @@ def extract_via_llm(
     if not isinstance(structured, dict):
         raise ValueError("LLM extraction content must be a JSON object")
 
+    _validate_required_keys(structured, ("entities", "relations"), "payload")
     raw_entities = structured.get("entities", [])
     raw_relations = structured.get("relations", [])
     if not isinstance(raw_entities, list) or not isinstance(raw_relations, list):
