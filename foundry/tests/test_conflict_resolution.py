@@ -209,6 +209,28 @@ def test_search_memory_applies_conflict_resolution_after_ingest() -> None:
     assert foundry.resolve_conflicts(raw_results) == filtered
 
 
+def test_conflictdetector_only_resolves_conflicts_present_in_results() -> None:
+    foundry = Foundry(FoundryConfig())
+    foundry.ingest(
+        "\n".join(
+            [
+                "User: I live in Seattle.",
+                "User: I live in Portland.",
+            ]
+        )
+    )
+
+    detector = ConflictDetector(foundry._store)
+    seattle_only = [{"turn_id": 0, "chunk_id": 0, "text": "I live in Seattle.", "score": 0.9}]
+    seattle_search = search_memory(foundry._store, "Seattle", top_k=3)
+
+    assert detector.filter_conflicts(seattle_only) == seattle_only
+    assert len(seattle_search) == 1
+    assert seattle_search[0]["turn_id"] == 0
+    assert seattle_search[0]["chunk_id"] == 0
+    assert "Seattle" in seattle_search[0]["text"]
+
+
 def test_search_memory_overfetches_before_conflict_resolution() -> None:
     foundry = Foundry(FoundryConfig())
     foundry.ingest(

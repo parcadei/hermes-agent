@@ -358,7 +358,8 @@ class ConflictDetector:
         if not results:
             return []
 
-        removable = self._removable_chunk_ids(results)
+        groups = self._grouped_result_facts(results)
+        removable = self._removable_chunk_ids(results, groups)
         if not removable:
             return list(results)
         return [result for result in results if self._result_chunk_id(result) not in removable]
@@ -370,8 +371,9 @@ class ConflictDetector:
             return []
 
         conflicts: set[tuple[str, str, str, str]] = set()
+        groups = self._grouped_result_facts(results)
         for fact in self._iter_result_facts(results):
-            winner, has_conflict = self._winner_for_fact(fact)
+            winner, has_conflict = self._winner_for_fact(fact, groups)
             if not has_conflict or winner is None:
                 continue
             if self._is_same_object(fact.object, winner.object):
@@ -402,7 +404,11 @@ class ConflictDetector:
         kept_ids = {id(result) for result in kept}
         return [result for result in results if id(result) in kept_ids]
 
-    def _removable_chunk_ids(self, results: list[dict]) -> set[int]:
+    def _removable_chunk_ids(
+        self,
+        results: list[dict],
+        groups: dict[tuple[str, str], list[Fact]],
+    ) -> set[int]:
         removable: set[int] = set()
         facts_by_chunk = self._facts_by_chunk()
         for result in results:
@@ -412,7 +418,7 @@ class ConflictDetector:
             chunk_facts = facts_by_chunk.get(chunk_id, [])
             if not chunk_facts:
                 continue
-            if all(self._fact_is_obsolete(fact) for fact in chunk_facts):
+            if all(self._fact_is_obsolete(fact, groups) for fact in chunk_facts):
                 removable.add(chunk_id)
         return removable
 
@@ -431,6 +437,12 @@ class ConflictDetector:
                 rows.append(fact)
         return rows
 
+    def _grouped_result_facts(self, results: list[dict]) -> dict[tuple[str, str], list[Fact]]:
+        groups: dict[tuple[str, str], list[Fact]] = defaultdict(list)
+        for fact in self._iter_result_facts(results):
+            groups[(fact.subject, fact.predicate)].append(fact)
+        return groups
+
     def _facts_by_chunk(self) -> dict[int, list[Fact]]:
         chunk_map: dict[int, list[Fact]] = defaultdict(list)
         for entity in self._store.entity_graph.all_entities():
@@ -441,21 +453,24 @@ class ConflictDetector:
                     chunk_map[int(fact.chunk_idx)].append(fact)
         return chunk_map
 
-    def _fact_is_obsolete(self, fact: Fact) -> bool:
-        if fact.superseded:
-            return True
-        winner, has_conflict = self._winner_for_fact(fact)
+    def _fact_is_obsolete(
+        self,
+        fact: Fact,
+        groups: dict[tuple[str, str], list[Fact]],
+    ) -> bool:
+        winner, has_conflict = self._winner_for_fact(fact, groups)
         if not has_conflict or winner is None:
             return False
         if self._is_same_object(fact.object, winner.object):
             return False
         return self._fact_order_key(fact) < self._fact_order_key(winner)
 
-    def _winner_for_fact(self, fact: Fact) -> tuple[Optional[Fact], bool]:
-        entity = self._store.entity_graph.get_entity(fact.subject)
-        if entity is None:
-            return fact, False
-        bucket = list(entity.facts.get(fact.predicate, []))
+    def _winner_for_fact(
+        self,
+        fact: Fact,
+        groups: dict[tuple[str, str], list[Fact]],
+    ) -> tuple[Optional[Fact], bool]:
+        bucket = list(groups.get((fact.subject, fact.predicate), []))
         if not bucket:
             return fact, False
 
@@ -683,6 +698,7 @@ class EntityMerger:
 
 __all__ = [
     "ACTION_TYPES",
+    "ConflictDetector",
     "DeletionPolicy",
     "EditVersion",
     "EntityMerger",
