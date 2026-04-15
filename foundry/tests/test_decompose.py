@@ -251,3 +251,15 @@ def test_deterministic_router_routes_reference_multi_hop_example_to_multi_hop() 
         router.route("Where was the creator of the religion Karl Lueger followed born?")
         == "multi_hop"
     )
+
+
+def test_deterministic_router_falls_back_when_decomposition_returns_original_question() -> None:
+    router = DeterministicRouter(FoundryStore(), llm_url="http://llm")
+    question = "What is the country of origin of the sport played by Christian Abbiati?"
+
+    with patch("foundry.retrieval.decompose_query", return_value=[question]):
+        evidence, meta = router.execute(question, "multi_hop")
+
+    assert evidence == ""
+    assert meta["pipeline"] == "multi_hop"
+    assert meta["fallback"] == "agentic"

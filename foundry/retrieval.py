@@ -778,6 +778,14 @@ class DeterministicRouter:
         lowered = normalized.lower()
         if _looks_multi_hop(lowered):
             return "multi_hop"
+        return self._route_without_multi_hop(normalized)
+
+    def _route_without_multi_hop(self, question: str) -> str:
+        normalized = str(question or "").strip()
+        if not normalized:
+            return "agentic"
+
+        lowered = normalized.lower()
         if _contains_pattern(lowered, _TEMPORAL_PATTERNS):
             return "temporal"
         if _contains_pattern(lowered, _AGGREGATION_PATTERNS):
@@ -988,6 +996,9 @@ class DeterministicRouter:
         if not subqueries:
             trace.terminated_by = "no_action"
             return ""
+        if len(subqueries) == 1 and str(subqueries[0]).strip() == str(question).strip():
+            trace.terminated_by = "no_action"
+            return ""
         handlers: dict[str, Callable[[str, RetrievalTrace], str]] = {
             "fact_lookup": self._execute_fact_lookup,
             "temporal": self._execute_temporal,
@@ -1005,9 +1016,7 @@ class DeterministicRouter:
             if "{answer_" in resolved_question:
                 trace.terminated_by = "budget"
                 break
-            pipeline = self.route(resolved_question)
-            if pipeline == "multi_hop":
-                pipeline = "fact_lookup"
+            pipeline = self._route_without_multi_hop(resolved_question)
             handler = handlers.get(pipeline, self._execute_fact_lookup)
             final_evidence = handler(resolved_question, trace)
             if not final_evidence.strip():
