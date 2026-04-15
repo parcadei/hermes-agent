@@ -545,6 +545,7 @@ def search_memory(
     top_k: int = _DEFAULT_TOP_K,
     reranker: Optional[RerankerFn] = None,
     embed_fn: Optional[Callable[[str], np.ndarray]] = None,
+    conflict_resolution: bool = False,
 ) -> list[dict[str, Any]]:
     expanded_top_k = max(top_k, top_k * 2)
     results = search_memory_hybrid(
@@ -558,7 +559,7 @@ def search_memory(
         embed_fn=embed_fn,
         triadic=store.triadic,
     )
-    if results and len(store.entity_graph) > 0 and len(store.chunks) > 0:
+    if conflict_resolution and results and len(store.entity_graph) > 0:
         results = ConflictDetector(store).filter_conflicts(results)
     if dedup is not None:
         results = dedup.filter_new(results)

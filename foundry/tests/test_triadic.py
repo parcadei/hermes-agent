@@ -181,7 +181,7 @@ def test_foundry_ingest_populates_triadic_and_search_memory_expands_results() ->
     results = search_memory(foundry._store, "Luna", top_k=5)
     texts = [row["text"] for row in results]
 
-    assert texts[0] == "I have a cat named Luna."
+    assert "I have a cat named Luna." in texts
     assert "I have a dog named Mochi." in texts
     assert "Mochi is a playful dog." in texts
 

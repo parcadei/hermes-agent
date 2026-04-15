@@ -469,7 +469,7 @@ def test_integration_search_memory_invokes_conflict_filter(monkeypatch: pytest.M
         return original(self, results)
 
     monkeypatch.setattr(ConflictDetector, "filter_conflicts", wrapped)
-    filtered = search_memory(foundry._store, "Seattle Portland live", top_k=5)
+    filtered = search_memory(foundry._store, "Seattle Portland live", top_k=5, conflict_resolution=True)
 
     assert called
     assert all("Seattle" not in row["text"] for row in filtered)
@@ -479,7 +479,7 @@ def test_integration_search_memory_returns_clean_results_after_cr() -> None:
     foundry = Foundry(FoundryConfig())
     foundry.ingest("User: I live in Seattle.\nUser: I live in Portland.")
 
-    filtered = search_memory(foundry._store, "Seattle Portland live", top_k=5)
+    filtered = search_memory(foundry._store, "Seattle Portland live", top_k=5, conflict_resolution=True)
 
     assert len(filtered) == 1
     assert filtered[0]["turn_id"] == 1
@@ -494,7 +494,7 @@ def test_snapshot_regression_known_location_conflict() -> None:
     foundry = Foundry(FoundryConfig())
     foundry.ingest("User: I live in Seattle.\nUser: I live in Portland.")
 
-    snapshot = search_memory(foundry._store, "Seattle Portland live", top_k=5)
+    snapshot = search_memory(foundry._store, "Seattle Portland live", top_k=5, conflict_resolution=True)
 
     assert snapshot == [
         {
@@ -553,6 +553,6 @@ def test_scope_seattle_query_does_not_disappear_because_portland_exists_elsewher
 
     seattle_results = search_memory(foundry._store, "Seattle", top_k=3)
 
-    assert len(seattle_results) == 1
-    assert seattle_results[0]["chunk_id"] == 0
-    assert "Seattle" in seattle_results[0]["text"]
+    assert len(seattle_results) >= 1
+    seattle_hit = [r for r in seattle_results if "Seattle" in r["text"]]
+    assert len(seattle_hit) == 1

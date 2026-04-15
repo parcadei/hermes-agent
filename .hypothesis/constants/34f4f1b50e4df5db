@@ -1,0 +1,4 @@
+# file: /Users/cosimo/.hermes/hermes-agent/.claude/worktrees/engram-build/foundry/dynamics.py
+# hypothesis_version: 6.151.9
+
+[0.0, 0.01, 0.2, 0.25, 0.3, 1.0, 10.0, 'DecayFunction', 'DreamConsolidator', 'HebbianBridge', 'ImportanceScore', 'MemorySystem', 'alias_of', 'count', 'cycles_run', 'drift_detected', 'evidence_turns', 'instance', 'mention_turns', 'quality_delta', 'question', 'related', 'rolled_back', 'synonym', 'synonym_of', 'tool_sequence', 'type']

@@ -1,0 +1,4 @@
+# file: /Users/cosimo/.hermes/hermes-agent/.claude/worktrees/engram-build/foundry/query.py
+# hypothesis_version: 6.151.9
+
+[0.0, 100, 10000, 100000, '$after', '$and', '$before', '$between', '$contains', '$eq', '$fuzzy', '$gt', '$gte', '$hasProperty', '$isFalse', '$isNull', '$isTrue', '$lt', '$lte', '$matchAllTokens', '$matchAnyToken', '$ne', '$not', '$or', '$phrase', '$range', '$regex', '$startsWith', ',', '0', '1', ':', 'FilterOp', 'GroupedQueryPlan', 'LogicalOp', 'PageResult', 'QueryPlan', 'TemporalQueryPlan', 'TraversalOp', '__missing__', 'after', 'asc', 'ascii', 'avg', 'backward', 'before', 'both', 'canonical', 'count', 'desc', 'difference', 'distinct', 'during', 'end', 'expand', 'false', 'forward', 'intersection', 'list', 'max', 'min', 'name', 'no', 'offset', 'overlapping', 'overlaps', 'pivot', 'start', 'sum', 'true', 'type', 'union', 'utf-8', 'yes']
