@@ -104,6 +104,7 @@ _TURN_PREFIX_RE = re.compile(r"^turn\s+\d+\s*:\s*", re.IGNORECASE)
 _ANSWER_FROM_EVIDENCE_PATTERNS = (
     re.compile(r"\bplayed\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
     re.compile(r"\bfollow(?:ed|s)?\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
+    re.compile(r"\blaunch(?:ed|es)?\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
     re.compile(r"\bcreated by\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
     re.compile(r"\bfounded by\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
     re.compile(r"\bwritten by\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
