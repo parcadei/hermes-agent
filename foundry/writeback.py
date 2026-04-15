@@ -418,7 +418,7 @@ class ConflictDetector:
             chunk_facts = facts_by_chunk.get(chunk_id, [])
             if not chunk_facts:
                 continue
-            if all(self._fact_is_obsolete(fact, groups) for fact in chunk_facts):
+            if any(self._fact_is_obsolete(fact, groups) for fact in chunk_facts):
                 removable.add(chunk_id)
         return removable
 

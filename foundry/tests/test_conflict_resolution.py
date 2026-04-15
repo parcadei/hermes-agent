@@ -79,6 +79,47 @@ def test_conflictdetector_filters_older_conflicting_chunk() -> None:
     assert [result["chunk_id"] for result in filtered] == [1]
 
 
+def test_conflictdetector_drops_mixed_chunk_that_still_contains_stale_conflict() -> None:
+    store = FoundryStore()
+    _add_chunk_fact(
+        store,
+        chunk_idx=0,
+        turn_idx=0,
+        text="User: I live in Seattle and my favorite color is blue.",
+        entity="user",
+        predicate="lives_in",
+        obj="Seattle",
+    )
+    _add_chunk_fact(
+        store,
+        chunk_idx=0,
+        turn_idx=0,
+        text="User: I live in Seattle and my favorite color is blue.",
+        entity="user",
+        predicate="favorite_color",
+        obj="blue",
+    )
+    _add_chunk_fact(
+        store,
+        chunk_idx=1,
+        turn_idx=1,
+        text="User: I live in Portland.",
+        entity="user",
+        predicate="lives_in",
+        obj="Portland",
+    )
+
+    detector = ConflictDetector(store)
+    results = [
+        {"turn_id": 0, "chunk_id": 0, "text": "I live in Seattle and my favorite color is blue.", "score": 0.9},
+        {"turn_id": 1, "chunk_id": 1, "text": "I live in Portland.", "score": 0.8},
+    ]
+
+    filtered = detector.filter_conflicts(results)
+
+    assert [result["chunk_id"] for result in filtered] == [1]
+
+
 def test_conflictdetector_keeps_results_when_predicates_differ() -> None:
     store = FoundryStore()
     _add_chunk_fact(
