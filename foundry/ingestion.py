@@ -357,7 +357,7 @@ def chunk_turns(turns: list[ConversationTurn], chunk_size: int = 512) -> list[Ra
                     chunk_idx=next_chunk_idx,
                     text=piece,
                     turn_idx=turn.turn_idx,
-                    role=turn.role if piece_idx == 0 else "continuation",
+                    role=turn.role,
                     session_time=turn.session_time,
                 )
             )
@@ -954,7 +954,7 @@ def extract_entities_and_triples(
     """Dispatch to LLM extraction if configured, else use regex extraction."""
 
     if extraction_url:
-        if not chunk.text.strip() or chunk.role == "assistant":
+        if not chunk.text.strip() or chunk.role != "user":
             return [], []
         wrapped_text = f"[Turn {chunk.turn_idx}] User: {chunk.text}"
         entities, triples = extract_via_llm(wrapped_text, extraction_url, extraction_model)
@@ -1182,7 +1182,7 @@ def fact_from_triple(
         unit=triple.unit,
         confidence=triple.confidence,
         sentiment=triple.sentiment,
-        source_turn=triple.source_turn,
+        source_turn=triple.source_turn if triple.source_turn >= 0 else triple.turn_idx,
         role=triple.role,
         sub_role=triple.sub_role,
     )

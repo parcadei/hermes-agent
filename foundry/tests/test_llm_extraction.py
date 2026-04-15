@@ -13,9 +13,13 @@ from foundry.ingestion import (
     V9_SYSTEM_PROMPT,
     ExtractedTriple,
     FacetEntity,
+    ConversationTurn,
+    chunk_turns,
     extract_entities_and_triples,
     extract_via_llm,
+    fact_from_triple,
 )
+from foundry.ontology import PropertyType
 from foundry.storage import RawChunk
 
 
@@ -228,6 +232,32 @@ def test_extract_entities_and_triples_skips_assistant_chunks(monkeypatch: pytest
 
     chunk = RawChunk(chunk_idx=1, text="Luna is a tabby cat.", turn_idx=1, role="assistant")
     assert extract_entities_and_triples(chunk, "http://localhost:1234/v1", "qwen/qwen3.5-9b") == ([], [])
+
+
+def test_chunk_turns_preserves_original_role_for_split_chunks() -> None:
+    turns = [ConversationTurn(turn_idx=4, role="assistant", text=" ".join(["word"] * 10))]
+
+    chunks = chunk_turns(turns, chunk_size=3)
+
+    assert len(chunks) > 1
+    assert {chunk.role for chunk in chunks} == {"assistant"}
+
+
+def test_fact_from_triple_defaults_source_turn_to_turn_index() -> None:
+    fact = fact_from_triple(
+        ExtractedTriple(
+            subject="user",
+            predicate="salary",
+            object="$100k",
+            turn_idx=8,
+            source_turn=-1,
+            source_text="I make $100k",
+        ),
+        canonical_subject="user",
+    )
+
+    assert fact.object_type == PropertyType.NUMERIC
+    assert fact.source_turn == 8
 
 
 def test_foundry_ingest_uses_llm_extraction_and_preserves_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
