@@ -499,6 +499,49 @@ def test_adversarial_hallucinated_entities_are_filtered_out(monkeypatch: pytest.
     assert [entity.name for entity in entities] == ["Bamboo Sushi"]
 
 
+def test_adversarial_hallucinated_relation_subjects_and_objects_are_filtered_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "foundry.ingestion.urllib_request.urlopen",
+        lambda request, timeout=0: _completion_response(
+            {
+                "entities": [{"name": "Bamboo Sushi", "entity_type": "restaurant"}],
+                "relations": [
+                    {
+                        "subject": "Ghost",
+                        "predicate": "likes",
+                        "object": "Bamboo Sushi",
+                        "role": "opinion",
+                        "when": "",
+                        "when_type": "",
+                        "quantity": "0",
+                        "unit": "",
+                        "confidence": "definite",
+                        "sentiment": "positive",
+                        "source_turn": 0,
+                    },
+                    {
+                        "subject": "user",
+                        "predicate": "likes",
+                        "object": "Phantom Cafe",
+                        "role": "opinion",
+                        "when": "",
+                        "when_type": "",
+                        "quantity": "0",
+                        "unit": "",
+                        "confidence": "definite",
+                        "sentiment": "positive",
+                        "source_turn": 0,
+                    },
+                ],
+            }
+        ),
+    )
+
+    _, triples = extract_via_llm("[Turn 0] User: Bamboo Sushi is my favorite restaurant.", "http://localhost:1234/v1")
+
+    assert triples == []
+
+
 def test_adversarial_prompt_injection_text_does_not_change_request_structure(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 

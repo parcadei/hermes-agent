@@ -870,6 +870,15 @@ def _value_is_grounded(value: str, source_text: str) -> bool:
     return bool(content_words) and all(word in source for word in content_words)
 
 
+def _relation_value_is_grounded(value: str, source_text: str) -> bool:
+    if _value_is_grounded(value, source_text):
+        return True
+    numeric = _parse_numeric_token(value)
+    if numeric is None:
+        return False
+    return any(abs(candidate - numeric) < 1e-9 for candidate in _numbers_in_source(source_text))
+
+
 def _parse_llm_response(response_payload: dict[str, Any], chunk_text: str) -> tuple[list[FacetEntity], list[ExtractedTriple]]:
     if isinstance(response_payload, dict) and response_payload.get("error"):
         raise RuntimeError(f"LLM extraction endpoint returned an error: {response_payload['error']}")
@@ -937,6 +946,11 @@ def _parse_llm_response(response_payload: dict[str, Any], chunk_text: str) -> tu
             turn_idx = int(source_turn)
         except (TypeError, ValueError):
             turn_idx = default_turn_idx
+        normalized_subject = subject.casefold()
+        if normalized_subject != "user" and not _relation_value_is_grounded(subject, source_text):
+            continue
+        if not _relation_value_is_grounded(obj, source_text):
+            continue
         triples.append(
             ExtractedTriple(
                 subject=subject,
