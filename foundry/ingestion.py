@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import hashlib
 import re
+import socket
 from typing import Any, Callable, Iterable, Optional
 import unicodedata
 from urllib import error as urllib_error
@@ -340,7 +341,7 @@ def _split_text_by_token_budget(text: str, chunk_size: int) -> list[str]:
 
 
 def chunk_turns(turns: list[ConversationTurn], chunk_size: int = 512) -> list[RawChunk]:
-    """Split turns into `RawChunk` objects with continuation support."""
+    """Split turns into `RawChunk` objects while preserving turn role."""
 
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
@@ -810,13 +811,16 @@ def _llm_completion_url(llm_url: str) -> str:
     return base.rstrip("/") + "/chat/completions"
 
 
-def _extract_completion_content(payload: dict[str, Any]) -> str:
+def _extract_completion_payload(payload: dict[str, Any]) -> Any:
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
         raise ValueError("LLM extraction response did not include choices")
     message = choices[0].get("message", {})
     if not isinstance(message, dict):
         raise ValueError("LLM extraction response did not include a valid message")
+    parsed = message.get("parsed")
+    if parsed is not None:
+        return parsed
     content = message.get("content", "")
     if isinstance(content, str):
         return content
@@ -874,6 +878,8 @@ def extract_via_llm(
     except TimeoutError as exc:
         raise TimeoutError("LLM extraction request timed out") from exc
     except urllib_error.URLError as exc:
+        if isinstance(exc.reason, (TimeoutError, socket.timeout)):
+            raise TimeoutError("LLM extraction request timed out") from exc
         raise RuntimeError(f"LLM extraction request failed: {exc}") from exc
 
     try:
@@ -884,11 +890,14 @@ def extract_via_llm(
     if isinstance(response_payload, dict) and response_payload.get("error"):
         raise RuntimeError(f"LLM extraction endpoint returned an error: {response_payload['error']}")
 
-    content = _extract_completion_content(response_payload)
-    try:
-        structured = json.loads(content)
-    except json.JSONDecodeError as exc:
-        raise ValueError("LLM extraction content was not valid JSON") from exc
+    content = _extract_completion_payload(response_payload)
+    if isinstance(content, str):
+        try:
+            structured = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ValueError("LLM extraction content was not valid JSON") from exc
+    else:
+        structured = content
 
     if not isinstance(structured, dict):
         raise ValueError("LLM extraction content must be a JSON object")

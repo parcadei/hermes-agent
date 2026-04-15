@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from urllib import error as urllib_error
 
 import pytest
@@ -213,6 +214,54 @@ def test_extract_via_llm_handles_timeout(monkeypatch: pytest.MonkeyPatch) -> Non
 
     with pytest.raises(TimeoutError, match="timed out"):
         extract_via_llm("[Turn 0] User: I have a cat named Luna.", "http://localhost:1234/v1")
+
+
+def test_extract_via_llm_handles_urllib_wrapped_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_urlopen(request, timeout: int = 0):
+        raise urllib_error.URLError(socket.timeout("timed out"))
+
+    monkeypatch.setattr("foundry.ingestion.urllib_request.urlopen", _fake_urlopen)
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        extract_via_llm("[Turn 0] User: I have a cat named Luna.", "http://localhost:1234/v1")
+
+
+def test_extract_via_llm_accepts_message_parsed_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_urlopen(request, timeout: int = 0):
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "parsed": {
+                            "entities": [{"name": "Luna", "entity_type": "animal"}],
+                            "relations": [
+                                {
+                                    "subject": "user",
+                                    "predicate": "has",
+                                    "object": "Luna",
+                                    "role": "state",
+                                    "when": "",
+                                    "when_type": "",
+                                    "quantity": "1",
+                                    "unit": "",
+                                    "confidence": "definite",
+                                    "sentiment": "neutral",
+                                    "source_turn": 0,
+                                }
+                            ],
+                        }
+                    }
+                }
+            ]
+        }
+        return _MockHTTPResponse(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr("foundry.ingestion.urllib_request.urlopen", _fake_urlopen)
+
+    entities, triples = extract_via_llm("[Turn 0] User: I have a cat named Luna.", "http://localhost:1234/v1")
+
+    assert entities[0].name == "Luna"
+    assert triples[0].predicate == "has"
 
 
 def test_extract_via_llm_returns_empty_for_empty_text(monkeypatch: pytest.MonkeyPatch) -> None:
