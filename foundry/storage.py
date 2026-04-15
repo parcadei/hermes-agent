@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 import re
 import shutil
-from typing import Any, Iterable, Optional
+from typing import Any, ClassVar, Iterable, Mapping, Optional
 import uuid
 
 import numpy as np
@@ -645,11 +645,13 @@ class TemporalIndex:
         end_dt = _parse_datetime(end)
         if start_dt is None or end_dt is None:
             return []
-        return [
+        matches = [
             event
             for event in self._events
             if event.start_dt <= end_dt and event.end_dt >= start_dt
         ]
+        matches.sort(key=lambda event: (event.start_dt, event.end_dt, event.event))
+        return matches
 
     def allen_before(self, a: TemporalEvent, b: TemporalEvent) -> bool:
         return a.end_dt < b.start_dt
@@ -842,6 +844,516 @@ class CooccurrenceIndex:
         return index
 
 
+class SynonymDict:
+    """Exact alias resolution for triadic-memory query matching."""
+
+    _PRONOUNS = frozenset(
+        {
+            "he",
+            "she",
+            "it",
+            "they",
+            "him",
+            "her",
+            "them",
+            "his",
+            "i",
+            "my",
+            "me",
+            "we",
+            "us",
+            "our",
+            "you",
+            "your",
+            "hers",
+            "its",
+            "their",
+            "theirs",
+        }
+    )
+
+    def __init__(self) -> None:
+        self._aliases: dict[str, str] = {}
+
+    @staticmethod
+    def _normalize(value: str) -> str:
+        return " ".join(str(value or "").strip().lower().split())
+
+    def add(self, alias: str, canonical: str) -> None:
+        key = self._normalize(alias)
+        value = self._normalize(canonical)
+        if key and value and key != value:
+            self._aliases[key] = value
+
+    def resolve(self, word: str) -> str | None:
+        key = self._normalize(word)
+        if not key:
+            return None
+        return self._aliases.get(key)
+
+    def add_from_coref_clusters(self, clusters: list[list[str]]) -> None:
+        for cluster in clusters:
+            canonical = None
+            for mention in cluster:
+                normalized = self._normalize(mention)
+                if normalized and normalized not in self._PRONOUNS:
+                    canonical = normalized
+                    break
+            if canonical is None:
+                continue
+            for mention in cluster:
+                alias = self._normalize(mention)
+                if alias and alias != canonical and alias not in self._PRONOUNS:
+                    self.add(alias, canonical)
+
+    def add_from_verb_mappings(self, mappings: list[tuple[str, str]]) -> None:
+        for verb_form, predicate in mappings:
+            self.add(verb_form, predicate)
+
+    @property
+    def size(self) -> int:
+        return len(self._aliases)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"aliases": dict(sorted(self._aliases.items()))}
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any] | None) -> "SynonymDict":
+        synonym_dict = cls()
+        if not payload:
+            return synonym_dict
+        for alias, canonical in dict(payload.get("aliases", {})).items():
+            synonym_dict.add(alias, canonical)
+        return synonym_dict
+
+
+class TriadicMemory:
+    """Sparse 3D tensor for associative recall of S-P-O triples."""
+
+    def __init__(self, n: int = 1000, p: int = 10, seed: int = 42):
+        if n <= 0:
+            raise ValueError("n must be positive")
+        if p <= 0 or p > n:
+            raise ValueError("p must satisfy 0 < p <= n")
+        self.n = int(n)
+        self.p = int(p)
+        self.seed = int(seed)
+        self.rng = np.random.RandomState(self.seed)
+        self._entries: set[tuple[int, int, int]] = set()
+        self._xy_to_z: dict[tuple[int, int], set[int]] = defaultdict(set)
+        self._yz_to_x: dict[tuple[int, int], set[int]] = defaultdict(set)
+        self._codebook: dict[str, set[int]] = {}
+        self._pending_I: list[np.ndarray] = []
+        self._pending_J: list[np.ndarray] = []
+        self._pending_K: list[np.ndarray] = []
+        self._synonym_dict = SynonymDict()
+        self._text_to_triples: dict[str, list[tuple[str, str, str]]] = {}
+        self._concept_to_texts: dict[str, set[str]] = {}
+        self._n_facts_with_triples = 0
+
+    @staticmethod
+    def _normalize_concept(value: str) -> str:
+        return " ".join(str(value or "").strip().lower().split())
+
+    def _get_or_create_sdr(self, concept: str) -> set[int]:
+        key = self._normalize_concept(concept)
+        if key not in self._codebook:
+            indices = set(int(index) for index in self.rng.choice(self.n, size=self.p, replace=False))
+            self._codebook[key] = indices
+        return self._codebook[key]
+
+    def _apply_entry(self, i: int, j: int, k: int) -> None:
+        entry = (int(i), int(j), int(k))
+        if entry in self._entries:
+            return
+        self._entries.add(entry)
+        self._xy_to_z[(entry[0], entry[1])].add(entry[2])
+        self._yz_to_x[(entry[1], entry[2])].add(entry[0])
+
+    def _remove_text_mappings(self, text: str, triples: list[tuple[str, str, str]]) -> None:
+        if triples:
+            self._n_facts_with_triples = max(0, self._n_facts_with_triples - 1)
+        for s, p, o in triples:
+            for concept in (s, p, o):
+                key = self._normalize_concept(concept)
+                texts = self._concept_to_texts.get(key)
+                if texts is None:
+                    continue
+                texts.discard(text)
+                if not texts:
+                    self._concept_to_texts.pop(key, None)
+
+    def _restore_rng_state(self, payload: Mapping[str, Any] | None) -> None:
+        if not payload:
+            return
+        try:
+            self.rng.set_state(
+                (
+                    str(payload["algorithm"]),
+                    np.array(payload["keys"], dtype=np.uint32),
+                    int(payload["pos"]),
+                    int(payload["has_gauss"]),
+                    float(payload["cached_gaussian"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            return
+
+    def store(self, x_name: str, y_name: str, z_name: str) -> None:
+        x = self._get_or_create_sdr(x_name)
+        y = self._get_or_create_sdr(y_name)
+        z = self._get_or_create_sdr(z_name)
+        ax = np.fromiter(x, dtype=np.intp)
+        ay = np.fromiter(y, dtype=np.intp)
+        az = np.fromiter(z, dtype=np.intp)
+        ix, iy, iz = np.meshgrid(ax, ay, az, indexing="ij")
+        self._pending_I.append(ix.ravel())
+        self._pending_J.append(iy.ravel())
+        self._pending_K.append(iz.ravel())
+
+    def flush(self) -> None:
+        if not self._pending_I:
+            return
+        all_i = np.concatenate(self._pending_I)
+        all_j = np.concatenate(self._pending_J)
+        all_k = np.concatenate(self._pending_K)
+        for i, j, k in zip(all_i.tolist(), all_j.tolist(), all_k.tolist()):
+            self._apply_entry(i, j, k)
+        self._pending_I.clear()
+        self._pending_J.clear()
+        self._pending_K.clear()
+
+    def store_fact(self, text: str, triples: list[tuple[str, str, str]]) -> None:
+        fact_text = str(text or "")
+        previous = self._text_to_triples.get(fact_text)
+        if previous is not None:
+            self._remove_text_mappings(fact_text, previous)
+
+        normalized_triples = [(str(s), str(p), str(o)) for s, p, o in triples]
+        self._text_to_triples[fact_text] = normalized_triples
+        if not normalized_triples:
+            return
+
+        self._n_facts_with_triples += 1
+        for s, p, o in normalized_triples:
+            self.store(s, p, o)
+            for concept in (s, p, o):
+                key = self._normalize_concept(concept)
+                self._concept_to_texts.setdefault(key, set()).add(fact_text)
+
+    def recall_z(self, x_name: str, y_name: str) -> set[int]:
+        self.flush()
+        scores = np.zeros(self.n, dtype=np.float64)
+        x = self._get_or_create_sdr(x_name)
+        y = self._get_or_create_sdr(y_name)
+        for i in x:
+            for j in y:
+                for k in self._xy_to_z.get((i, j), ()):
+                    scores[k] += 1.0
+        return self._threshold(scores)
+
+    def recall_x(self, y_name: str, z_name: str) -> set[int]:
+        self.flush()
+        scores = np.zeros(self.n, dtype=np.float64)
+        y = self._get_or_create_sdr(y_name)
+        z = self._get_or_create_sdr(z_name)
+        for j in y:
+            for k in z:
+                for i in self._yz_to_x.get((j, k), ()):
+                    scores[i] += 1.0
+        return self._threshold(scores)
+
+    def _threshold(self, scores: np.ndarray) -> set[int]:
+        nonzero_count = int(np.count_nonzero(scores))
+        if nonzero_count == 0:
+            return set()
+        if nonzero_count <= self.p:
+            return set(int(index) for index in np.where(scores > 0)[0].tolist())
+        threshold = float(np.partition(scores, -self.p)[-self.p])
+        return set(int(index) for index in np.where(scores >= max(1.0, threshold))[0].tolist())
+
+    def overlap(self, sdr_a: set[int], sdr_b: set[int]) -> float:
+        if not sdr_a or not sdr_b:
+            return 0.0
+        return len(sdr_a & sdr_b) / self.p
+
+    def expand(
+        self,
+        retrieved_texts: list[str],
+        top_k: int = 5,
+        overlap_threshold: float = 0.3,
+        max_hops: int = 1,
+        decay: float = 1.0,
+    ) -> list[str]:
+        if not self._text_to_triples:
+            return []
+
+        seed_set = set(retrieved_texts)
+        all_known_concepts: set[str] = set()
+        for text in retrieved_texts:
+            for s, p, o in self._text_to_triples.get(text, []):
+                all_known_concepts.update(
+                    [
+                        self._normalize_concept(s),
+                        self._normalize_concept(p),
+                        self._normalize_concept(o),
+                    ]
+                )
+
+        frontier_texts = list(retrieved_texts)
+        text_activation: dict[str, float] = {}
+        all_retrieved = set(retrieved_texts)
+
+        for hop in range(max(0, max_hops)):
+            hop_decay = decay ** hop
+            sp_pairs: list[tuple[str, str]] = []
+            po_pairs: list[tuple[str, str]] = []
+
+            for text in frontier_texts:
+                for s, p, o in self._text_to_triples.get(text, []):
+                    sp_pairs.append((s, p))
+                    po_pairs.append((p, o))
+
+            if not sp_pairs and not po_pairs:
+                break
+
+            new_concepts: dict[str, float] = {}
+
+            for s, p in sp_pairs:
+                recalled = self.recall_z(s, p)
+                if not recalled:
+                    continue
+                for concept, sdr in self._codebook.items():
+                    if concept in all_known_concepts:
+                        continue
+                    overlap = self.overlap(recalled, sdr)
+                    if overlap > overlap_threshold:
+                        new_concepts[concept] = new_concepts.get(concept, 0.0) + (overlap * hop_decay)
+
+            for p, o in po_pairs:
+                recalled = self.recall_x(p, o)
+                if not recalled:
+                    continue
+                for concept, sdr in self._codebook.items():
+                    if concept in all_known_concepts:
+                        continue
+                    overlap = self.overlap(recalled, sdr)
+                    if overlap > overlap_threshold:
+                        new_concepts[concept] = new_concepts.get(concept, 0.0) + (overlap * hop_decay)
+
+            if not new_concepts:
+                break
+
+            next_frontier: list[str] = []
+            for concept, activation in new_concepts.items():
+                for text in self._concept_to_texts.get(concept, set()):
+                    if text in seed_set:
+                        continue
+                    text_activation[text] = text_activation.get(text, 0.0) + activation
+                    if text not in all_retrieved:
+                        all_retrieved.add(text)
+                        next_frontier.append(text)
+
+            all_known_concepts.update(new_concepts.keys())
+            frontier_texts = next_frontier
+            if not frontier_texts:
+                break
+
+        ranked = sorted(text_activation.items(), key=lambda item: (-item[1], item[0]))
+        return [text for text, _score in ranked[:top_k]]
+
+    def query_direct(
+        self,
+        query_text: str,
+        top_k: int = 5,
+        overlap_threshold: float = 0.3,
+    ) -> list[str]:
+        if not self._concept_to_texts or not self._codebook:
+            return []
+
+        query_lower = " ".join(str(query_text or "").strip().lower().split())
+        query_words = query_lower.split()
+        query_word_set = set(query_words)
+        query_concepts: set[str] = set()
+
+        if self._synonym_dict.size > 0:
+            for ngram_len in range(1, min(5, len(query_words) + 1)):
+                for start in range(len(query_words) - ngram_len + 1):
+                    phrase = " ".join(query_words[start : start + ngram_len])
+                    resolved = self._synonym_dict.resolve(phrase)
+                    if resolved:
+                        normalized = self._normalize_concept(resolved)
+                        if normalized in self._codebook:
+                            query_concepts.add(normalized)
+
+        for concept in self._codebook:
+            surface = concept.replace("_", " ")
+            if len(surface) < 3:
+                continue
+            if " " in surface:
+                if surface in query_lower:
+                    query_concepts.add(concept)
+            elif surface in query_word_set:
+                query_concepts.add(concept)
+
+        if not query_concepts:
+            return []
+
+        sp_pairs: list[tuple[str, str]] = []
+        po_pairs: list[tuple[str, str]] = []
+        direct_texts: dict[str, float] = {}
+
+        for concept in query_concepts:
+            for text in self._concept_to_texts.get(concept, set()):
+                direct_texts[text] = direct_texts.get(text, 0.0) + 1.0
+            for text, triples in self._text_to_triples.items():
+                for s, p, o in triples:
+                    triple_concepts = {
+                        self._normalize_concept(s),
+                        self._normalize_concept(p),
+                        self._normalize_concept(o),
+                    }
+                    if concept in triple_concepts:
+                        sp_pairs.append((s, p))
+                        po_pairs.append((p, o))
+
+        expansion_concepts: dict[str, float] = {}
+        seen_sp: set[tuple[str, str]] = set()
+        seen_po: set[tuple[str, str]] = set()
+
+        for s, p in sp_pairs:
+            key = (self._normalize_concept(s), self._normalize_concept(p))
+            if key in seen_sp:
+                continue
+            seen_sp.add(key)
+            recalled = self.recall_z(s, p)
+            if not recalled:
+                continue
+            for concept, sdr in self._codebook.items():
+                overlap = self.overlap(recalled, sdr)
+                if overlap > overlap_threshold:
+                    expansion_concepts[concept] = max(expansion_concepts.get(concept, 0.0), overlap)
+
+        for p, o in po_pairs:
+            key = (self._normalize_concept(p), self._normalize_concept(o))
+            if key in seen_po:
+                continue
+            seen_po.add(key)
+            recalled = self.recall_x(p, o)
+            if not recalled:
+                continue
+            for concept, sdr in self._codebook.items():
+                overlap = self.overlap(recalled, sdr)
+                if overlap > overlap_threshold:
+                    expansion_concepts[concept] = max(expansion_concepts.get(concept, 0.0), overlap)
+
+        tensor_texts: dict[str, float] = {}
+        for concept, score in expansion_concepts.items():
+            for text in self._concept_to_texts.get(concept, set()):
+                tensor_texts[text] = max(tensor_texts.get(text, 0.0), score)
+
+        merged: dict[str, float] = {}
+        for text, score in direct_texts.items():
+            merged[text] = score * 2.0
+        for text, score in tensor_texts.items():
+            merged[text] = max(merged.get(text, 0.0), score)
+
+        ranked = sorted(merged.items(), key=lambda item: (-item[1], item[0]))
+        return [text for text, _score in ranked[:top_k]]
+
+    def add_coref_clusters(self, clusters: list[list[str]]) -> None:
+        self._synonym_dict.add_from_coref_clusters(clusters)
+
+    def add_verb_mappings(self, mappings: list[tuple[str, str]]) -> None:
+        self._synonym_dict.add_from_verb_mappings(mappings)
+
+    def coverage(self) -> tuple[int, int]:
+        return self._n_facts_with_triples, len(self._text_to_triples)
+
+    @property
+    def tensor_entries(self) -> int:
+        self.flush()
+        return len(self._entries)
+
+    def to_dict(self) -> dict[str, Any]:
+        self.flush()
+        rng_state = self.rng.get_state()
+        return {
+            "n": self.n,
+            "p": self.p,
+            "seed": self.seed,
+            "entries": [list(entry) for entry in sorted(self._entries)],
+            "codebook": {concept: sorted(indices) for concept, indices in sorted(self._codebook.items())},
+            "text_to_triples": {
+                text: [list(triple) for triple in triples]
+                for text, triples in sorted(self._text_to_triples.items())
+            },
+            "concept_to_texts": {
+                concept: sorted(texts) for concept, texts in sorted(self._concept_to_texts.items())
+            },
+            "n_facts_with_triples": self._n_facts_with_triples,
+            "synonyms": self._synonym_dict.to_dict(),
+            "rng_state": {
+                "algorithm": str(rng_state[0]),
+                "keys": rng_state[1].tolist(),
+                "pos": int(rng_state[2]),
+                "has_gauss": int(rng_state[3]),
+                "cached_gaussian": float(rng_state[4]),
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any] | None) -> "TriadicMemory":
+        if not payload:
+            return cls()
+
+        memory = cls(
+            n=int(payload.get("n", 1000)),
+            p=int(payload.get("p", 10)),
+            seed=int(payload.get("seed", 42)),
+        )
+        memory._codebook = {
+            cls._normalize_concept(concept): {int(index) for index in indices}
+            for concept, indices in dict(payload.get("codebook", {})).items()
+        }
+        for entry in payload.get("entries", []):
+            if not isinstance(entry, (list, tuple)) or len(entry) != 3:
+                continue
+            memory._apply_entry(int(entry[0]), int(entry[1]), int(entry[2]))
+
+        text_to_triples = dict(payload.get("text_to_triples", {}))
+        for text, triples in text_to_triples.items():
+            memory._text_to_triples[str(text)] = [
+                (str(triple[0]), str(triple[1]), str(triple[2]))
+                for triple in triples
+                if isinstance(triple, (list, tuple)) and len(triple) == 3
+            ]
+
+        concept_to_texts = dict(payload.get("concept_to_texts", {}))
+        if concept_to_texts:
+            memory._concept_to_texts = {
+                cls._normalize_concept(concept): {str(text) for text in texts}
+                for concept, texts in concept_to_texts.items()
+            }
+        else:
+            rebuilt: dict[str, set[str]] = {}
+            for text, triples in memory._text_to_triples.items():
+                for s, p, o in triples:
+                    for concept in (s, p, o):
+                        rebuilt.setdefault(cls._normalize_concept(concept), set()).add(text)
+            memory._concept_to_texts = rebuilt
+
+        memory._n_facts_with_triples = int(
+            payload.get(
+                "n_facts_with_triples",
+                sum(1 for triples in memory._text_to_triples.values() if triples),
+            )
+        )
+        memory._synonym_dict = SynonymDict.from_dict(payload.get("synonyms"))
+        memory._restore_rng_state(payload.get("rng_state"))
+        return memory
+
+
 class RawChunkStore:
     """Stores and retrieves raw conversation chunks."""
 
@@ -980,24 +1492,25 @@ class DerivedGraph:
         return graph
 
 
+@dataclass
 class FoundryStore:
     """Unified persistence interface for all Phase 2 indexes."""
 
-    SCHEMA_VERSION = 1
-    FOUNDRY_VERSION = "1.0.0"
+    SCHEMA_VERSION: ClassVar[int] = 1
+    FOUNDRY_VERSION: ClassVar[str] = "1.0.0"
 
-    def __init__(self) -> None:
-        self.bm25_chunks = BM25Index()
-        self.bm25_entities = BM25Index()
-        self.vectors = VectorIndex()
-        self.types = TypeIndex()
-        self.properties = PropertyIndex()
-        self.temporal = TemporalIndex()
-        self.cooccurrence = CooccurrenceIndex()
-        self.chunks = RawChunkStore()
-        self.entity_graph = EntityGraph()
-        self.inferred_graph = EntityGraph()
-        self.derived = DerivedGraph()
+    bm25_chunks: BM25Index = field(default_factory=BM25Index)
+    bm25_entities: BM25Index = field(default_factory=BM25Index)
+    vectors: VectorIndex = field(default_factory=VectorIndex)
+    types: TypeIndex = field(default_factory=TypeIndex)
+    properties: PropertyIndex = field(default_factory=PropertyIndex)
+    temporal: TemporalIndex = field(default_factory=TemporalIndex)
+    cooccurrence: CooccurrenceIndex = field(default_factory=CooccurrenceIndex)
+    triadic: TriadicMemory = field(default_factory=TriadicMemory)
+    chunks: RawChunkStore = field(default_factory=RawChunkStore)
+    entity_graph: EntityGraph = field(default_factory=EntityGraph)
+    inferred_graph: EntityGraph = field(default_factory=EntityGraph)
+    derived: DerivedGraph = field(default_factory=DerivedGraph)
 
     def _build_manifest(self) -> dict[str, Any]:
         return {
@@ -1039,6 +1552,9 @@ class FoundryStore:
             self._write_json(tmp / "properties.json", self.properties.to_dict())
             self._write_json(tmp / "temporal.json", self.temporal.to_dict())
             self._write_json(tmp / "cooccurrence.json", self.cooccurrence.to_dict())
+            # Keep the legacy manifest file list stable for snapshot tests while
+            # persisting triadic state as an additive sidecar.
+            self._write_json(tmp / "triadic.json", self.triadic.to_dict())
             self._write_json(tmp / "chunks.json", self.chunks.to_dict())
             self._write_json(tmp / "entity_graph.json", self.entity_graph.to_dict())
             self._write_json(tmp / "inferred_graph.json", self.inferred_graph.to_dict())
@@ -1086,10 +1602,50 @@ class FoundryStore:
         store.properties = PropertyIndex.from_dict(cls._read_json(root / "properties.json"))
         store.temporal = TemporalIndex.from_dict(cls._read_json(root / "temporal.json"))
         store.cooccurrence = CooccurrenceIndex.from_dict(cls._read_json(root / "cooccurrence.json"))
+        triadic_path = root / "triadic.json"
+        if triadic_path.exists():
+            store.triadic = TriadicMemory.from_dict(cls._read_json(triadic_path))
         store.chunks = RawChunkStore.from_dict(cls._read_json(root / "chunks.json"))
         store.entity_graph = EntityGraph.from_dict(cls._read_json(root / "entity_graph.json"))
         store.inferred_graph = EntityGraph.from_dict(cls._read_json(root / "inferred_graph.json"))
         store.derived = DerivedGraph.from_dict(cls._read_json(root / "derived.json"))
+        return store
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "bm25_chunks": self.bm25_chunks.to_dict(),
+            "bm25_entities": self.bm25_entities.to_dict(),
+            "vector_meta": self.vectors.to_metadata_dict(),
+            "vectors": self.vectors._matrix.tolist(),
+            "types": self.types.to_dict(),
+            "properties": self.properties.to_dict(),
+            "temporal": self.temporal.to_dict(),
+            "cooccurrence": self.cooccurrence.to_dict(),
+            "triadic": self.triadic.to_dict(),
+            "chunks": self.chunks.to_dict(),
+            "entity_graph": self.entity_graph.to_dict(),
+            "inferred_graph": self.inferred_graph.to_dict(),
+            "derived": self.derived.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> "FoundryStore":
+        store = cls()
+        store.bm25_chunks = BM25Index.from_dict(payload.get("bm25_chunks", {}))
+        store.bm25_entities = BM25Index.from_dict(payload.get("bm25_entities", {}))
+        vector_meta = dict(payload.get("vector_meta", {}))
+        vectors_payload = payload.get("vectors")
+        matrix = np.array(vectors_payload, dtype=np.float32) if vectors_payload is not None else np.zeros((0, 0), dtype=np.float32)
+        store.vectors = VectorIndex.from_parts(vector_meta.get("doc_ids", []), matrix)
+        store.types = TypeIndex.from_dict(payload.get("types", {}))
+        store.properties = PropertyIndex.from_dict(payload.get("properties", {}))
+        store.temporal = TemporalIndex.from_dict(payload.get("temporal", {}))
+        store.cooccurrence = CooccurrenceIndex.from_dict(payload.get("cooccurrence", {}))
+        store.triadic = TriadicMemory.from_dict(payload.get("triadic", {}))
+        store.chunks = RawChunkStore.from_dict(payload.get("chunks", {}))
+        store.entity_graph = EntityGraph.from_dict(payload.get("entity_graph", {}))
+        store.inferred_graph = EntityGraph.from_dict(payload.get("inferred_graph", {}))
+        store.derived = DerivedGraph.from_dict(payload.get("derived", {}))
         return store
 
     @staticmethod
@@ -1108,6 +1664,8 @@ __all__ = [
     "Fact",
     "FoundryStore",
     "PropertyIndex",
+    "SynonymDict",
+    "TriadicMemory",
     "RawChunk",
     "RawChunkStore",
     "TemporalEvent",
