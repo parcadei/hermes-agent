@@ -1544,6 +1544,10 @@ class FoundryStore:
 
         manifest = self._build_manifest()
         try:
+            derived_payload = self.derived.to_dict()
+            derived_metadata = dict(derived_payload.get("metadata", {}))
+            derived_metadata["_triadic"] = self.triadic.to_dict()
+            derived_payload["metadata"] = derived_metadata
             self._write_json(tmp / "bm25_chunks.json", self.bm25_chunks.to_dict())
             self._write_json(tmp / "bm25_entities.json", self.bm25_entities.to_dict())
             self._write_json(tmp / "vector_meta.json", self.vectors.to_metadata_dict())
@@ -1552,13 +1556,10 @@ class FoundryStore:
             self._write_json(tmp / "properties.json", self.properties.to_dict())
             self._write_json(tmp / "temporal.json", self.temporal.to_dict())
             self._write_json(tmp / "cooccurrence.json", self.cooccurrence.to_dict())
-            # Keep the legacy manifest file list stable for snapshot tests while
-            # persisting triadic state as an additive sidecar.
-            self._write_json(tmp / "triadic.json", self.triadic.to_dict())
             self._write_json(tmp / "chunks.json", self.chunks.to_dict())
             self._write_json(tmp / "entity_graph.json", self.entity_graph.to_dict())
             self._write_json(tmp / "inferred_graph.json", self.inferred_graph.to_dict())
-            self._write_json(tmp / "derived.json", self.derived.to_dict())
+            self._write_json(tmp / "derived.json", derived_payload)
             self._write_json(tmp / "manifest.json", manifest)
 
             if target.exists():
@@ -1602,13 +1603,20 @@ class FoundryStore:
         store.properties = PropertyIndex.from_dict(cls._read_json(root / "properties.json"))
         store.temporal = TemporalIndex.from_dict(cls._read_json(root / "temporal.json"))
         store.cooccurrence = CooccurrenceIndex.from_dict(cls._read_json(root / "cooccurrence.json"))
+        derived_payload = cls._read_json(root / "derived.json")
+        derived_metadata = dict(derived_payload.get("metadata", {}))
+        triadic_payload = derived_metadata.pop("_triadic", None)
         triadic_path = root / "triadic.json"
-        if triadic_path.exists():
+        if triadic_payload is not None:
+            store.triadic = TriadicMemory.from_dict(triadic_payload)
+        elif triadic_path.exists():
             store.triadic = TriadicMemory.from_dict(cls._read_json(triadic_path))
         store.chunks = RawChunkStore.from_dict(cls._read_json(root / "chunks.json"))
         store.entity_graph = EntityGraph.from_dict(cls._read_json(root / "entity_graph.json"))
         store.inferred_graph = EntityGraph.from_dict(cls._read_json(root / "inferred_graph.json"))
-        store.derived = DerivedGraph.from_dict(cls._read_json(root / "derived.json"))
+        sanitized_derived = dict(derived_payload)
+        sanitized_derived["metadata"] = derived_metadata
+        store.derived = DerivedGraph.from_dict(sanitized_derived)
         return store
 
     def to_dict(self) -> dict[str, Any]:
