@@ -34,6 +34,7 @@ from foundry.storage import (
     FoundryStore,
     RawChunk,
     TemporalEvent,
+    TriadicMemory,
     VectorIndex,
     _normalize_name,
     _tokenize,
@@ -227,6 +228,25 @@ def _get_chunk(chunk_store: Optional[Any], doc_id: int) -> Optional[RawChunk]:
         return None
 
 
+def _full_chunk_text(chunk_store: Optional[Any], doc_id: int, fallback_text: str = "") -> str:
+    chunk = _get_chunk(chunk_store, doc_id)
+    text = getattr(chunk, "text", None) if chunk is not None else None
+    return str(text or fallback_text or "")
+
+
+def _chunk_lookup_by_text(chunk_store: Optional[Any]) -> dict[str, list[RawChunk]]:
+    chunks = getattr(chunk_store, "_chunks", None)
+    if not isinstance(chunks, Mapping):
+        return {}
+    lookup: dict[str, list[RawChunk]] = {}
+    for chunk_id in sorted(chunks):
+        chunk = chunks[chunk_id]
+        text = str(getattr(chunk, "text", "") or "")
+        if text:
+            lookup.setdefault(text, []).append(chunk)
+    return lookup
+
+
 def _safe_layer(layer: Optional[str]) -> Optional[str]:
     if layer is None:
         return None
@@ -336,6 +356,7 @@ def search_memory_hybrid(
     top_k: int = _DEFAULT_TOP_K,
     chunk_store: Optional[Any] = None,
     embed_fn: Optional[Callable[[str], np.ndarray]] = None,
+    triadic: Optional[TriadicMemory] = None,
 ) -> list[dict[str, Any]]:
     """Hybrid BM25 + cosine retrieval with reciprocal-rank fusion."""
 
@@ -353,13 +374,16 @@ def search_memory_hybrid(
     merged = _rrf_merge([bm25_hits, vector_hits] if vector_hits else [bm25_hits])
     filtered: list[dict[str, Any]] = []
     seen = set(seen_turns or set())
+    retrieved_texts: list[str] = []
+    seen_texts: set[str] = set()
 
     for doc_id, score in merged:
         chunk = _get_chunk(chunk_store, doc_id)
         turn_id = _result_turn_id(chunk_store, doc_id)
         if turn_id in seen:
             continue
-        text = _chunk_text_for_preview(chunk, getattr(bm25, "_texts", {}).get(doc_id, ""))
+        full_text = _full_chunk_text(chunk_store, doc_id, getattr(bm25, "_texts", {}).get(doc_id, ""))
+        text = _chunk_text_for_preview(chunk, full_text)
         filtered.append(
             {
                 "turn_id": turn_id,
@@ -368,9 +392,42 @@ def search_memory_hybrid(
                 "score": float(score),
             }
         )
+        if full_text:
+            retrieved_texts.append(full_text)
+            seen_texts.add(full_text)
         seen.add(turn_id)
         if len(filtered) >= top_k:
             break
+
+    if triadic is not None and triadic.tensor_entries > 0 and retrieved_texts:
+        base_score = min((item["score"] for item in filtered), default=0.0) - 1e-6
+        chunk_lookup = _chunk_lookup_by_text(chunk_store)
+        expanded = triadic.expand(retrieved_texts, top_k=top_k)
+        for rank, expanded_text in enumerate(expanded, start=1):
+            if not expanded_text or expanded_text in seen_texts:
+                continue
+            chunk = None
+            for candidate in chunk_lookup.get(expanded_text, []):
+                candidate_turn_id = int(getattr(candidate, "turn_idx", getattr(candidate, "chunk_idx", -1)))
+                if candidate_turn_id in seen:
+                    continue
+                chunk = candidate
+                break
+            if chunk is None:
+                continue
+            turn_id = int(getattr(chunk, "turn_idx", getattr(chunk, "chunk_idx", -1)))
+            chunk_id = int(getattr(chunk, "chunk_idx", -1))
+            filtered.append(
+                {
+                    "turn_id": turn_id,
+                    "chunk_id": chunk_id,
+                    "text": _chunk_text_for_preview(chunk, expanded_text),
+                    "score": base_score - (rank * 1e-6),
+                }
+            )
+            seen_texts.add(expanded_text)
+            if turn_id >= 0:
+                seen.add(turn_id)
 
     if reranker is not None and filtered:
         try:
@@ -380,7 +437,7 @@ def search_memory_hybrid(
         except Exception:
             pass
 
-    return filtered
+    return filtered[:top_k]
 
 
 def search_memory(
@@ -401,6 +458,7 @@ def search_memory(
         top_k=top_k,
         chunk_store=store.chunks,
         embed_fn=embed_fn,
+        triadic=store.triadic,
     )
     if dedup is not None:
         return dedup.filter_new(results)

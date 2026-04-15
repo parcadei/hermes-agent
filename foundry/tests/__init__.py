@@ -1,1 +1,1 @@
-# Foundry test suite
+"""Package marker for Foundry tests."""

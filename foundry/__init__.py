@@ -1,1 +1,1 @@
-
+"""Hermes Foundry package."""

@@ -638,6 +638,12 @@ class Foundry:
 
         tracker.mark("triples", triple_started)
 
+        self._store.triadic.store_fact(
+            chunk.text,
+            [(triple.subject, triple.predicate, triple.object) for triple in extracted_triples],
+        )
+        self._store.triadic.flush()
+
         for canonical in chunk_entities:
             entity = self._store.entity_graph.ensure_entity(canonical)
             entity.mention_turns.add(chunk.turn_idx)
