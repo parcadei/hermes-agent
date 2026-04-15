@@ -68,8 +68,8 @@ _SPATIAL_PATTERNS = (
     re.compile(r"\blocated\b|\blives?\b|\bstays?\b|\bvisited\b", re.IGNORECASE),
 )
 _SOCIAL_PATTERNS = (
-    re.compile(r"\bwho\b", re.IGNORECASE),
     re.compile(r"\bfriend\b|\bfamily\b|\bcolleague\b|\bknows?\b", re.IGNORECASE),
+    re.compile(r"\bconnected\b|\brelationship\b|\brelated to\b", re.IGNORECASE),
 )
 _META_PATTERNS = (
     re.compile(r"\bdo(es)? (the )?user know\b", re.IGNORECASE),
@@ -797,7 +797,7 @@ class DeterministicRouter:
         if _contains_pattern(lowered, _SPATIAL_PATTERNS):
             return "spatial" if "where" in lowered else "fact_lookup"
         if _contains_pattern(lowered, _SOCIAL_PATTERNS):
-            return "social_relational" if "who" in lowered else "fact_lookup"
+            return "social_relational"
         if _contains_pattern(lowered, _META_PATTERNS) and ("remember" in lowered or "know" in lowered or "have" in lowered):
             return "meta_cognitive"
         if re.search(r"^(what|which|who|where|does|is|are|did|do)\b", lowered):

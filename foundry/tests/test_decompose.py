@@ -253,6 +253,13 @@ def test_deterministic_router_routes_reference_multi_hop_example_to_multi_hop() 
     )
 
 
+def test_deterministic_router_routes_non_relational_who_queries_to_fact_lookup() -> None:
+    router = DeterministicRouter()
+
+    assert router.route("Who created Christianity?") == "fact_lookup"
+    assert router.route("Who is connected to Luna?") == "social_relational"
+
+
 def test_deterministic_router_falls_back_when_decomposition_returns_original_question() -> None:
     router = DeterministicRouter(FoundryStore(), llm_url="http://llm")
     question = "What is the country of origin of the sport played by Christian Abbiati?"
