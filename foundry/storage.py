@@ -115,6 +115,12 @@ class Fact:
     superseded: bool = False
     superseded_by: Optional[str] = None
     when: str = ""
+    when_type: str = ""
+    quantity: str = ""
+    unit: str = ""
+    confidence: str = ""
+    sentiment: str = ""
+    source_turn: int = -1
     role: str = ""
     sub_role: str = ""
 
@@ -145,6 +151,12 @@ class Fact:
             "superseded": self.superseded,
             "superseded_by": self.superseded_by,
             "when": self.when,
+            "when_type": self.when_type,
+            "quantity": self.quantity,
+            "unit": self.unit,
+            "confidence": self.confidence,
+            "sentiment": self.sentiment,
+            "source_turn": self.source_turn,
             "role": self.role,
             "sub_role": self.sub_role,
         }
@@ -166,6 +178,12 @@ class Fact:
             superseded=payload.get("superseded", False),
             superseded_by=payload.get("superseded_by"),
             when=payload.get("when", ""),
+            when_type=payload.get("when_type", ""),
+            quantity=payload.get("quantity", ""),
+            unit=payload.get("unit", ""),
+            confidence=payload.get("confidence", ""),
+            sentiment=payload.get("sentiment", ""),
+            source_turn=payload.get("source_turn", -1),
             role=payload.get("role", ""),
             sub_role=payload.get("sub_role", ""),
         )
@@ -645,11 +663,12 @@ class TemporalIndex:
         end_dt = _parse_datetime(end)
         if start_dt is None or end_dt is None:
             return []
-        return [
+        matches = [
             event
             for event in self._events
             if event.start_dt <= end_dt and event.end_dt >= start_dt
         ]
+        return sorted(matches, key=lambda event: (event.start_dt, event.end_dt, event.event))
 
     def allen_before(self, a: TemporalEvent, b: TemporalEvent) -> bool:
         return a.end_dt < b.start_dt
