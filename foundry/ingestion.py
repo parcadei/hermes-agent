@@ -999,8 +999,8 @@ def extract_entities_and_triples(
             entity.turn_idx = chunk.turn_idx
             entity.source_text = chunk.text
         for triple in triples:
-            triple.turn_idx = triple.turn_idx if triple.turn_idx >= 0 else chunk.turn_idx
-            triple.source_turn = triple.source_turn if triple.source_turn >= 0 else triple.turn_idx
+            triple.turn_idx = chunk.turn_idx
+            triple.source_turn = chunk.turn_idx
             triple.chunk_idx = chunk.chunk_idx
             triple.source_text = chunk.text
         return entities, triples

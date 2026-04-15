@@ -183,7 +183,7 @@ class Fact:
             unit=payload.get("unit", ""),
             confidence=payload.get("confidence", ""),
             sentiment=payload.get("sentiment", ""),
-            source_turn=payload.get("source_turn", -1),
+            source_turn=payload.get("source_turn", payload.get("turn_idx", -1)),
             role=payload.get("role", ""),
             sub_role=payload.get("sub_role", ""),
         )

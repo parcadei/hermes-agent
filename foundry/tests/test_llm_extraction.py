@@ -21,7 +21,7 @@ from foundry.ingestion import (
     fact_from_triple,
 )
 from foundry.ontology import PropertyType
-from foundry.storage import RawChunk
+from foundry.storage import Fact, RawChunk
 
 
 class _MockHTTPResponse:
@@ -149,7 +149,9 @@ def test_extract_via_llm_accepts_full_chat_completions_url(monkeypatch: pytest.M
 def test_extract_entities_and_triples_dispatches_to_llm_with_wrapped_turn(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, str] = {}
     expected_entities = [FacetEntity(name="Luna", facets={"what": "animal"}, turn_idx=-1, source_text="wrapped")]
-    expected_triples = [ExtractedTriple(subject="user", predicate="has", object="Luna", source_text="wrapped")]
+    expected_triples = [
+        ExtractedTriple(subject="user", predicate="has", object="Luna", source_text="wrapped", turn_idx=99, source_turn=99)
+    ]
 
     def _fake_extract(chunk_text: str, llm_url: str, llm_model: str = "", max_tokens: int = 16000, temperature: float = 0.0):
         captured["chunk_text"] = chunk_text
@@ -336,6 +338,24 @@ def test_fact_from_triple_defaults_source_turn_to_turn_index() -> None:
 
     assert fact.object_type == PropertyType.NUMERIC
     assert fact.source_turn == 8
+
+
+def test_fact_from_dict_defaults_source_turn_to_turn_index_for_legacy_payloads() -> None:
+    fact = Fact.from_dict(
+        {
+            "id": "salary-old",
+            "subject": "user",
+            "predicate": "salary",
+            "object": "$100k",
+            "object_type": "numeric",
+            "turn_idx": 5,
+            "chunk_idx": 1,
+            "source_text": "I make $100k",
+            "layer": "stated",
+        }
+    )
+
+    assert fact.source_turn == 5
 
 
 def test_foundry_ingest_uses_llm_extraction_and_preserves_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
