@@ -270,3 +270,22 @@ def test_deterministic_router_falls_back_when_decomposition_returns_original_que
     assert evidence == ""
     assert meta["pipeline"] == "multi_hop"
     assert meta["fallback"] == "agentic"
+
+
+def test_deterministic_router_falls_back_when_subquery_requires_agentic_routing() -> None:
+    router = DeterministicRouter(FoundryStore(), llm_url="http://llm")
+    question = "How old is the creator of the religion Karl Lueger followed?"
+
+    with patch(
+        "foundry.retrieval.decompose_query",
+        return_value=[
+            "What religion did Karl Lueger follow?",
+            "Who created {answer_1}?",
+            "How old is {answer_2}?",
+        ],
+    ):
+        evidence, meta = router.execute(question, "multi_hop")
+
+    assert evidence == ""
+    assert meta["pipeline"] == "multi_hop"
+    assert meta["fallback"] == "agentic"

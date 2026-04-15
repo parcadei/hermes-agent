@@ -1017,7 +1017,15 @@ class DeterministicRouter:
                 trace.terminated_by = "budget"
                 break
             pipeline = self._route_without_multi_hop(resolved_question)
-            handler = handlers.get(pipeline, self._execute_fact_lookup)
+            if pipeline == "agentic":
+                trace.terminated_by = "no_action"
+                final_evidence = ""
+                break
+            handler = handlers.get(pipeline)
+            if handler is None:
+                trace.terminated_by = "no_action"
+                final_evidence = ""
+                break
             final_evidence = handler(resolved_question, trace)
             if not final_evidence.strip():
                 trace.terminated_by = "budget"
