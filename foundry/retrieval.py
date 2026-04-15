@@ -91,6 +91,15 @@ _MULTI_HOP_PHRASES = (
     "written by",
     "directed by",
 )
+_MULTI_HOP_RELATION_TERMS = (
+    "born",
+    "followed",
+    "played",
+    "created",
+    "founded",
+    "written",
+    "directed",
+)
 _TURN_PREFIX_RE = re.compile(r"^turn\s+\d+\s*:\s*", re.IGNORECASE)
 _ANSWER_FROM_EVIDENCE_PATTERNS = (
     re.compile(r"\bplayed\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
@@ -708,6 +717,8 @@ def _looks_multi_hop(question: str) -> bool:
         return False
     phrase_hits = sum(1 for phrase in _MULTI_HOP_PHRASES if phrase in normalized)
     if phrase_hits >= 2:
+        return True
+    if phrase_hits >= 1 and any(term in normalized for term in _MULTI_HOP_RELATION_TERMS):
         return True
     if phrase_hits >= 1 and normalized.count(" of ") >= 2:
         return True

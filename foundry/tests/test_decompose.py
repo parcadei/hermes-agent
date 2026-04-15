@@ -242,3 +242,12 @@ def test_deterministic_router_executes_multi_hop_subqueries_sequentially() -> No
     assert "England" in evidence
     assert meta["pipeline"] == "multi_hop"
     assert meta["fallback"] is None
+
+
+def test_deterministic_router_routes_reference_multi_hop_example_to_multi_hop() -> None:
+    router = DeterministicRouter()
+
+    assert (
+        router.route("Where was the creator of the religion Karl Lueger followed born?")
+        == "multi_hop"
+    )
