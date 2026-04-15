@@ -28,6 +28,7 @@ from foundry.ontology import EntityType, GroundingLayer, PropertyType
 _TOKEN_RE = re.compile(r"\w+", re.UNICODE)
 _NUMERIC_EXTRACT_RE = re.compile(r"-?\d[\d,]*\.?\d*")
 _ISO_Z_SUFFIX = "Z"
+_TRIADIC_DERIVED_METADATA_KEY = "__foundry_internal_triadic__"
 _DEFAULT_CONFIG_SNAPSHOT = {
     "chunk_size": 512,
     "extraction_model": "Qwen/Qwen2.5-7B-Instruct",
@@ -950,6 +951,7 @@ class TriadicMemory:
         self._text_to_triples: dict[str, list[tuple[str, str, str]]] = {}
         self._concept_to_texts: dict[str, set[str]] = {}
         self._n_facts_with_triples = 0
+        self._n_total_facts = 0
 
     @staticmethod
     def _normalize_concept(value: str) -> str:
@@ -969,19 +971,6 @@ class TriadicMemory:
         self._entries.add(entry)
         self._xy_to_z[(entry[0], entry[1])].add(entry[2])
         self._yz_to_x[(entry[1], entry[2])].add(entry[0])
-
-    def _remove_text_mappings(self, text: str, triples: list[tuple[str, str, str]]) -> None:
-        if triples:
-            self._n_facts_with_triples = max(0, self._n_facts_with_triples - 1)
-        for s, p, o in triples:
-            for concept in (s, p, o):
-                key = self._normalize_concept(concept)
-                texts = self._concept_to_texts.get(key)
-                if texts is None:
-                    continue
-                texts.discard(text)
-                if not texts:
-                    self._concept_to_texts.pop(key, None)
 
     def _restore_rng_state(self, payload: Mapping[str, Any] | None) -> None:
         if not payload:
@@ -1025,17 +1014,26 @@ class TriadicMemory:
 
     def store_fact(self, text: str, triples: list[tuple[str, str, str]]) -> None:
         fact_text = str(text or "")
-        previous = self._text_to_triples.get(fact_text)
-        if previous is not None:
-            self._remove_text_mappings(fact_text, previous)
-
-        normalized_triples = [(str(s), str(p), str(o)) for s, p, o in triples]
-        self._text_to_triples[fact_text] = normalized_triples
+        self._n_total_facts += 1
+        normalized_triples: list[tuple[str, str, str]] = []
+        seen_triples: set[tuple[str, str, str]] = set()
+        for s, p, o in triples:
+            triple = (str(s), str(p), str(o))
+            if triple in seen_triples:
+                continue
+            seen_triples.add(triple)
+            normalized_triples.append(triple)
         if not normalized_triples:
+            self._text_to_triples.setdefault(fact_text, [])
             return
 
         self._n_facts_with_triples += 1
+        existing = self._text_to_triples.setdefault(fact_text, [])
+        existing_set = set(existing)
         for s, p, o in normalized_triples:
+            if (s, p, o) in existing_set:
+                continue
+            existing.append((s, p, o))
             self.store(s, p, o)
             for concept in (s, p, o):
                 key = self._normalize_concept(concept)
@@ -1268,7 +1266,7 @@ class TriadicMemory:
         self._synonym_dict.add_from_verb_mappings(mappings)
 
     def coverage(self) -> tuple[int, int]:
-        return self._n_facts_with_triples, len(self._text_to_triples)
+        return self._n_facts_with_triples, self._n_total_facts
 
     @property
     def tensor_entries(self) -> int:
@@ -1292,6 +1290,7 @@ class TriadicMemory:
                 concept: sorted(texts) for concept, texts in sorted(self._concept_to_texts.items())
             },
             "n_facts_with_triples": self._n_facts_with_triples,
+            "n_total_facts": self._n_total_facts,
             "synonyms": self._synonym_dict.to_dict(),
             "rng_state": {
                 "algorithm": str(rng_state[0]),
@@ -1347,6 +1346,12 @@ class TriadicMemory:
             payload.get(
                 "n_facts_with_triples",
                 sum(1 for triples in memory._text_to_triples.values() if triples),
+            )
+        )
+        memory._n_total_facts = int(
+            payload.get(
+                "n_total_facts",
+                len(memory._text_to_triples),
             )
         )
         memory._synonym_dict = SynonymDict.from_dict(payload.get("synonyms"))
@@ -1546,7 +1551,7 @@ class FoundryStore:
         try:
             derived_payload = self.derived.to_dict()
             derived_metadata = dict(derived_payload.get("metadata", {}))
-            derived_metadata["_triadic"] = self.triadic.to_dict()
+            derived_metadata[_TRIADIC_DERIVED_METADATA_KEY] = self.triadic.to_dict()
             derived_payload["metadata"] = derived_metadata
             self._write_json(tmp / "bm25_chunks.json", self.bm25_chunks.to_dict())
             self._write_json(tmp / "bm25_entities.json", self.bm25_entities.to_dict())
@@ -1605,7 +1610,7 @@ class FoundryStore:
         store.cooccurrence = CooccurrenceIndex.from_dict(cls._read_json(root / "cooccurrence.json"))
         derived_payload = cls._read_json(root / "derived.json")
         derived_metadata = dict(derived_payload.get("metadata", {}))
-        triadic_payload = derived_metadata.pop("_triadic", None)
+        triadic_payload = derived_metadata.pop(_TRIADIC_DERIVED_METADATA_KEY, None)
         triadic_path = root / "triadic.json"
         if triadic_payload is not None:
             store.triadic = TriadicMemory.from_dict(triadic_payload)

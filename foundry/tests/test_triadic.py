@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 from foundry.core import Foundry, FoundryConfig
-from foundry.retrieval import search_memory
-from foundry.storage import FoundryStore, SynonymDict, TriadicMemory
+from foundry.retrieval import search_memory, search_memory_hybrid
+from foundry.storage import BM25Index, FoundryStore, RawChunk, RawChunkStore, SynonymDict, TriadicMemory
 
 
 def test_synonym_dict_add_resolve_and_coref_pronoun_filtering() -> None:
@@ -71,6 +73,20 @@ def test_triadic_memory_store_fact_builds_text_and_concept_indexes() -> None:
     assert memory.coverage() == (1, 1)
 
 
+def test_triadic_memory_store_fact_merges_duplicate_raw_text_without_losing_coverage() -> None:
+    memory = TriadicMemory(n=64, p=4, seed=17)
+    memory.store_fact("Repeated text.", [("user", "has", "luna"), ("user", "has", "luna")])
+    memory.store_fact("Repeated text.", [("user", "has", "mochi")])
+    memory.flush()
+
+    assert memory.coverage() == (2, 2)
+    assert memory._text_to_triples["Repeated text."] == [
+        ("user", "has", "luna"),
+        ("user", "has", "mochi"),
+    ]
+    assert memory.query_direct("user has") == ["Repeated text."]
+
+
 def test_triadic_memory_expand_supports_single_and_multi_hop_with_decay() -> None:
     memory = TriadicMemory(n=128, p=6, seed=5)
     memory.store_fact("T1", [("user", "has", "luna")])
@@ -130,6 +146,23 @@ def test_foundry_store_to_dict_from_dict_includes_triadic() -> None:
     assert restored.triadic.query_direct("user has") == ["User has Luna."]
 
 
+def test_foundry_store_save_load_preserves_triadic_without_leaking_internal_metadata(tmp_path) -> None:
+    store = FoundryStore()
+    store.derived.metadata["gists"] = ["summary"]
+    store.triadic.store_fact("User has Luna.", [("user", "has", "luna")])
+    store.triadic.flush()
+
+    path = tmp_path / "store"
+    store.save(str(path))
+    loaded = FoundryStore.load(str(path))
+    derived_payload = json.loads((path / "derived.json").read_text())
+
+    assert loaded.triadic.coverage() == (1, 1)
+    assert loaded.triadic.tensor_entries == store.triadic.tensor_entries
+    assert loaded.derived.metadata == {"gists": ["summary"]}
+    assert "__foundry_internal_triadic__" in derived_payload["metadata"]
+
+
 def test_foundry_ingest_populates_triadic_and_search_memory_expands_results() -> None:
     raw = "\n".join(
         [
@@ -151,3 +184,33 @@ def test_foundry_ingest_populates_triadic_and_search_memory_expands_results() ->
     assert texts[0] == "I have a cat named Luna."
     assert "I have a dog named Mochi." in texts
     assert "Mochi is a playful dog." in texts
+
+
+def test_foundry_ingest_duplicate_chunk_texts_preserves_total_triadic_fact_count() -> None:
+    raw = "\n".join(
+        [
+            "User: I have a cat named Luna.",
+            "User: I have a cat named Luna.",
+            "User: I have a dog named Mochi.",
+            "Assistant: Mochi is a playful dog.",
+        ]
+    )
+    foundry = Foundry(FoundryConfig())
+    foundry.ingest(raw)
+
+    assert foundry._store.triadic.coverage() == (4, 4)
+    assert ("user", "has", "Luna") in foundry._store.triadic._text_to_triples["I have a cat named Luna."]
+
+
+def test_search_memory_hybrid_uses_chunk_store_text_when_available() -> None:
+    bm25 = BM25Index()
+    bm25.add(0, "lookup-token")
+    chunk_store = RawChunkStore()
+    chunk_store.store(RawChunk(chunk_idx=0, turn_idx=7, role="user", text="Actual chunk text"))
+
+    results = search_memory_hybrid("lookup-token", bm25, chunk_store=chunk_store, top_k=1)
+
+    assert len(results) == 1
+    assert results[0]["turn_id"] == 7
+    assert results[0]["chunk_id"] == 0
+    assert results[0]["text"] == "Actual chunk text"

@@ -222,6 +222,10 @@ def _result_turn_id(chunk_store: Optional[Any], doc_id: int) -> int:
 def _get_chunk(chunk_store: Optional[Any], doc_id: int) -> Optional[RawChunk]:
     if chunk_store is None:
         return None
+    try:
+        return chunk_store.get(doc_id)
+    except Exception:
+        return None
 
 
 def _full_chunk_text(chunk_store: Optional[Any], doc_id: int, fallback_text: str = "") -> str:
@@ -230,21 +234,17 @@ def _full_chunk_text(chunk_store: Optional[Any], doc_id: int, fallback_text: str
     return str(text or fallback_text or "")
 
 
-def _chunk_lookup_by_text(chunk_store: Optional[Any]) -> dict[str, RawChunk]:
+def _chunk_lookup_by_text(chunk_store: Optional[Any]) -> dict[str, list[RawChunk]]:
     chunks = getattr(chunk_store, "_chunks", None)
     if not isinstance(chunks, Mapping):
         return {}
-    lookup: dict[str, RawChunk] = {}
+    lookup: dict[str, list[RawChunk]] = {}
     for chunk_id in sorted(chunks):
         chunk = chunks[chunk_id]
         text = str(getattr(chunk, "text", "") or "")
-        if text and text not in lookup:
-            lookup[text] = chunk
+        if text:
+            lookup.setdefault(text, []).append(chunk)
     return lookup
-    try:
-        return chunk_store.get(doc_id)
-    except Exception:
-        return None
 
 
 def _safe_layer(layer: Optional[str]) -> Optional[str]:
@@ -406,15 +406,17 @@ def search_memory_hybrid(
         for rank, expanded_text in enumerate(expanded, start=1):
             if not expanded_text or expanded_text in seen_texts:
                 continue
-            chunk = chunk_lookup.get(expanded_text)
-            if chunk is not None:
-                turn_id = int(getattr(chunk, "turn_idx", getattr(chunk, "chunk_idx", -1)))
-                chunk_id = int(getattr(chunk, "chunk_idx", -1))
-                if turn_id in seen:
+            chunk = None
+            turn_id = -1
+            chunk_id = -1
+            for candidate in chunk_lookup.get(expanded_text, []):
+                candidate_turn_id = int(getattr(candidate, "turn_idx", getattr(candidate, "chunk_idx", -1)))
+                if candidate_turn_id in seen:
                     continue
-            else:
-                turn_id = -1
-                chunk_id = -1
+                chunk = candidate
+                turn_id = candidate_turn_id
+                chunk_id = int(getattr(candidate, "chunk_idx", -1))
+                break
             filtered.append(
                 {
                     "turn_id": turn_id,
