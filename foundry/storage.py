@@ -650,7 +650,14 @@ class TemporalIndex:
             for event in self._events
             if event.start_dt <= end_dt and event.end_dt >= start_dt
         ]
-        events.sort(key=lambda event: (event.start_dt, event.end_dt, event.event, event.turn_id or -1))
+        events.sort(
+            key=lambda event: (
+                event.start_dt,
+                event.end_dt,
+                event.event,
+                event.turn_id if event.turn_id is not None else -1,
+            )
+        )
         return events
 
     def allen_before(self, a: TemporalEvent, b: TemporalEvent) -> bool:

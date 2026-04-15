@@ -230,8 +230,9 @@ class Foundry:
         self._grounding_failures: list[str] = []
         self._supersession = SupersessionEngine(max_facts_per_key=config.max_facts_per_entity)
         self._reranker: Optional[CrossEncoderReranker] = None
-        if self.config.reranker_model:
-            self._reranker = CrossEncoderReranker(self.config.reranker_model)
+        reranker_model = str(self.config.reranker_model or "").strip()
+        if reranker_model:
+            self._reranker = CrossEncoderReranker(reranker_model)
         if self.config.synonym_dict:
             self.rebuild_inferred(self.config.synonym_dict)
 

@@ -347,12 +347,21 @@ class CrossEncoderReranker:
         if not results:
             return results
 
-        self._ensure_model()
         k = self._top_k if top_k is None else top_k
+        if k <= 0:
+            return []
+
+        self._ensure_model()
         pairs = [[query, row["text"]] for row in results]
-        scores = self._model.predict(pairs)
+        raw_scores = self._model.predict(pairs)
+        if np.isscalar(raw_scores):
+            scores = [float(raw_scores)]
+        else:
+            scores = [float(score) for score in raw_scores]
+        if len(scores) != len(results):
+            raise ValueError("Cross-encoder returned a score count that does not match the candidate count")
         for row, score in zip(results, scores):
-            row["cross_encoder_score"] = float(score)
+            row["cross_encoder_score"] = score
         results.sort(key=lambda row: row["cross_encoder_score"], reverse=True)
         return results[:k]
 
@@ -376,6 +385,7 @@ def search_memory_hybrid(
     if not query or top_k <= 0:
         return []
 
+    candidate_limit = max(20, top_k * 2) if reranker is not None else top_k
     bm25_hits = bm25.query(query, top_k=max(20, top_k * 2))
     vector_hits: list[tuple[int, float]] = []
     if vectors is not None and embed_fn is not None:
@@ -403,7 +413,7 @@ def search_memory_hybrid(
             }
         )
         seen.add(turn_id)
-        if len(filtered) >= top_k:
+        if len(filtered) >= candidate_limit:
             break
 
     if reranker is not None and filtered:
@@ -414,7 +424,7 @@ def search_memory_hybrid(
         except Exception:
             pass
 
-    return filtered
+    return filtered[:top_k]
 
 
 def search_memory(
