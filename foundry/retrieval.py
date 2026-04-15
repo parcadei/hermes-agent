@@ -354,10 +354,11 @@ class CrossEncoderReranker:
         self._ensure_model()
         pairs = [[query, row["text"]] for row in results]
         raw_scores = self._model.predict(pairs)
-        if np.isscalar(raw_scores):
-            scores = [float(raw_scores)]
+        score_array = np.asarray(raw_scores)
+        if score_array.ndim == 0:
+            scores = [float(score_array.item())]
         else:
-            scores = [float(score) for score in raw_scores]
+            scores = [float(score) for score in score_array]
         if len(scores) != len(results):
             raise ValueError("Cross-encoder returned a score count that does not match the candidate count")
         for row, score in zip(results, scores):

@@ -300,6 +300,17 @@ def test_control_flow_predict_scalar_and_array_outputs_both_work(monkeypatch: py
     assert [row["text"] for row in array_ranked] == ["second", "first"]
 
 
+def test_control_flow_predict_numpy_zero_dim_scalar_output_works() -> None:
+    reranker = CrossEncoderReranker("numpy-scalar-model")
+    reranker._model = FakeModel(np.array(0.6, dtype=np.float32))
+
+    ranked = reranker.rerank("query", [{"text": "solo", "score": 0.1}])
+
+    assert ranked[0]["text"] == "solo"
+    assert ranked[0]["score"] == 0.1
+    assert ranked[0]["cross_encoder_score"] == pytest.approx(0.6)
+
+
 def test_control_flow_whitespace_only_model_name_disables_reranker(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeCrossEncoderReranker:
         def __init__(self, model_name: str, top_k: int = 10) -> None:
