@@ -209,6 +209,32 @@ def test_search_memory_applies_conflict_resolution_after_ingest() -> None:
     assert foundry.resolve_conflicts(raw_results) == filtered
 
 
+def test_search_memory_overfetches_before_conflict_resolution() -> None:
+    foundry = Foundry(FoundryConfig())
+    foundry.ingest(
+        "\n".join(
+            [
+                "User: I live in Seattle.",
+                "User: I live in Portland.",
+            ]
+        )
+    )
+
+    raw_top_one = search_memory_hybrid(
+        "live",
+        foundry._store.bm25_chunks,
+        foundry._store.vectors,
+        top_k=1,
+        chunk_store=foundry._store.chunks,
+    )
+    filtered_top_one = search_memory(foundry._store, "live", top_k=1)
+
+    assert len(raw_top_one) == 1
+    assert "Seattle" in raw_top_one[0]["text"]
+    assert len(filtered_top_one) == 1
+    assert "Portland" in filtered_top_one[0]["text"]
+
+
 def test_conflictdetector_handles_empty_single_and_entityless_results() -> None:
     store = FoundryStore()
     store.chunks.store(RawChunk(chunk_idx=7, text="No entities here.", turn_idx=7, role="user", entities=[]))
