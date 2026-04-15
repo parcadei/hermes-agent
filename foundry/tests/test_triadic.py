@@ -214,3 +214,20 @@ def test_search_memory_hybrid_uses_chunk_store_text_when_available() -> None:
     assert results[0]["turn_id"] == 7
     assert results[0]["chunk_id"] == 0
     assert results[0]["text"] == "Actual chunk text"
+
+
+def test_search_memory_hybrid_skips_expansions_without_backing_chunks() -> None:
+    bm25 = BM25Index()
+    bm25.add(0, "seed")
+    chunk_store = RawChunkStore()
+    chunk_store.store(RawChunk(chunk_idx=0, turn_idx=1, role="user", text="seed"))
+    triadic = TriadicMemory(n=64, p=4, seed=21)
+    triadic.store_fact("seed", [("user", "has", "luna")])
+    triadic.store_fact("expanded", [("user", "has", "mochi")])
+    triadic.flush()
+
+    results = search_memory_hybrid("seed", bm25, chunk_store=chunk_store, triadic=triadic, top_k=5)
+
+    assert len(results) == 1
+    assert results[0]["turn_id"] == 1
+    assert all(result["turn_id"] >= 0 for result in results)

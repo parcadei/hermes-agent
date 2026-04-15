@@ -407,16 +407,16 @@ def search_memory_hybrid(
             if not expanded_text or expanded_text in seen_texts:
                 continue
             chunk = None
-            turn_id = -1
-            chunk_id = -1
             for candidate in chunk_lookup.get(expanded_text, []):
                 candidate_turn_id = int(getattr(candidate, "turn_idx", getattr(candidate, "chunk_idx", -1)))
                 if candidate_turn_id in seen:
                     continue
                 chunk = candidate
-                turn_id = candidate_turn_id
-                chunk_id = int(getattr(candidate, "chunk_idx", -1))
                 break
+            if chunk is None:
+                continue
+            turn_id = int(getattr(chunk, "turn_idx", getattr(chunk, "chunk_idx", -1)))
+            chunk_id = int(getattr(chunk, "chunk_idx", -1))
             filtered.append(
                 {
                     "turn_id": turn_id,
