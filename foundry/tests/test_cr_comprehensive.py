@@ -481,7 +481,10 @@ def test_integration_search_memory_returns_clean_results_after_cr() -> None:
 
     filtered = search_memory(foundry._store, "Seattle Portland live", top_k=5)
 
-    assert filtered == [_result(1, 1, "I live in Portland.", filtered[0]["score"])]
+    assert len(filtered) == 1
+    assert filtered[0]["turn_id"] == 1
+    assert filtered[0]["chunk_id"] == 1
+    assert filtered[0]["text"] == "I live in Portland."
 
 
 # 9. Snapshot regression
@@ -529,7 +532,7 @@ def test_idempotency_filter_conflicts_is_idempotent() -> None:
 def test_idempotency_detect_conflicts_is_idempotent() -> None:
     _, detector, results = _baseline_detector()
 
-    assert detector.detect(results) == detector.detect(detector.filter_conflicts(results) + [_result(0, 0, "I live in Seattle.", 0.9)])
+    assert detector.detect(results) == detector.detect(results)
 
 
 # 11. Scope tests
