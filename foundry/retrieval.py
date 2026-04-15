@@ -44,6 +44,7 @@ _RRF_K = 60.0
 _DEFAULT_TOP_K = 10
 _OBSERVATION_SEPARATOR = "\n\n"
 _VALID_LAYERS = {layer.value for layer in GroundingLayer}
+RerankerFn = Callable[[str, list[dict[str, Any]]], list[dict[str, Any]]]
 _TEMPORAL_PATTERNS = (
     re.compile(r"\bwhen\b", re.IGNORECASE),
     re.compile(r"\bbefore\b|\bafter\b|\bduring\b|\bbetween\b", re.IGNORECASE),
@@ -326,12 +327,45 @@ def augment_query(query: str, store: Optional[FoundryStore]) -> str:
     return " ".join(expanded)
 
 
+class CrossEncoderReranker:
+    """Lazy-loaded cross-encoder for reranking retrieval candidates."""
+
+    def __init__(self, model_name: str = "mixedbread-ai/mxbai-rerank-large-v1", top_k: int = 10) -> None:
+        self._model_name = model_name
+        self._top_k = top_k
+        self._model = None
+
+    def _ensure_model(self) -> None:
+        if self._model is not None:
+            return
+        from sentence_transformers import CrossEncoder
+
+        self._model = CrossEncoder(self._model_name)
+
+    def rerank(self, query: str, results: list[dict[str, Any]], top_k: int | None = None) -> list[dict[str, Any]]:
+        """Rerank results by cross-encoder relevance score."""
+        if not results:
+            return results
+
+        self._ensure_model()
+        k = self._top_k if top_k is None else top_k
+        pairs = [[query, row["text"]] for row in results]
+        scores = self._model.predict(pairs)
+        for row, score in zip(results, scores):
+            row["cross_encoder_score"] = float(score)
+        results.sort(key=lambda row: row["cross_encoder_score"], reverse=True)
+        return results[:k]
+
+    def __call__(self, query: str, results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return self.rerank(query, results)
+
+
 def search_memory_hybrid(
     query: str,
     bm25: BM25Index,
     vectors: Optional[VectorIndex] = None,
     *,
-    reranker: Optional[Callable[[str, list[dict[str, Any]]], list[dict[str, Any]]]] = None,
+    reranker: Optional[RerankerFn] = None,
     seen_turns: Optional[set[int]] = None,
     top_k: int = _DEFAULT_TOP_K,
     chunk_store: Optional[Any] = None,
@@ -389,7 +423,7 @@ def search_memory(
     *,
     dedup: Optional[DeduplicationTracker] = None,
     top_k: int = _DEFAULT_TOP_K,
-    reranker: Optional[Callable[[str, list[dict[str, Any]]], list[dict[str, Any]]]] = None,
+    reranker: Optional[RerankerFn] = None,
     embed_fn: Optional[Callable[[str], np.ndarray]] = None,
 ) -> list[dict[str, Any]]:
     results = search_memory_hybrid(
@@ -681,7 +715,7 @@ class DeterministicRouter:
         store: Optional[FoundryStore] = None,
         *,
         budget: RetrievalBudget = RetrievalBudget(),
-        reranker: Optional[Callable[[str, list[dict[str, Any]]], list[dict[str, Any]]]] = None,
+        reranker: Optional[RerankerFn] = None,
         embed_fn: Optional[Callable[[str], np.ndarray]] = None,
     ) -> None:
         self.store = store
@@ -926,7 +960,7 @@ class AgenticRetriever:
         budget: RetrievalBudget = RetrievalBudget(),
         temperature: float = 0.0,
         max_tokens: int = 512,
-        reranker: Optional[Callable[[str, list[dict[str, Any]]], list[dict[str, Any]]]] = None,
+        reranker: Optional[RerankerFn] = None,
         embed_fn: Optional[Callable[[str], np.ndarray]] = None,
     ) -> None:
         self.llm_model = llm_model

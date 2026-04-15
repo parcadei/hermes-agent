@@ -645,11 +645,13 @@ class TemporalIndex:
         end_dt = _parse_datetime(end)
         if start_dt is None or end_dt is None:
             return []
-        return [
+        events = [
             event
             for event in self._events
             if event.start_dt <= end_dt and event.end_dt >= start_dt
         ]
+        events.sort(key=lambda event: (event.start_dt, event.end_dt, event.event, event.turn_id or -1))
+        return events
 
     def allen_before(self, a: TemporalEvent, b: TemporalEvent) -> bool:
         return a.end_dt < b.start_dt

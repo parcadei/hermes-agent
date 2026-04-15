@@ -32,7 +32,13 @@ from foundry.ingestion import (
 )
 from foundry.ontology import GroundingLayer
 from foundry.query import QueryPlan
-from foundry.retrieval import AgenticRetriever, DeterministicRouter, RetrievalTrace, search_temporal as retrieval_search_temporal
+from foundry.retrieval import (
+    AgenticRetriever,
+    CrossEncoderReranker,
+    DeterministicRouter,
+    RetrievalTrace,
+    search_temporal as retrieval_search_temporal,
+)
 from foundry.storage import EntityGraph, EntityNode, Fact, FoundryStore, RawChunk, _normalize_name
 from foundry.writeback import SupersessionEngine
 
@@ -122,7 +128,7 @@ class FoundryConfig:
     extraction_url: Optional[str] = None
     temporal_model: str = "THU-KEG/ADELIE-SFT-3B"
     embedding_model: str = "sentence-transformers/all-mpnet-base-v2"
-    reranker_model: str = "mixedbread-ai/mxbai-rerank-large-v1"
+    reranker_model: Optional[str] = "mixedbread-ai/mxbai-rerank-large-v1"
     agent_model: str = "gpt-4o-mini"
     agent_max_steps: int = 8
     agent_temperature: float = 0.0
@@ -223,6 +229,9 @@ class Foundry:
         self._retrieval_counts: dict[str, int] = defaultdict(int)
         self._grounding_failures: list[str] = []
         self._supersession = SupersessionEngine(max_facts_per_key=config.max_facts_per_entity)
+        self._reranker: Optional[CrossEncoderReranker] = None
+        if self.config.reranker_model:
+            self._reranker = CrossEncoderReranker(self.config.reranker_model)
         if self.config.synonym_dict:
             self.rebuild_inferred(self.config.synonym_dict)
 
@@ -437,6 +446,7 @@ class Foundry:
             llm_model=self.config.agent_model,
             budget=self._retrieval_budget(),
             temperature=self.config.agent_temperature,
+            reranker=self._reranker.rerank if self._reranker is not None else None,
         )
         evidence, trace = retriever.retrieve(question)
         if evidence.strip():
@@ -444,7 +454,11 @@ class Foundry:
         return evidence, trace
 
     def retrieve_deterministic(self, question: str) -> tuple[str, Any]:
-        router = DeterministicRouter(self._store, budget=self._retrieval_budget())
+        router = DeterministicRouter(
+            self._store,
+            budget=self._retrieval_budget(),
+            reranker=self._reranker.rerank if self._reranker is not None else None,
+        )
         pipeline = router.route(question)
         evidence, meta = router.execute(question, pipeline)
         if meta.get("fallback") == "agentic":
