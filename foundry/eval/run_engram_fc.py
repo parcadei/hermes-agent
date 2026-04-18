@@ -26,6 +26,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+import dotenv
 import numpy as np
 import openai
 import yaml
@@ -66,6 +67,9 @@ sys.path.insert(0, str(_NLCDM_PYTHON))
 
 from conversation_creator import ConversationCreator
 from utils.eval_other_utils import metrics_summarization
+
+# Load .env from hermes-NLCDM/python (contains OPENAI_API_KEY, OPENROUTER_API_KEY, etc.)
+dotenv.load_dotenv(_NLCDM_PYTHON / ".env")
 
 # Engram imports
 from foundry.core import Foundry, FoundryConfig
@@ -112,10 +116,20 @@ def parse_args():
 _llm_client: openai.OpenAI | None = None
 
 
-def _get_client(base_url: str | None = None) -> openai.OpenAI:
+def _get_client() -> openai.OpenAI:
     global _llm_client
     if _llm_client is None:
-        kwargs = {}
+        import os
+        # Prefer OPENAI_API_KEY, fall back to OpenRouter
+        api_key = os.environ.get("OPENAI_API_KEY")
+        base_url = None
+        if not api_key:
+            api_key = os.environ.get("OPENROUTER_API_KEY")
+            if api_key:
+                base_url = "https://openrouter.ai/api/v1"
+        if not api_key:
+            raise RuntimeError("No OPENAI_API_KEY or OPENROUTER_API_KEY found in environment")
+        kwargs = {"api_key": api_key}
         if base_url:
             kwargs["base_url"] = base_url
         _llm_client = openai.OpenAI(**kwargs)
