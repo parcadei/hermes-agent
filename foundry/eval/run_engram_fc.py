@@ -110,6 +110,32 @@ def parse_args():
 
 
 # ---------------------------------------------------------------------------
+# Query extraction — strip FC benchmark prompt to get the actual question
+# ---------------------------------------------------------------------------
+
+def extract_fc_question(raw_query: str) -> str:
+    """Extract the actual question from the FC benchmark prompt.
+
+    FC queries look like:
+        Pretend you are a knowledge management system. ...
+        Now Answer the Question: <actual question>
+        Answer:
+    """
+    marker = "Now Answer the Question:"
+    if marker in raw_query:
+        q = raw_query.split(marker)[-1].strip()
+        # Strip trailing "Answer:" if present
+        if q.endswith("Answer:"):
+            q = q[:-len("Answer:")].strip()
+        # Strip leading "Based on the provided Knowledge Pool, " for cleaner BM25
+        pool_prefix = "Based on the provided Knowledge Pool, "
+        if q.startswith(pool_prefix):
+            q = q[len(pool_prefix):]
+        return q
+    return raw_query
+
+
+# ---------------------------------------------------------------------------
 # Answer generation — LLM produces concise answer from retrieved evidence
 # ---------------------------------------------------------------------------
 
@@ -260,13 +286,22 @@ def main():
             if query_index in corrected_map:
                 answer = corrected_map[query_index]
 
+            # Extract actual question from FC prompt for retrieval
+            retrieval_query = extract_fc_question(query)
+
             # Retrieve via Engram
             query_start = time.time()
-            evidence, trace = foundry.retrieve(query)
+            evidence, trace = foundry.retrieve(retrieval_query)
 
             # Generate concise answer from evidence
-            answer_text = generate_answer(query, evidence or "", args.agent_model)
+            answer_text = generate_answer(retrieval_query, evidence or "", args.agent_model)
             query_time = time.time() - query_start
+
+            if query_index < 3:
+                print(f"    [{query_index}] Q: {retrieval_query[:80]}")
+                print(f"    [{query_index}] Evidence: {(evidence or '')[:120]}")
+                print(f"    [{query_index}] Predicted: {answer_text}")
+                print(f"    [{query_index}] Expected: {answer}")
 
             # Build output dict matching metrics_summarization expectations
             output = {

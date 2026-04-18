@@ -43,22 +43,52 @@ finding the newest fact." System must answer from knowledge pool, not real-world
 
 Best config: `--bm25_primary --entity_prefilter --dynamic_prompting --raw_chunks --aggregation_overfetch 25 --structured_query --structured_query_max_hops 3 --chunk_size 512 --no_cache`
 
-### Other Benchmarks (not yet evaluated)
+---
 
-| Benchmark | Category | Description |
-|-----------|----------|-------------|
-| EventQA | Accurate Retrieval | Event-based QA, full context 800k |
-| Detective_QA | Long Range Understanding | Detective story comprehension |
-| InfBench_sum | Long Range Understanding | Summarization |
-| Ruler QA | Accurate Retrieval | Ruler-based QA |
-| ICL (5 configs) | Test Time Learning | In-context learning classification |
-| Recsys | Test Time Learning | Recommendation system |
+## Engram Baselines (all benchmarks)
+
+All Engram runs use `foundry/eval/run_engram.py`, direct BM25 retrieval, `gpt-4o-mini` for answer generation.
+
+### Conflict Resolution
+
+| Benchmark | SubEM | Config | Notes |
+|-----------|-------|--------|-------|
+| FC-SH | **40%** | BM25 top_k=20, cs512 | Composed: 91% |
+| FC-MH | **1%** | BM25 top_k=20, cs512, corrected GT | Composed: 55% (corrected) |
+
+FC-SH gap: 40% vs 91% — missing co-occurrence boost, entity pre-filter, cross-encoder, triadic.
+FC-MH: multi-hop needs chain retrieval (query decomposition + entity linking), BM25 alone is hopeless.
+
+### Accurate Retrieval
+
+| Benchmark | SubEM | Config | Notes |
+|-----------|-------|--------|-------|
+| Ruler QA (197K) | **76%** | BM25 top_k=20, cs512 | Simple fact retrieval, BM25 works well |
+| EventQA (full) | TBD | BM25 top_k=5, cs4096 | Running (5 contexts × 100 Qs) |
+
+### Long Range Understanding
+
+| Benchmark | SubEM | Config | Notes |
+|-----------|-------|--------|-------|
+| Detective QA | **49.3%** | BM25 top_k=5, cs4096 | MC, 10 contexts × ~7 Qs |
+| InfBench_sum | — | Not yet run | Summarization |
+
+### Test Time Learning
+
+| Benchmark | SubEM | Config | Notes |
+|-----------|-------|--------|-------|
+| ICL NLU | **80%** | BM25 top_k=5, cs4096 | Best ICL result |
+| ICL Banking77 | **75%** | BM25 top_k=5, cs4096 | Classification via similar examples |
+| ICL Clinic150 | **72%** | BM25 top_k=5, cs4096 | |
+| ICL TREC Coarse | **54%** | BM25 top_k=5, cs4096 | |
+| ICL TREC Fine | **50%** | BM25 top_k=5, cs4096 | |
+| Recsys | — | Not yet run | |
 
 ---
 
 ## Engram Status
 
-**Branch:** `worktree-engram-build` at `54cbd3b6`
+**Branch:** `worktree-engram-build`
 **Tests:** 943/943 passing
 
 ### Architecture (13 modules)
@@ -85,20 +115,28 @@ ontology.py -> storage.py -> [query.py, ingestion.py, writeback.py] -> retrieval
 - Stripped DeterministicRouter (500+ lines) — all retrieval via AgenticRetriever
 - Removed hardcoded regex extraction from core.py → ingestion.py handles extraction
 - Net -643 lines
+- Built `foundry/eval/run_engram.py` — unified MABench runner for all benchmarks
+- Built `foundry/eval/run_engram_fc.py` — FC-specific runner (superseded by generic)
+
+### Key findings
+
+1. **BM25 alone gives strong baselines on structured tasks**: Ruler QA (76%), ICL (75%), Detective QA (49%). These don't need entity linking or multi-hop.
+2. **FC-SH benefits heavily from entity-aware retrieval**: 40% BM25-only vs 91% composed agent. The gap is co-occurrence boost + entity pre-filter + cross-encoder.
+3. **FC-MH is hopeless without chain retrieval**: 1% with BM25. Need query decomposition + entity linking.
+4. **Char budget bug**: Large chunks (>12K chars) were silently dropped from evidence — fixed by always including at least the first result (truncated).
+5. **Query extraction is critical**: FC/Ruler queries wrapped in benchmark prompts. Without extraction, SubEM=0%.
 
 ---
 
-## Next: Isolated Engram Runners
+## Eval Runner Architecture
 
-Writing `foundry/eval/run_engram_fc.py` — isolated from composed agent, uses Engram API directly.
+```
+foundry/eval/run_engram.py — unified runner
+  ├── extract_retrieval_query(raw_query, dataset) — strips benchmark prompt wrappers
+  ├── generate_answer(query, evidence, model, dataset) — LLM answer from evidence
+  └── main() — ingest → BM25 retrieve → LLM answer → metrics_summarization
+```
 
-### MABench eval plan
-
-1. **FC-SH / FC-MH** — fact consolidation with supersession (start here)
-2. **LME** — long memory eval, multi-session conversations
-3. **EventQA** — event-based temporal QA
-4. **Detective_QA** — long-range comprehension
-5. **InfBench_sum** — summarization
-6. **Ruler** — ruler QA
-7. **ICL** — in-context learning
-8. **Recsys** — recommendations
+Supports: FC-SH/MH, EventQA, Ruler QA, Detective QA, InfBench_sum, ICL, Recsys.
+Uses ConversationCreator for data loading, metrics_summarization for scoring.
+Direct BM25 retrieval (default) or AgenticRetriever (--use_agentic).
