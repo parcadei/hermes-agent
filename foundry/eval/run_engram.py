@@ -252,7 +252,10 @@ def generate_answer(query: str, evidence: str, model: str, dataset: str,
         max_tokens=max_tokens,
         messages=[
             {"role": "system", "content": _system_prompt_for_dataset(dataset)},
-            {"role": "user", "content": f"Evidence:\n{evidence}\n\nQuestion: {query}\nAnswer:"},
+            {"role": "user", "content": (
+                f"Here is relevant context from memory:\n{evidence}\n\n"
+                f"Now complete the following task:\n{query}"
+            )},
         ],
     )
     return resp.choices[0].message.content.strip()
@@ -388,8 +391,10 @@ def main():
                 evidence = "\n".join(evidence_parts)
 
             # Generate answer from evidence
+            # Use full query for LLM (includes options/instructions),
+            # retrieval_query was only for BM25 search
             answer_text = generate_answer(
-                retrieval_query, evidence or "", args.agent_model,
+                query, evidence or "", args.agent_model,
                 sub_ds, max_tokens=gen_max_len,
             )
             query_time = time.time() - query_start
