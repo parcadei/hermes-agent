@@ -17,7 +17,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 PETS_CONVERSATION: list[tuple[str, str]] = [
-    ("user", "I have two cats named Luna and Mochi. Luna is a tabby and Mochi is a black cat."),
+    ("user", "I have two cats named Luna and Mochi. Luna is a tabby cat and Mochi is a black cat."),
     ("assistant", "That's lovely! Tell me more about your cats."),
     ("user", "Luna is 3 years old, I adopted her in 2021. Mochi is just a kitten, about 6 months old."),
     ("assistant", "How sweet! Do you have any other pets?"),

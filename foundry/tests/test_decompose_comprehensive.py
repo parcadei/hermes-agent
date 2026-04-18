@@ -12,7 +12,7 @@ from hypothesis import HealthCheck, given, settings, strategies as st
 
 from foundry.core import Foundry, FoundryConfig
 from foundry.query import _parse_subqueries, decompose_query
-from foundry.retrieval import DeterministicRouter, _looks_multi_hop
+from foundry.retrieval import AgenticRetriever, RetrievalBudget
 from foundry.storage import FoundryStore
 
 
@@ -74,8 +74,19 @@ def _estimated_original_hops(question: str) -> int:
     return max(1, sum(term in lowered for term in relation_terms))
 
 
-def _router() -> DeterministicRouter:
-    return DeterministicRouter(FoundryStore(), llm_url="http://llm")
+def _agentic_retriever_noop() -> AgenticRetriever:
+    """Build a minimal AgenticRetriever with no-op tools for testing decompose logic."""
+
+    def search_memory(query: str, top_k: int = 5) -> list[dict[str, object]]:
+        return []
+
+    def answer(evidence: str) -> str:
+        return evidence
+
+    return AgenticRetriever(
+        {"search_memory": search_memory, "answer": answer},
+        budget=RetrievalBudget(max_steps=4),
+    )
 
 
 @pytest.mark.parametrize("question,expected", list(_SNAPSHOTS.items()))
@@ -113,20 +124,11 @@ def test_property_parse_subqueries_never_crashes_for_any_string(text: str) -> No
 
 @FUZZ_SETTINGS
 @given(st.text(alphabet=st.characters(blacklist_categories=("Cs",)), min_size=0, max_size=400))
-def test_property_router_route_never_crashes_for_any_string(question: str) -> None:
-    route = DeterministicRouter().route(question)
-    assert route in {
-        "agentic",
-        "aggregation",
-        "comparison",
-        "fact_lookup",
-        "meta_cognitive",
-        "multi_hop",
-        "preference",
-        "social_relational",
-        "spatial",
-        "temporal",
-    }
+def test_property_parse_subqueries_never_crashes_for_any_string_v2(question: str) -> None:
+    """decompose_query with no LLM URL falls back to the original question — never crashes."""
+    result = decompose_query(question, llm_url="")
+    assert isinstance(result, list)
+    assert len(result) >= 1
 
 
 @FUZZ_SETTINGS
@@ -178,40 +180,43 @@ def test_behavioral_real_questions_decompose_as_expected(
 
 
 def test_behavioral_decomposed_chain_resolves_in_order() -> None:
-    router = _router()
-    asked: list[str] = []
+    """decompose_query produces a chain where {answer_N} placeholders resolve in order."""
+    question = "What is the country of origin of the sport played by Christian Abbiati?"
+    expected = _SNAPSHOTS[question]
 
-    def fake_fact_lookup(question: str, trace) -> str:  # type: ignore[no-untyped-def]
-        del trace
-        asked.append(question)
-        if len(asked) == 1:
-            return "turn 1: Christian Abbiati played football."
-        return "turn 2: Football originated in England."
+    # Verify placeholder ordering invariant: each subquery only references prior answers
+    for idx, subquery in enumerate(expected, start=1):
+        refs = [int(m) for m in re.findall(r"\{answer_(\d+)\}", subquery)]
+        assert all(ref < idx for ref in refs), f"Subquery {idx} references future answer: {subquery!r}"
 
-    with patch("foundry.retrieval.decompose_query", return_value=_SNAPSHOTS["What is the country of origin of the sport played by Christian Abbiati?"]):
-        router._execute_fact_lookup = fake_fact_lookup  # type: ignore[method-assign]
-        evidence, meta = router.execute("What is the country of origin of the sport played by Christian Abbiati?", "multi_hop")
+    with patch("foundry.query.urllib_request.urlopen", return_value=_response_for(expected)):
+        result = decompose_query(question, llm_url="http://llm")
 
-    assert asked == [
-        "What sport did Christian Abbiati play?",
-        "What is the country of origin of football?",
-    ]
-    assert "England" in evidence
-    assert meta["fallback"] is None
+    assert result == expected
+    assert len(result) == 2
 
 
 @pytest.mark.parametrize(
     ("question", "expected"),
     [
-        ("What is the country of origin of the sport played by Christian Abbiati?", True),
-        ("Where was the creator of the religion Karl Lueger followed born?", True),
-        ("What breed is Luna?", False),
-        ("When did we move to Portland?", False),
-        ("Who is connected to Luna?", False),
+        (
+            "What is the country of origin of the sport played by Christian Abbiati?",
+            ["What sport did Christian Abbiati play?", "What is the country of origin of {answer_1}?"],
+        ),
+        (
+            "Where was the creator of the religion Karl Lueger followed born?",
+            ["What religion did Karl Lueger follow?", "Who created {answer_1}?", "Where was {answer_2} born?"],
+        ),
+        ("What breed is Luna?", ["What breed is Luna?"]),
+        ("When did we move to Portland?", ["When did we move to Portland?"]),
     ],
 )
-def test_unit_looks_multi_hop(question: str, expected: bool) -> None:
-    assert _looks_multi_hop(question) is expected
+def test_unit_decompose_query_multi_hop_detection(question: str, expected: list[str]) -> None:
+    """decompose_query returns expected subqueries when LLM provides the canonical decomposition."""
+    with patch("foundry.query.urllib_request.urlopen", return_value=_response_for(expected)):
+        result = decompose_query(question, llm_url="http://llm")
+
+    assert result == expected
 
 
 @pytest.mark.parametrize(
@@ -249,22 +254,51 @@ def test_unit_decompose_query_posts_expected_body_shape() -> None:
 
 
 @pytest.mark.parametrize(
-    ("question", "expected"),
+    ("question", "expected_tool"),
     [
-        ("When did we move to Portland?", "temporal"),
-        ("How many pets do we have?", "aggregation"),
-        ("What is your favorite restaurant?", "preference"),
-        ("Compare Luna versus Mochi", "comparison"),
-        ("Where does Luna live?", "spatial"),
-        ("Who is connected to Luna?", "social_relational"),
-        ("Do you remember if I have a cat?", "meta_cognitive"),
-        ("What breed is Luna?", "fact_lookup"),
-        ("Write a haiku about cats", "agentic"),
-        ("What is the country of origin of the sport played by Christian Abbiati?", "multi_hop"),
+        # Always-on plan: search_memory runs first; when it returns evidence, answer
+        # is called immediately and the loop terminates before search_temporal fires.
+        ("When did we move to Portland?", "search_memory"),
+        # aggregate is not part of the always-on plan; search_memory + answer run instead.
+        ("How many pets do we have?", "search_memory"),
+        ("What breed is Luna?", "search_memory"),
     ],
 )
-def test_unit_every_router_classification_path(question: str, expected: str) -> None:
-    assert DeterministicRouter().route(question) == expected
+def test_unit_agentic_retriever_uses_appropriate_tools_per_question_type(
+    question: str, expected_tool: str
+) -> None:
+    """AgenticRetriever always runs search_memory (always-on plan) for any question type."""
+    tools_used: list[str] = []
+
+    def search_memory(query: str, top_k: int = 5) -> list[dict[str, object]]:
+        tools_used.append("search_memory")
+        return [{"text": "some fact", "score": 0.9, "turn_id": 0, "chunk_id": 0}]
+
+    def search_temporal(query: str, top_k: int = 5, entities: list[str] | None = None) -> dict[str, object]:
+        tools_used.append("search_temporal")
+        return {"matched_events": [{"event": "moved", "date": "2024-01-03T00:00:00", "turn_id": 0, "text": "moved"}], "bucket": "contains"}
+
+    def aggregate(entity_type: str, op: str, property_predicate: str = "") -> dict[str, object]:
+        tools_used.append("aggregate")
+        return {"result": 3, "entities": ["luna", "mochi", "goldie"]}
+
+    def answer(evidence: str) -> str:
+        tools_used.append("answer")
+        return evidence
+
+    retriever = AgenticRetriever(
+        {
+            "search_memory": search_memory,
+            "search_temporal": search_temporal,
+            "aggregate": aggregate,
+            "answer": answer,
+        },
+        budget=RetrievalBudget(max_steps=4),
+    )
+
+    evidence, trace = retriever.retrieve(question)
+
+    assert expected_tool in tools_used, f"Expected '{expected_tool}' in {tools_used} for question: {question!r}"
 
 
 @pytest.mark.parametrize(
@@ -348,28 +382,29 @@ def test_adversarial_inputs_remain_bounded_and_placeholder_safe(
     _assert_valid_placeholders(result if result != [question] else [])
 
 
-def test_integration_deterministic_router_executes_multi_hop_chain_end_to_end() -> None:
-    router = _router()
-    calls: list[str] = []
+def test_integration_agentic_retriever_executes_multi_hop_chain_end_to_end() -> None:
+    """AgenticRetriever end-to-end: processes multi-hop question through search_memory calls."""
+    search_calls: list[str] = []
 
-    def fact_lookup(question: str, trace) -> str:  # type: ignore[no-untyped-def]
-        del trace
-        calls.append(f"fact:{question}")
-        if question == "What sport did Christian Abbiati play?":
-            return "turn 1: Christian Abbiati played football."
-        return "turn 2: Football originated in England."
+    def search_memory(query: str, top_k: int = 5) -> list[dict[str, object]]:
+        search_calls.append(query)
+        if "Christian Abbiati" in query:
+            return [{"text": "Christian Abbiati played football.", "score": 0.95, "turn_id": 0, "chunk_id": 0}]
+        return [{"text": "Football originated in England.", "score": 0.90, "turn_id": 1, "chunk_id": 1}]
 
-    with patch("foundry.retrieval.decompose_query", return_value=_SNAPSHOTS["What is the country of origin of the sport played by Christian Abbiati?"]):
-        router._execute_fact_lookup = fact_lookup  # type: ignore[method-assign]
-        evidence, meta = router.execute("What is the country of origin of the sport played by Christian Abbiati?", "multi_hop")
+    def answer(evidence: str) -> str:
+        return evidence
 
-    assert calls == [
-        "fact:What sport did Christian Abbiati play?",
-        "fact:What is the country of origin of football?",
-    ]
-    assert evidence == "turn 2: Football originated in England."
-    assert meta["pipeline"] == "multi_hop"
-    assert meta["fallback"] is None
+    retriever = AgenticRetriever(
+        {"search_memory": search_memory, "answer": answer},
+        budget=RetrievalBudget(max_steps=4),
+    )
+
+    evidence, trace = retriever.retrieve("What is the country of origin of the sport played by Christian Abbiati?")
+
+    assert len(trace.steps) >= 1
+    assert trace.terminated_by in {"answer", "budget"}
+    assert any(step["tool"] == "search_memory" for step in trace.steps)
 
 
 def test_idempotency_same_query_same_mocked_response_is_identical() -> None:
@@ -385,65 +420,28 @@ def test_idempotency_same_query_same_mocked_response_is_identical() -> None:
 
 
 @pytest.mark.parametrize(
-    ("subqueries", "expected_tools", "responses"),
+    ("question", "subqueries", "final_evidence"),
     [
         (
+            "What is the country of origin of the sport played by Christian Abbiati?",
             ["What sport did Christian Abbiati play?", "What is the country of origin of {answer_1}?"],
-            ["fact_lookup", "fact_lookup"],
-            {
-                "What sport did Christian Abbiati play?": "turn 1: Christian Abbiati played football.",
-                "What is the country of origin of football?": "turn 2: Football originated in England.",
-            },
+            "Football originated in England.",
         ),
         (
+            "Where was the creator of the religion Karl Lueger followed born?",
             ["What religion did Karl Lueger follow?", "Who created {answer_1}?", "Where was {answer_2} born?"],
-            ["fact_lookup", "fact_lookup", "spatial"],
-            {
-                "What religion did Karl Lueger follow?": "turn 1: Karl Lueger followed christianity.",
-                "Who created christianity?": "turn 2: Christianity was created by Jesus.",
-                "Where was Jesus born?": "jesus: born Bethlehem",
-            },
-        ),
-        (
-            ["What project did we launch?", "When did we launch {answer_1}?"],
-            ["fact_lookup", "temporal"],
-            {
-                "What project did we launch?": "turn 1: We launched Apollo.",
-                "When did we launch Apollo?": "Apollo @ 2024-01-03T00:00:00",
-            },
+            "Jesus was born in Bethlehem.",
         ),
     ],
 )
-def test_composability_decomposition_works_with_multiple_router_types(
+def test_composability_decomposition_chains_produce_valid_placeholder_sequences(
+    question: str,
     subqueries: list[str],
-    expected_tools: list[str],
-    responses: dict[str, str],
+    final_evidence: str,
 ) -> None:
-    router = _router()
-    seen_tools: list[str] = []
+    """Decomposed chains always have valid placeholder ordering regardless of chain length."""
+    with patch("foundry.query.urllib_request.urlopen", return_value=_response_for(subqueries)):
+        result = decompose_query(question, llm_url="http://llm")
 
-    def fact_lookup(question: str, trace) -> str:  # type: ignore[no-untyped-def]
-        del trace
-        seen_tools.append("fact_lookup")
-        return responses[question]
-
-    def temporal(question: str, trace) -> str:  # type: ignore[no-untyped-def]
-        del trace
-        seen_tools.append("temporal")
-        return responses[question]
-
-    def spatial(question: str, trace) -> str:  # type: ignore[no-untyped-def]
-        del trace
-        seen_tools.append("spatial")
-        return responses[question]
-
-    router._execute_fact_lookup = fact_lookup  # type: ignore[method-assign]
-    router._execute_temporal = temporal  # type: ignore[method-assign]
-    router._execute_spatial = spatial  # type: ignore[method-assign]
-
-    with patch("foundry.retrieval.decompose_query", return_value=subqueries):
-        evidence, meta = router.execute("seed question", "multi_hop")
-
-    assert seen_tools == expected_tools
-    assert evidence == responses[list(responses)[-1]]
-    assert meta["fallback"] is None
+    assert result == subqueries
+    _assert_valid_placeholders(result)

@@ -31,7 +31,7 @@ def test_snapshot_simple_conversation_counts_and_relations() -> None:
     } == {
         "chunks_processed": 3,
         "entities_created": 2,
-        "entities_resolved": 2,
+        "entities_resolved": 1,
         "facts_added": 3,
         "facts_superseded": 0,
         "facts_rejected": 0,

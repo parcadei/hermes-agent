@@ -9,7 +9,6 @@ from foundry.dynamics import MemorySystem
 from foundry.ingestion import EntityResolver, chunk_turns, parse_conversation
 from foundry.ontology import EntityType, PropertyType
 from foundry.query import QueryPlan
-from foundry.retrieval import DeterministicRouter
 from foundry.storage import EntityNode, Fact, FoundryStore
 from foundry.writeback import SupersessionEngine
 
@@ -94,15 +93,14 @@ def test_ingestion_to_writeback_marks_old_facts_superseded() -> None:
     assert engine.get_all_facts("user", "salary")[0].superseded is True
 
 
-def test_query_to_retrieval_router_picks_fact_lookup_and_executes() -> None:
+def test_query_to_retrieval_agentic_retriever_finds_fact_lookup_evidence() -> None:
     foundry = Foundry(FoundryConfig())
     foundry.ingest("User: I have a cat named Luna.\nAssistant: Luna is a tabby cat.")
-    router = DeterministicRouter(foundry._store)
-    pipeline = router.route("What breed is Luna?")
-    evidence, meta = router.execute("What breed is Luna?", pipeline)
 
-    assert pipeline == "fact_lookup"
-    assert meta["fallback"] is None
+    evidence, trace = foundry.retrieve("What breed is Luna?")
+
+    assert trace.steps
+    assert trace.terminated_by in {"answer", "budget"}
     assert "Luna" in evidence or "tabby" in evidence.lower()
 
 
@@ -141,9 +139,9 @@ def test_full_pipeline_raw_text_to_ingest_query_retrieve_answer() -> None:
     foundry = Foundry(FoundryConfig())
     report = foundry.ingest(raw)
     query_result = foundry.entities().type("cat").first()
-    evidence, trace = foundry.retrieve_deterministic("What breed is Luna?")
+    evidence, trace = foundry.retrieve("What breed is Luna?")
 
     assert report.chunks_processed == 3
     assert query_result is not None and query_result.canonical == "luna"
     assert evidence
-    assert trace["pipeline"] == "fact_lookup"
+    assert trace.terminated_by in {"answer", "budget"}

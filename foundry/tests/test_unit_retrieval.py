@@ -111,53 +111,107 @@ class TestRetrievalBudget:
 
 
 # ---------------------------------------------------------------------------
-# DeterministicRouter
+# AgenticRetriever tool planning
 # ---------------------------------------------------------------------------
 
-class TestDeterministicRouter:
-    """Tests for the DeterministicRouter (regex-based question routing)."""
+class TestAgenticRetrieverToolPlanning:
+    """Tests verifying AgenticRetriever always-on tool planning behavior."""
 
-    def test_route_factual(self):
-        """Factual questions route to fact_lookup pipeline."""
-        from foundry.retrieval import DeterministicRouter
-        router = DeterministicRouter()
-        result = router.route("What color is the user's car?")
-        assert result in ("fact_lookup", "agentic")
+    def _make_retriever(self, extra_tools: dict | None = None):
+        from foundry.retrieval import AgenticRetriever, RetrievalBudget
 
-    def test_route_temporal(self):
-        """Temporal questions route to temporal pipeline."""
-        from foundry.retrieval import DeterministicRouter
-        router = DeterministicRouter()
-        result = router.route("When did the user adopt their cat?")
-        assert result in ("temporal", "agentic")
+        tools_used: list[str] = []
 
-    def test_route_aggregation(self):
-        """Counting questions route to aggregation pipeline."""
-        from foundry.retrieval import DeterministicRouter
-        router = DeterministicRouter()
-        result = router.route("How many pets does the user have?")
-        assert result in ("aggregation", "agentic")
+        def search_memory(query: str, top_k: int = 5) -> list[dict]:
+            tools_used.append("search_memory")
+            return [{"text": "some result", "score": 0.9, "turn_id": 0, "chunk_id": 0}]
 
-    def test_route_comparison(self):
-        """Comparison questions route to comparison pipeline."""
-        from foundry.retrieval import DeterministicRouter
-        router = DeterministicRouter()
-        result = router.route("Which pet is more expensive?")
-        assert result in ("comparison", "agentic")
+        def answer(evidence: str) -> str:
+            tools_used.append("answer")
+            return evidence
 
-    def test_route_fallback(self):
-        """Unknown question types fall back to agentic."""
-        from foundry.retrieval import DeterministicRouter
-        router = DeterministicRouter()
-        result = router.route("Tell me something interesting")
-        assert result == "agentic"
+        toolkit = {"search_memory": search_memory, "answer": answer}
+        if extra_tools:
+            toolkit.update(extra_tools)
 
-    def test_route_preference(self):
-        """Preference questions identified by pattern."""
-        from foundry.retrieval import DeterministicRouter
-        router = DeterministicRouter()
-        result = router.route("Does the user prefer cats or dogs?")
-        assert result in ("preference", "agentic")
+        retriever = AgenticRetriever(toolkit, budget=RetrievalBudget(max_steps=4))
+        return retriever, tools_used
+
+    def test_retrieve_always_calls_search_memory(self):
+        """retrieve() always starts by calling search_memory — it is always-on."""
+        retriever, tools_used = self._make_retriever()
+        retriever.retrieve("What color is the user's car?")
+        assert "search_memory" in tools_used
+
+    def test_retrieve_temporal_question_uses_search_temporal(self):
+        """retrieve() uses search_temporal tool for temporal questions."""
+        from foundry.retrieval import AgenticRetriever, RetrievalBudget
+        tools_used: list[str] = []
+
+        def search_memory(query: str, top_k: int = 5) -> list[dict]:
+            tools_used.append("search_memory")
+            return []
+
+        def search_temporal(query: str, top_k: int = 5, entities: list | None = None) -> dict:
+            tools_used.append("search_temporal")
+            return {"matched_events": [{"event": "adopted cat", "date": "2021-01-01T00:00:00", "turn_id": 0, "text": "adopted"}], "bucket": "contains"}
+
+        def answer(evidence: str) -> str:
+            tools_used.append("answer")
+            return evidence
+
+        retriever = AgenticRetriever(
+            {"search_memory": search_memory, "search_temporal": search_temporal, "answer": answer},
+            budget=RetrievalBudget(max_steps=4),
+        )
+        retriever.retrieve("When did the user adopt their cat?")
+        assert "search_temporal" in tools_used
+
+    def test_retrieve_aggregation_question_always_starts_with_search_memory(self):
+        """retrieve() starts with search_memory even for aggregation questions — it is always-on."""
+        from foundry.retrieval import AgenticRetriever, RetrievalBudget
+        tools_used: list[str] = []
+
+        def search_memory(query: str, top_k: int = 5) -> list[dict]:
+            tools_used.append("search_memory")
+            return []
+
+        def aggregate(entity_type: str, op: str, property_predicate: str = "") -> dict:
+            tools_used.append("aggregate")
+            return {"result": 3, "entities": ["luna", "mochi", "goldie"]}
+
+        def answer(evidence: str) -> str:
+            tools_used.append("answer")
+            return evidence
+
+        retriever = AgenticRetriever(
+            {"search_memory": search_memory, "aggregate": aggregate, "answer": answer},
+            budget=RetrievalBudget(max_steps=4),
+        )
+        evidence, trace = retriever.retrieve("How many pets does the user have?")
+        assert "search_memory" in tools_used
+        assert trace.terminated_by in {"answer", "budget", "no_action"}
+
+    def test_retrieve_returns_trace_with_steps(self):
+        """retrieve() always returns a RetrievalTrace with at least one step."""
+        from foundry.retrieval import AgenticRetriever, RetrievalBudget, RetrievalTrace
+        retriever, _ = self._make_retriever()
+        evidence, trace = retriever.retrieve("What color is the user's car?")
+        assert isinstance(trace, RetrievalTrace)
+        assert len(trace.steps) >= 1
+
+    def test_retrieve_terminates_within_budget(self):
+        """retrieve() terminates within the configured max_steps budget."""
+        from foundry.retrieval import AgenticRetriever, RetrievalBudget
+        retriever, _ = self._make_retriever()
+        evidence, trace = retriever.retrieve("Tell me something interesting")
+        assert len(trace.steps) <= 5  # max_steps=4 + optional terminal step
+
+    def test_retrieve_terminated_by_is_populated(self):
+        """retrieve() sets terminated_by to a recognized reason."""
+        retriever, _ = self._make_retriever()
+        evidence, trace = retriever.retrieve("Does the user prefer cats or dogs?")
+        assert trace.terminated_by in {"answer", "budget", "no_action", "error"}
 
 
 # ---------------------------------------------------------------------------

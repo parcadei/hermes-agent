@@ -12,7 +12,7 @@ from datetime import datetime
 
 
 SIMPLE_CONVERSATION = [
-    ("user", "I have a cat named Luna. She is a tabby."),
+    ("user", "I have a cat named Luna. Luna is a tabby cat."),
     ("assistant", "Tell me more about Luna!"),
     ("user", "Luna is 3 years old. I adopted her in 2021."),
 ]

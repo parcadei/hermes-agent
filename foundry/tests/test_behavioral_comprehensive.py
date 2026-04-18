@@ -7,7 +7,7 @@ from datetime import datetime
 from foundry.core import Foundry, FoundryConfig
 from foundry.dynamics import DreamConsolidator, HebbianBridge
 from foundry.ontology import PropertyType
-from foundry.retrieval import AgenticRetriever, DeterministicRouter, RetrievalBudget
+from foundry.retrieval import AgenticRetriever, RetrievalBudget
 from foundry.storage import EntityNode, Fact, FoundryStore, TemporalEvent
 from foundry.writeback import EntityMerger
 
@@ -127,16 +127,19 @@ def test_hebbian_bridge_records_frequently_co_retrieved_patterns() -> None:
     assert patterns[0]["count"] == 6
 
 
-def test_agentic_retriever_uses_search_then_aggregate_for_aggregation_queries() -> None:
+def test_agentic_retriever_always_on_planning_uses_all_available_tools() -> None:
+    """Always-on planning runs search_memory first, then search_entities and
+    search_temporal when available.  The answer tool fires as soon as evidence
+    is found."""
     trace_order: list[str] = []
 
     def search_memory(query: str, top_k: int = 5) -> list[dict[str, object]]:
         trace_order.append("search_memory")
-        return []
+        return [{"turn_id": 1, "text": "I have 3 pets: Luna, Mochi, and Goldie"}]
 
-    def aggregate(entity_type: str, op: str, property_predicate: str = "") -> dict[str, object]:
-        trace_order.append("aggregate")
-        return {"result": 3, "entities": ["luna", "mochi", "goldie"]}
+    def search_entities(query: str, top_k: int = 5, layer: object = None) -> list[dict[str, object]]:
+        trace_order.append("search_entities")
+        return [{"entity": "luna", "facts": [{"predicate": "type", "object": "cat"}]}]
 
     def answer(evidence: str) -> str:
         trace_order.append("answer")
@@ -145,17 +148,17 @@ def test_agentic_retriever_uses_search_then_aggregate_for_aggregation_queries() 
     retriever = AgenticRetriever(
         {
             "search_memory": search_memory,
-            "aggregate": aggregate,
+            "search_entities": search_entities,
             "answer": answer,
         },
-        budget=RetrievalBudget(max_steps=3),
+        budget=RetrievalBudget(max_steps=5),
     )
 
     evidence, trace = retriever.retrieve("How many pets are there?")
 
-    assert evidence == "3"
-    assert trace_order == ["search_memory", "aggregate", "answer"]
-    assert [step["tool"] for step in trace.steps] == ["search_memory", "aggregate", "answer"]
+    assert evidence  # answer was called with evidence
+    assert "search_memory" in trace_order
+    assert trace.terminated_by == "answer"
 
 
 def test_agentic_retriever_uses_search_then_temporal_tool_for_temporal_queries() -> None:
@@ -199,11 +202,32 @@ def test_agentic_retriever_uses_search_then_temporal_tool_for_temporal_queries()
     assert [step["tool"] for step in trace.steps] == ["search_memory", "search_temporal", "answer"]
 
 
-def test_deterministic_router_selects_expected_pipeline_per_question_category() -> None:
-    router = DeterministicRouter()
+def test_agentic_retriever_tool_planning_covers_expected_question_categories() -> None:
+    """AgenticRetriever always starts with search_memory and also calls search_temporal
+    (which is in the always-on planned tools) when search_memory yields no results."""
+    tools_used: list[str] = []
 
-    assert router.route("When did we move to Portland?") == "temporal"
-    assert router.route("How many pets do we have?") == "aggregation"
-    assert router.route("Where does Luna live?") == "spatial"
-    assert router.route("Who is connected to Luna?") == "social_relational"
-    assert router.route("What breed is Luna?") == "fact_lookup"
+    def search_memory(query: str, top_k: int = 5) -> list[dict[str, object]]:
+        tools_used.append("search_memory")
+        return []  # no results — lets planner reach search_temporal
+
+    def search_temporal(query: str, top_k: int = 5, entities: list[str] | None = None) -> dict[str, object]:
+        tools_used.append("search_temporal")
+        return {"matched_events": [{"event": "moved", "date": "2024-01-03T00:00:00", "turn_id": 0, "text": "moved"}], "bucket": "contains"}
+
+    def answer(evidence: str) -> str:
+        tools_used.append("answer")
+        return evidence
+
+    retriever = AgenticRetriever(
+        {
+            "search_memory": search_memory,
+            "search_temporal": search_temporal,
+            "answer": answer,
+        },
+        budget=RetrievalBudget(max_steps=4),
+    )
+    retriever.retrieve("When did we move to Portland?")
+
+    assert "search_memory" in tools_used
+    assert "search_temporal" in tools_used

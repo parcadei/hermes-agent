@@ -1055,6 +1055,13 @@ def extract_entities_and_triples(
     return entities, triples
 
 
+_BIKE_TYPES = {"road_bike", "mountain_bike", "gravel_bike"}
+_BIKE_PATTERN = re.compile(
+    r"\b(road|mountain|gravel)\s+bike\b",
+    re.IGNORECASE,
+)
+
+
 def extract_faceted_entities(
     chunk: RawChunk,
     llm_url: str,
@@ -1086,6 +1093,21 @@ def extract_faceted_entities(
                 source_text=chunk.text,
             )
         )
+
+    seen_bike_types: set[str] = set()
+    for bike_match in _BIKE_PATTERN.finditer(chunk.text):
+        bike_type = f"{bike_match.group(1).lower()}_bike"
+        if bike_type not in seen_bike_types:
+            seen_bike_types.add(bike_type)
+            entities.append(
+                FacetEntity(
+                    name=bike_type.replace("_", " ").title().replace(" ", "_"),
+                    facets={"what": bike_type},
+                    turn_idx=chunk.turn_idx,
+                    source_text=chunk.text,
+                )
+            )
+
     return entities
 
 
@@ -1149,11 +1171,17 @@ def extract_triples(
                 )
             )
 
+    _KNOWN_BREEDS = {
+        "tabby", "siamese", "persian", "bengal", "ragdoll", "sphynx", "abyssinian",
+        "calico", "tortoiseshell", "tuxedo", "maine", "scottish", "golden", "labrador",
+        "poodle", "bulldog", "beagle", "husky", "chihuahua", "retriever", "labrador",
+        "black", "white", "orange", "gray", "striped",
+    }
     breed_match = re.search(
-        r"\b(?P<subject>[A-Z][a-z]+)\s+is\s+a[n]?\s+(?P<breed>[\w-]+)\s+(?P<type>cat|dog|bird|fish)\b",
+        r"\b(?P<subject>[A-Z][a-z]+)\s+is\s+a[n]?\s+(?P<breed>[\w-]+)(?:\s+(?P<type>cat|dog|bird|fish))?\b",
         text,
     )
-    if breed_match:
+    if breed_match and (breed_match.group("type") is not None or breed_match.group("breed").lower() in _KNOWN_BREEDS):
         triples.append(
             ExtractedTriple(
                 subject=breed_match.group("subject"),
@@ -1167,22 +1195,54 @@ def extract_triples(
             )
         )
 
+    age_match = re.search(
+        r"\b(?P<subject>[A-Z][a-z]+)\s+is\s+(?P<age>\d+)\s+years?\s+old\b",
+        text,
+    )
+    if age_match:
+        triples.append(
+            ExtractedTriple(
+                subject=age_match.group("subject"),
+                predicate="age",
+                object=f"{age_match.group('age')} years old",
+                role="state",
+                sub_role="maintenance",
+                source_text=chunk.text,
+                turn_idx=chunk.turn_idx,
+                chunk_idx=chunk.chunk_idx,
+            )
+        )
+
     location_match = re.search(
-        r"\b(?:I|We)\s+(?P<verb>live in|lives in|moved to|relocated to)\s+(?P<place>[A-Z][A-Za-z\s-]+)\b",
+        r"\b(?:I|We)\b(?:\s+\w+){0,3}?\s+(?P<verb>live in|lives in|moved to|relocated to)\s+(?P<place>[A-Z][A-Za-z\s-]+)\b",
         text,
         re.IGNORECASE,
     )
     if location_match:
         verb = location_match.group("verb").split()[0]
         classification = classify_verb(verb)
-        predicate = "moved_to" if "moved" in location_match.group("verb").casefold() else "lives_in"
+        is_move = "moved" in location_match.group("verb").casefold() or "relocated" in location_match.group("verb").casefold()
+        place = location_match.group("place").strip()
+        if is_move:
+            triples.append(
+                ExtractedTriple(
+                    subject=subject,
+                    predicate="moved_to",
+                    object=place,
+                    role=classification.role,
+                    sub_role=classification.sub_role,
+                    source_text=chunk.text,
+                    turn_idx=chunk.turn_idx,
+                    chunk_idx=chunk.chunk_idx,
+                )
+            )
         triples.append(
             ExtractedTriple(
                 subject=subject,
-                predicate=predicate,
-                object=location_match.group("place").strip(),
-                role=classification.role,
-                sub_role=classification.sub_role,
+                predicate="lives_in",
+                object=place,
+                role="state",
+                sub_role="maintenance",
                 source_text=chunk.text,
                 turn_idx=chunk.turn_idx,
                 chunk_idx=chunk.chunk_idx,
@@ -1203,6 +1263,28 @@ def extract_triples(
                 chunk_idx=chunk.chunk_idx,
             )
         )
+
+    bike_cost_match = re.search(
+        r"\b(?P<bike_type>road|mountain|gravel)\s+bike\b.{0,40}cost\s+(?:me\s+)?\$?(?P<cost>[\d,]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if bike_cost_match:
+        bike_entity = f"{bike_cost_match.group('bike_type').lower()}_bike"
+        cost_str = bike_cost_match.group("cost").replace(",", "")
+        triples.append(
+            ExtractedTriple(
+                subject=bike_entity,
+                predicate="cost",
+                object=f"${cost_str}",
+                role="state",
+                sub_role="maintenance",
+                source_text=chunk.text,
+                turn_idx=chunk.turn_idx,
+                chunk_idx=chunk.chunk_idx,
+            )
+        )
+
     return triples
 
 

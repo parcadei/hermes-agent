@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from foundry.core import Foundry, FoundryConfig
 from foundry.query import _parse_subqueries, decompose_query
-from foundry.retrieval import DeterministicRouter
+from foundry.retrieval import AgenticRetriever, RetrievalBudget
 from foundry.storage import FoundryStore
 
 
@@ -212,100 +212,110 @@ def test_decompose_query_handles_very_long_questions() -> None:
     ]
 
 
-def test_deterministic_router_executes_multi_hop_subqueries_sequentially() -> None:
-    router = DeterministicRouter(FoundryStore(), llm_url="http://llm")
-    original = "What is the country of origin of the sport played by Christian Abbiati?"
-    asked: list[str] = []
+def test_agentic_retriever_executes_multi_hop_subqueries_via_search_memory() -> None:
+    """AgenticRetriever processes multi-hop questions through search_memory tool."""
+    search_calls: list[str] = []
 
-    def fake_fact_lookup(question: str, trace) -> str:  # type: ignore[no-untyped-def]
-        del trace
-        asked.append(question)
-        if len(asked) == 1:
-            return "turn 1: Christian Abbiati played football."
-        return "turn 2: Football originated in England."
+    def search_memory(query: str, top_k: int = 5) -> list[dict[str, object]]:
+        search_calls.append(query)
+        if "Christian Abbiati" in query:
+            return [{"text": "Christian Abbiati played football.", "score": 0.9, "turn_id": 0, "chunk_id": 0}]
+        return [{"text": "Football originated in England.", "score": 0.8, "turn_id": 1, "chunk_id": 1}]
 
-    with patch(
-        "foundry.retrieval.decompose_query",
-        return_value=[
-            "What sport did Christian Abbiati play?",
-            "What is the country of origin of {answer_1}?",
-        ],
-    ):
-        router._execute_fact_lookup = fake_fact_lookup  # type: ignore[method-assign]
-        evidence, meta = router.execute(original, "multi_hop")
+    def answer(evidence: str) -> str:
+        return evidence
 
-    assert router.route(original) == "multi_hop"
-    assert asked == [
-        "What sport did Christian Abbiati play?",
-        "What is the country of origin of football?",
-    ]
-    assert "England" in evidence
-    assert meta["pipeline"] == "multi_hop"
-    assert meta["fallback"] is None
-
-
-def test_deterministic_router_spatial_pipeline_handles_birth_predicates() -> None:
-    router = DeterministicRouter(FoundryStore())
-    hits = [
-        {
-            "entity": "jesus",
-            "facts": [
-                {"predicate": "born", "object": "Bethlehem"},
-                {"predicate": "birthplace", "object": "Bethlehem"},
-            ],
-        }
-    ]
-
-    with patch("foundry.retrieval.search_entities", return_value=hits):
-        evidence, meta = router.execute("Where was Jesus born?", "spatial")
-
-    assert "jesus: born Bethlehem" in evidence
-    assert meta["pipeline"] == "spatial"
-    assert meta["fallback"] is None
-
-
-def test_deterministic_router_routes_reference_multi_hop_example_to_multi_hop() -> None:
-    router = DeterministicRouter()
-
-    assert (
-        router.route("Where was the creator of the religion Karl Lueger followed born?")
-        == "multi_hop"
+    retriever = AgenticRetriever(
+        {"search_memory": search_memory, "answer": answer},
+        budget=RetrievalBudget(max_steps=4),
     )
 
+    evidence, trace = retriever.retrieve("What is the country of origin of the sport played by Christian Abbiati?")
 
-def test_deterministic_router_routes_non_relational_who_queries_to_fact_lookup() -> None:
-    router = DeterministicRouter()
-
-    assert router.route("Who created Christianity?") == "fact_lookup"
-    assert router.route("Who is connected to Luna?") == "social_relational"
-
-
-def test_deterministic_router_falls_back_when_decomposition_returns_original_question() -> None:
-    router = DeterministicRouter(FoundryStore(), llm_url="http://llm")
-    question = "What is the country of origin of the sport played by Christian Abbiati?"
-
-    with patch("foundry.retrieval.decompose_query", return_value=[question]):
-        evidence, meta = router.execute(question, "multi_hop")
-
-    assert evidence == ""
-    assert meta["pipeline"] == "multi_hop"
-    assert meta["fallback"] == "agentic"
+    assert len(trace.steps) >= 1
+    assert trace.terminated_by in {"answer", "budget"}
+    assert any(step["tool"] == "search_memory" for step in trace.steps)
 
 
-def test_deterministic_router_falls_back_when_subquery_requires_agentic_routing() -> None:
-    router = DeterministicRouter(FoundryStore(), llm_url="http://llm")
-    question = "How old is the creator of the religion Karl Lueger followed?"
+def test_agentic_retriever_always_starts_with_search_memory_tool() -> None:
+    """AgenticRetriever always begins retrieval with a search_memory call."""
+    search_calls: list[str] = []
 
-    with patch(
-        "foundry.retrieval.decompose_query",
-        return_value=[
-            "What religion did Karl Lueger follow?",
-            "Who created {answer_1}?",
-            "How old is {answer_2}?",
-        ],
-    ):
-        evidence, meta = router.execute(question, "multi_hop")
+    def search_memory(query: str, top_k: int = 5) -> list[dict[str, object]]:
+        search_calls.append(query)
+        return [{"text": "Luna is a tabby cat.", "score": 0.9, "turn_id": 0, "chunk_id": 0}]
 
-    assert evidence == ""
-    assert meta["pipeline"] == "multi_hop"
-    assert meta["fallback"] == "agentic"
+    def answer(evidence: str) -> str:
+        return evidence
+
+    retriever = AgenticRetriever(
+        {"search_memory": search_memory, "answer": answer},
+        budget=RetrievalBudget(max_steps=3),
+    )
+
+    retriever.retrieve("What breed is Luna?")
+
+    assert len(search_calls) >= 1
+
+
+def test_agentic_retriever_returns_evidence_string_and_trace() -> None:
+    """retrieve() returns a non-empty evidence string and a populated trace."""
+
+    def search_memory(query: str, top_k: int = 5) -> list[dict[str, object]]:
+        return [{"text": "Football originated in England.", "score": 0.9, "turn_id": 0, "chunk_id": 0}]
+
+    def answer(evidence: str) -> str:
+        return evidence
+
+    retriever = AgenticRetriever(
+        {"search_memory": search_memory, "answer": answer},
+        budget=RetrievalBudget(max_steps=3),
+    )
+
+    evidence, trace = retriever.retrieve("Where was the sport played by Christian Abbiati from?")
+
+    assert isinstance(evidence, str)
+    assert len(trace.steps) >= 1
+
+
+def test_agentic_retriever_handles_empty_search_results_without_crashing() -> None:
+    """AgenticRetriever does not crash when search returns no results."""
+
+    def search_memory(query: str, top_k: int = 5) -> list[dict[str, object]]:
+        return []
+
+    def answer(evidence: str) -> str:
+        return evidence
+
+    retriever = AgenticRetriever(
+        {"search_memory": search_memory, "answer": answer},
+        budget=RetrievalBudget(max_steps=2),
+    )
+
+    evidence, trace = retriever.retrieve("What is the country of origin of the sport played by Christian Abbiati?")
+
+    assert isinstance(evidence, str)
+    assert trace.terminated_by in {"answer", "budget", "no_action", "error"}
+
+
+def test_agentic_retriever_respects_budget_max_steps() -> None:
+    """AgenticRetriever terminates once max_steps is reached."""
+    call_count = 0
+
+    def search_memory(query: str, top_k: int = 5) -> list[dict[str, object]]:
+        nonlocal call_count
+        call_count += 1
+        return []
+
+    def answer(evidence: str) -> str:
+        return evidence
+
+    budget = RetrievalBudget(max_steps=2)
+    retriever = AgenticRetriever(
+        {"search_memory": search_memory, "answer": answer},
+        budget=budget,
+    )
+
+    evidence, trace = retriever.retrieve("complex multi-hop question about sports origins")
+
+    assert len(trace.steps) <= budget.max_steps + 1  # +1 for terminal answer step

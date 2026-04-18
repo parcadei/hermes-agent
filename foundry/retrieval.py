@@ -5,12 +5,11 @@ It provides:
 
 - thin tool wrappers over the storage and query layers
 - within-query deduplication of turn observations
-- deterministic regex-based routing for common question classes
-- a bounded, tool-driven retriever scaffold that does not require an LLM
+- an agentic retriever with always-on tool planning
 
-The implementation deliberately stays deterministic and stdlib-first. When no
-runtime LLM/tool orchestration is available, ``AgenticRetriever`` degrades
-gracefully to deterministic tool execution and trace capture.
+The implementation stays stdlib-first. When no runtime LLM/tool orchestration
+is available, ``AgenticRetriever`` degrades gracefully to deterministic tool
+execution and trace capture.
 """
 
 from __future__ import annotations
@@ -47,90 +46,6 @@ _DEFAULT_TOP_K = 10
 _OBSERVATION_SEPARATOR = "\n\n"
 _VALID_LAYERS = {layer.value for layer in GroundingLayer}
 RerankerFn = Callable[[str, list[dict[str, Any]]], list[dict[str, Any]]]
-_TEMPORAL_PATTERNS = (
-    re.compile(r"\bwhen\b", re.IGNORECASE),
-    re.compile(r"\bbefore\b|\bafter\b|\bduring\b|\bbetween\b", re.IGNORECASE),
-    re.compile(r"\bhow long\b|\bhow far\b|\bago\b", re.IGNORECASE),
-    re.compile(r"\bdate\b|\btime\b|\blast\b|\bfirst\b", re.IGNORECASE),
-)
-_AGGREGATION_PATTERNS = (
-    re.compile(r"\bhow many\b", re.IGNORECASE),
-    re.compile(r"\bcount\b|\bnumber of\b|\btotal\b", re.IGNORECASE),
-    re.compile(r"\blist all\b|\bwhich .* are\b", re.IGNORECASE),
-)
-_PREFERENCE_PATTERNS = (
-    re.compile(r"\bprefer\b", re.IGNORECASE),
-    re.compile(r"\bfavorite\b|\bfavourite\b|\blikes? better\b", re.IGNORECASE),
-)
-_COMPARISON_PATTERNS = (
-    re.compile(r"\bcompare\b|\bversus\b|\bvs\.?\b", re.IGNORECASE),
-    re.compile(r"\bmore\b|\bless\b|\bbetter\b|\bworse\b|\bcheaper\b|\bolder\b", re.IGNORECASE),
-)
-_SPATIAL_PATTERNS = (
-    re.compile(r"\bwhere\b", re.IGNORECASE),
-    re.compile(r"\blocated\b|\blives?\b|\bstays?\b|\bvisited\b", re.IGNORECASE),
-)
-_SOCIAL_PATTERNS = (
-    re.compile(r"\bfriend\b|\bfamily\b|\bcolleague\b|\bknows?\b", re.IGNORECASE),
-    re.compile(r"\bconnected\b|\brelationship\b|\brelated to\b", re.IGNORECASE),
-)
-_META_PATTERNS = (
-    re.compile(r"\bdo(es)? (the )?user know\b", re.IGNORECASE),
-    re.compile(r"\bhas\b|\bhave\b", re.IGNORECASE),
-)
-_MULTI_HOP_START_RE = re.compile(r"^(what|which|who|where|when|how)\b", re.IGNORECASE)
-_MULTI_HOP_PHRASES = (
-    "country of origin",
-    "creator of",
-    "founder of",
-    "parent of",
-    "spouse of",
-    "capital of",
-    "birthplace of",
-    "played by",
-    "followed by",
-    "created by",
-    "founded by",
-    "written by",
-    "directed by",
-)
-_MULTI_HOP_RELATION_TERMS = (
-    "born",
-    "followed",
-    "played",
-    "created",
-    "founded",
-    "written",
-    "directed",
-)
-_TURN_PREFIX_RE = re.compile(r"^turn\s+\d+\s*:\s*", re.IGNORECASE)
-_ANSWER_FROM_EVIDENCE_PATTERNS = (
-    re.compile(r"\bplayed\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
-    re.compile(r"\bfollow(?:ed|s)?\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
-    re.compile(r"\blaunch(?:ed|es)?\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
-    re.compile(r"\bcreated by\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
-    re.compile(r"\bfounded by\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
-    re.compile(r"\bwritten by\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
-    re.compile(r"\bdirected by\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
-    re.compile(r"\bborn in\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
-    re.compile(r"\boriginated in\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
-    re.compile(r"\bfrom\s+(?P<answer>[^.?!,;]+)", re.IGNORECASE),
-    re.compile(r"\b(?:is|are|was|were)\s+(?P<answer>[^.?!]+)", re.IGNORECASE),
-)
-_SPATIAL_FACT_PREDICATES = {
-    "at",
-    "birth_place",
-    "birthplace",
-    "born",
-    "born_in",
-    "from",
-    "lives_in",
-    "location",
-    "place_of_birth",
-    "visited",
-}
-
-
 TOOLS: dict[str, dict[str, str]] = {
     "search_memory": {
         "signature": "(query: str) -> list[{turn_id, text, score}]",
@@ -370,33 +285,6 @@ def _facts_for_entity(entity: EntityNode, source_layer: str, *, only_current: bo
             rows.append(_annotated_fact_payload(fact, source_layer))
     rows.sort(key=lambda item: (-item["turn_id"], item["predicate"], item["object"]))
     return rows
-
-
-def _build_alias_index(store: FoundryStore) -> dict[str, set[str]]:
-    aliases: dict[str, set[str]] = {}
-    for entity in store.entity_graph.all_entities():
-        alias_set = {_normalize_name(alias) for alias in entity.aliases}
-        alias_set.add(entity.canonical)
-        aliases[entity.canonical] = alias_set
-    return aliases
-
-
-def augment_query(query: str, store: Optional[FoundryStore]) -> str:
-    """Expand the query with known aliases when possible."""
-
-    if store is None:
-        return query
-    alias_index = _build_alias_index(store)
-    expanded: list[str] = []
-    for token in query.split():
-        normalized = _normalize_name(token)
-        entity = store.entity_graph.get_entity(normalized)
-        if entity is None:
-            expanded.append(token)
-            continue
-        aliases = sorted(alias_index.get(entity.canonical, {entity.canonical}))
-        expanded.append(" ".join([token, *aliases]))
-    return " ".join(expanded)
 
 
 class CrossEncoderReranker:
@@ -789,40 +677,6 @@ def answer(evidence: str) -> str:
     return str(evidence or "")
 
 
-def _contains_pattern(question: str, patterns: Sequence[re.Pattern[str]]) -> bool:
-    return any(pattern.search(question) for pattern in patterns)
-
-
-def _extract_type_hint(question: str) -> str:
-    lowered = question.lower()
-    match = re.search(r"\bhow many ([a-z_ ]+?)\b(?: does| do| are| were| has| have|\?|$)", lowered)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r"\bnumber of ([a-z_ ]+?)\b(?: does| do| are| were|\?|$)", lowered)
-    if match:
-        return match.group(1).strip()
-    return ""
-
-
-def _extract_entity_candidates(question: str) -> list[str]:
-    candidates = re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b", question)
-    normalized = []
-    for candidate in candidates:
-        canonical = _normalize_name(candidate)
-        if canonical and canonical not in normalized:
-            normalized.append(canonical)
-    return normalized
-
-
-def _pipeline_confidence(evidence: str, trace: RetrievalTrace) -> float:
-    if not evidence.strip():
-        return 0.0
-    base = 0.5 if trace.terminated_by == "answer" else 0.1 if trace.terminated_by == "budget" else 0.0
-    efficiency = max(0.0, 0.3 - (len(trace.steps) / max(RetrievalBudget().max_steps, 1)) * 0.3)
-    evidence_bonus = 0.2 if len(evidence.strip()) > 20 else 0.0
-    return min(1.0, base + efficiency + evidence_bonus)
-
-
 def _summarize_memory_hits(hits: list[dict[str, Any]], *, limit: int = 5) -> str:
     lines = [
         f"turn {hit['turn_id']}: {hit['text']}"
@@ -830,343 +684,6 @@ def _summarize_memory_hits(hits: list[dict[str, Any]], *, limit: int = 5) -> str
         if str(hit.get("text", "")).strip()
     ]
     return "\n".join(lines)
-
-
-def _looks_multi_hop(question: str) -> bool:
-    normalized = str(question or "").strip().lower()
-    if not normalized or _MULTI_HOP_START_RE.search(normalized) is None:
-        return False
-    phrase_hits = sum(1 for phrase in _MULTI_HOP_PHRASES if phrase in normalized)
-    if phrase_hits >= 2:
-        return True
-    if phrase_hits >= 1 and any(term in normalized for term in _MULTI_HOP_RELATION_TERMS):
-        return True
-    if phrase_hits >= 1 and normalized.count(" of ") >= 2:
-        return True
-    return bool(re.search(r"\bof the\b.*\b(?:by|followed by|played by|created by|founded by)\b", normalized))
-
-
-def _substitute_answers(template: str, answers: Sequence[str]) -> str:
-    resolved = str(template or "")
-    for index, answer in enumerate(answers, start=1):
-        resolved = resolved.replace(f"{{answer_{index}}}", answer)
-    return resolved
-
-
-def _extract_short_answer(question: str, evidence: str) -> str:
-    del question
-    lines = [line.strip() for line in str(evidence or "").splitlines() if line.strip()]
-    for line in lines:
-        normalized = _TURN_PREFIX_RE.sub("", line)
-        candidate_segments = [normalized]
-        if ":" in normalized:
-            candidate_segments.append(normalized.split(":", 1)[1].strip())
-        for segment in candidate_segments:
-            for pattern in _ANSWER_FROM_EVIDENCE_PATTERNS:
-                match = pattern.search(segment)
-                if match:
-                    answer = match.group("answer").strip(" .,:;!?\"'")
-                    if answer:
-                        return answer
-    return ""
-
-
-class DeterministicRouter:
-    """Routes questions to hardcoded retrieval pipelines."""
-
-    def __init__(
-        self,
-        store: Optional[FoundryStore] = None,
-        *,
-        budget: RetrievalBudget = RetrievalBudget(),
-        reranker: Optional[RerankerFn] = None,
-        embed_fn: Optional[Callable[[str], np.ndarray]] = None,
-        llm_url: Optional[str] = None,
-        llm_model: str = "gpt-4o-mini",
-    ) -> None:
-        self.store = store
-        self.budget = budget
-        self.reranker = reranker
-        self.embed_fn = embed_fn
-        self.llm_url = llm_url
-        self.llm_model = llm_model
-
-    def route(self, question: str) -> str:
-        normalized = str(question or "").strip()
-        if not normalized:
-            return "agentic"
-
-        lowered = normalized.lower()
-        if _looks_multi_hop(lowered):
-            return "multi_hop"
-        return self._route_without_multi_hop(normalized)
-
-    def _route_without_multi_hop(self, question: str) -> str:
-        normalized = str(question or "").strip()
-        if not normalized:
-            return "agentic"
-
-        lowered = normalized.lower()
-        if _contains_pattern(lowered, _TEMPORAL_PATTERNS):
-            return "temporal"
-        if _contains_pattern(lowered, _AGGREGATION_PATTERNS):
-            return "aggregation"
-        if _contains_pattern(lowered, _PREFERENCE_PATTERNS):
-            return "preference"
-        if _contains_pattern(lowered, _COMPARISON_PATTERNS):
-            return "comparison"
-        if _contains_pattern(lowered, _SPATIAL_PATTERNS):
-            return "spatial" if "where" in lowered else "fact_lookup"
-        if _contains_pattern(lowered, _SOCIAL_PATTERNS):
-            return "social_relational"
-        if _contains_pattern(lowered, _META_PATTERNS) and ("remember" in lowered or "know" in lowered or "have" in lowered):
-            return "meta_cognitive"
-        if re.search(r"^(what|which|who|where|does|is|are|did|do)\b", lowered):
-            return "fact_lookup"
-        return "agentic"
-
-    def execute(self, question: str, pipeline: str) -> tuple[str, Any]:
-        trace = RetrievalTrace(question=question)
-        if self.store is None:
-            trace.terminated_by = "error"
-            return "", {"pipeline": pipeline, "confidence": 0.0, "trace": trace, "fallback": "agentic"}
-
-        handlers: dict[str, Callable[[str, RetrievalTrace], str]] = {
-            "fact_lookup": self._execute_fact_lookup,
-            "temporal": self._execute_temporal,
-            "aggregation": self._execute_aggregation,
-            "preference": self._execute_preference,
-            "comparison": self._execute_comparison,
-            "spatial": self._execute_spatial,
-            "social_relational": self._execute_social_relational,
-            "meta_cognitive": self._execute_meta_cognitive,
-            "multi_hop": self._execute_multi_hop,
-        }
-        handler = handlers.get(pipeline)
-        if handler is None:
-            trace.terminated_by = "no_action"
-            return "", {"pipeline": pipeline, "confidence": 0.0, "trace": trace, "fallback": "agentic"}
-
-        started = time.perf_counter()
-        evidence = handler(question, trace)
-        trace.total_ms = (time.perf_counter() - started) * 1000.0
-
-        if not self._validate(evidence, trace):
-            expanded = augment_query(question, self.store)
-            if expanded != question:
-                retry_trace = RetrievalTrace(question=expanded)
-                evidence = handler(expanded, retry_trace)
-                retry_trace.total_ms = (time.perf_counter() - started) * 1000.0
-                if self._validate(evidence, retry_trace):
-                    return evidence, {
-                        "pipeline": pipeline,
-                        "confidence": _pipeline_confidence(evidence, retry_trace),
-                        "trace": retry_trace,
-                        "fallback": None,
-                    }
-            return "", {"pipeline": pipeline, "confidence": 0.0, "trace": trace, "fallback": "agentic"}
-
-        return evidence, {
-            "pipeline": pipeline,
-            "confidence": _pipeline_confidence(evidence, trace),
-            "trace": trace,
-            "fallback": None,
-        }
-
-    def _validate(self, evidence: str, trace: RetrievalTrace) -> bool:
-        return bool(evidence.strip()) and _pipeline_confidence(evidence, trace) > 0.3
-
-    def _record(self, trace: RetrievalTrace, tool_name: str, arguments: dict[str, Any], observation: Any) -> None:
-        rendered = str(observation)
-        if len(rendered) > self.budget.max_observation_chars:
-            rendered = rendered[: self.budget.max_observation_chars]
-        trace.steps.append({"tool": tool_name, "arguments": arguments, "observation": rendered})
-
-    def _execute_fact_lookup(self, question: str, trace: RetrievalTrace) -> str:
-        hits = search_memory(
-            self.store,
-            question,
-            top_k=5,
-            reranker=self.reranker,
-            embed_fn=self.embed_fn,
-        )
-        self._record(trace, "search_memory", {"query": question}, hits)
-        evidence = _summarize_memory_hits(hits)
-        trace.evidence = evidence
-        trace.terminated_by = "answer" if evidence else "budget"
-        return evidence
-
-    def _execute_temporal(self, question: str, trace: RetrievalTrace) -> str:
-        temporal_hits = search_temporal(self.store, question, top_k=5)
-        memory_hits = search_memory(
-            self.store,
-            question,
-            top_k=3,
-            reranker=self.reranker,
-            embed_fn=self.embed_fn,
-        )
-        self._record(trace, "search_temporal", {"query": question}, temporal_hits)
-        self._record(trace, "search_memory", {"query": question}, memory_hits)
-        lines = [
-            f"{row['event']} @ {row['date']}"
-            for row in temporal_hits.get("matched_events", [])
-        ]
-        if memory_hits:
-            lines.append(_summarize_memory_hits(memory_hits, limit=2))
-        evidence = "\n".join(line for line in lines if line)
-        trace.evidence = evidence
-        trace.terminated_by = "answer" if evidence else "budget"
-        return evidence
-
-    def _execute_aggregation(self, question: str, trace: RetrievalTrace) -> str:
-        type_hint = _extract_type_hint(question)
-        if not type_hint:
-            trace.terminated_by = "no_action"
-            return ""
-        payload = aggregate(
-            self.store,
-            type_hint,
-            "count" if "how many" in question.lower() or "count" in question.lower() else "list",
-            limit=self.budget.aggregation_overfetch,
-        )
-        self._record(trace, "aggregate", {"entity_type": type_hint}, payload)
-        if isinstance(payload["result"], list):
-            evidence = ", ".join(payload["result"])
-        else:
-            evidence = str(payload["result"])
-        trace.evidence = evidence
-        trace.terminated_by = "answer" if evidence else "budget"
-        return evidence
-
-    def _execute_preference(self, question: str, trace: RetrievalTrace) -> str:
-        hits = search_entities(self.store, question, top_k=5)
-        self._record(trace, "search_entities", {"query": question}, hits)
-        evidence_parts = []
-        for hit in hits:
-            sentiment_facts = [
-                fact for fact in hit["facts"] if fact["predicate"] in {"likes", "dislikes", "prefers", "favorite"}
-            ]
-            if sentiment_facts:
-                evidence_parts.append(f"{hit['entity']}: {sentiment_facts[0]['predicate']} {sentiment_facts[0]['object']}")
-        evidence = "\n".join(evidence_parts)
-        trace.evidence = evidence
-        trace.terminated_by = "answer" if evidence else "budget"
-        return evidence
-
-    def _execute_comparison(self, question: str, trace: RetrievalTrace) -> str:
-        candidates = _extract_entity_candidates(question)
-        if len(candidates) < 2:
-            trace.terminated_by = "no_action"
-            return ""
-        rows = []
-        for candidate in candidates[:2]:
-            related = get_related(self.store, candidate)
-            self._record(trace, "get_related", {"entity": candidate}, related)
-            summary = ", ".join(
-                f"{fact['predicate']}={fact['object']}"
-                for fact in related.get("properties", [])[:3]
-            )
-            rows.append(f"{candidate}: {summary}")
-        evidence = "\n".join(rows)
-        trace.evidence = evidence
-        trace.terminated_by = "answer" if evidence else "budget"
-        return evidence
-
-    def _execute_spatial(self, question: str, trace: RetrievalTrace) -> str:
-        hits = search_entities(self.store, question, top_k=5)
-        self._record(trace, "search_entities", {"query": question}, hits)
-        lines = []
-        for hit in hits:
-            for fact in hit["facts"]:
-                if fact["predicate"] in _SPATIAL_FACT_PREDICATES:
-                    lines.append(f"{hit['entity']}: {fact['predicate']} {fact['object']}")
-        evidence = "\n".join(lines)
-        trace.evidence = evidence
-        trace.terminated_by = "answer" if evidence else "budget"
-        return evidence
-
-    def _execute_social_relational(self, question: str, trace: RetrievalTrace) -> str:
-        candidates = _extract_entity_candidates(question)
-        entity_name = candidates[0] if candidates else question
-        related = get_related(self.store, entity_name, max_hops=2)
-        self._record(trace, "get_related", {"entity": entity_name, "max_hops": 2}, related)
-        neighbors = related.get("neighbors", [])
-        evidence = ", ".join(neighbors[:10])
-        trace.evidence = evidence
-        trace.terminated_by = "answer" if evidence else "budget"
-        return evidence
-
-    def _execute_meta_cognitive(self, question: str, trace: RetrievalTrace) -> str:
-        hits = search_memory(self.store, question, top_k=3, reranker=self.reranker, embed_fn=self.embed_fn)
-        self._record(trace, "search_memory", {"query": question}, hits)
-        evidence = _summarize_memory_hits(hits, limit=3)
-        trace.evidence = evidence
-        trace.terminated_by = "answer" if evidence else "budget"
-        return evidence
-
-    def _execute_multi_hop(self, question: str, trace: RetrievalTrace) -> str:
-        subqueries = [question]
-        if self.llm_url:
-            subqueries = decompose_query(
-                question,
-                llm_url=self.llm_url,
-                llm_model=self.llm_model,
-                max_hops=3,
-            )
-        self._record(trace, "decompose_query", {"question": question}, subqueries)
-        if not subqueries:
-            trace.terminated_by = "no_action"
-            return ""
-        if len(subqueries) == 1 and str(subqueries[0]).strip() == str(question).strip():
-            trace.terminated_by = "no_action"
-            return ""
-        handlers: dict[str, Callable[[str, RetrievalTrace], str]] = {
-            "fact_lookup": self._execute_fact_lookup,
-            "temporal": self._execute_temporal,
-            "aggregation": self._execute_aggregation,
-            "preference": self._execute_preference,
-            "comparison": self._execute_comparison,
-            "spatial": self._execute_spatial,
-            "social_relational": self._execute_social_relational,
-            "meta_cognitive": self._execute_meta_cognitive,
-        }
-        answers: list[str] = []
-        final_evidence = ""
-        for index, template in enumerate(subqueries, start=1):
-            resolved_question = _substitute_answers(template, answers)
-            if "{answer_" in resolved_question:
-                trace.terminated_by = "budget"
-                break
-            pipeline = self._route_without_multi_hop(resolved_question)
-            if pipeline == "agentic":
-                trace.terminated_by = "no_action"
-                final_evidence = ""
-                break
-            handler = handlers.get(pipeline)
-            if handler is None:
-                trace.terminated_by = "no_action"
-                final_evidence = ""
-                break
-            final_evidence = handler(resolved_question, trace)
-            if not final_evidence.strip():
-                trace.terminated_by = "budget"
-                break
-            if index < len(subqueries):
-                answer = _extract_short_answer(resolved_question, final_evidence)
-                self._record(
-                    trace,
-                    "resolve_subquery",
-                    {"query": resolved_question, "pipeline": pipeline},
-                    {"answer": answer},
-                )
-                if not answer:
-                    trace.terminated_by = "budget"
-                    final_evidence = ""
-                    break
-                answers.append(answer)
-        trace.evidence = final_evidence
-        trace.terminated_by = "answer" if final_evidence else (trace.terminated_by or "budget")
-        return final_evidence
 
 
 class AgenticRetriever:
@@ -1200,12 +717,6 @@ class AgenticRetriever:
         self.dedup = DeduplicationTracker()
         self.toolkit = self._build_toolkit(toolkit)
         self.store = toolkit if isinstance(toolkit, FoundryStore) else None
-        self.router = DeterministicRouter(
-            self.store,
-            budget=budget,
-            reranker=reranker,
-            embed_fn=embed_fn,
-        )
 
     def _build_toolkit(self, toolkit: Any) -> Optional[dict[str, Callable[..., Any]]]:
         if toolkit is None:
@@ -1305,17 +816,11 @@ class AgenticRetriever:
             return "", trace
 
         evidence_parts: list[str] = []
-        route = self.router.route(trace.question)
         planned_tools: list[tuple[str, dict[str, Any]]] = [("search_memory", {"query": trace.question, "top_k": 5})]
-
-        if route == "temporal" and "search_temporal" in self.toolkit:
-            planned_tools.append(("search_temporal", {"query": trace.question, "top_k": 5}))
-        elif route == "aggregation" and "aggregate" in self.toolkit:
-            type_hint = _extract_type_hint(trace.question)
-            if type_hint:
-                planned_tools.append(("aggregate", {"entity_type": type_hint, "op": "count"}))
-        elif route in {"preference", "comparison", "spatial", "social_relational", "multi_hop"}:
+        if "search_entities" in self.toolkit:
             planned_tools.append(("search_entities", {"query": trace.question, "top_k": 5}))
+        if "search_temporal" in self.toolkit:
+            planned_tools.append(("search_temporal", {"query": trace.question, "top_k": 5}))
 
         for step_idx, (tool_name, arguments) in enumerate(planned_tools[: self.budget.max_steps], start=1):
             if (time.perf_counter() - started) * 1000.0 >= self.budget.max_total_ms:
@@ -1369,6 +874,5 @@ __all__ = [
     "DeduplicationTracker",
     "AgenticRetriever",
     "RetrievalTrace",
-    "DeterministicRouter",
     "RetrievalBudget",
 ]

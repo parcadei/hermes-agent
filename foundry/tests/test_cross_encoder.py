@@ -217,7 +217,7 @@ def test_foundry_reranker_is_optional(monkeypatch: pytest.MonkeyPatch) -> None:
     assert enabled._reranker.model_name == "stub-reranker"
 
 
-def test_foundry_passes_reranker_into_retrieval_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_foundry_passes_reranker_into_agentic_retriever(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeCrossEncoderReranker:
         def __init__(self, model_name: str, top_k: int = 10) -> None:
             self.model_name = model_name
@@ -237,26 +237,13 @@ def test_foundry_passes_reranker_into_retrieval_paths(monkeypatch: pytest.Monkey
         def retrieve(self, question: str) -> tuple[str, object]:
             return "agentic evidence", types.SimpleNamespace(terminated_by="answer")
 
-    class FakeDeterministicRouter:
-        def __init__(self, store: object, **kwargs: object) -> None:
-            captured["deterministic_reranker"] = kwargs.get("reranker")
-
-        def route(self, question: str) -> str:
-            return "fact_lookup"
-
-        def execute(self, question: str, pipeline: str) -> tuple[str, dict[str, object]]:
-            return "deterministic evidence", {"pipeline": pipeline}
-
     monkeypatch.setattr("foundry.core.CrossEncoderReranker", FakeCrossEncoderReranker)
     monkeypatch.setattr("foundry.core.AgenticRetriever", FakeAgenticRetriever)
-    monkeypatch.setattr("foundry.core.DeterministicRouter", FakeDeterministicRouter)
 
     foundry = Foundry(FoundryConfig(reranker_model="stub-reranker"))
 
     assert foundry.retrieve("what do you remember?")[0] == "agentic evidence"
-    assert foundry.retrieve_deterministic("what do you remember?")[0] == "deterministic evidence"
     assert getattr(captured["agentic_reranker"], "__self__", None) is foundry._reranker
-    assert getattr(captured["deterministic_reranker"], "__self__", None) is foundry._reranker
 
 
 def test_events_between_sorts_chronologically_with_turn_zero_regression() -> None:

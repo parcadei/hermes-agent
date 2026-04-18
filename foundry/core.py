@@ -1,7 +1,9 @@
 """Top-level Foundry API for the Engram memory system.
 
-This module wires together the deterministic storage, ingestion, query,
-writeback, and retrieval layers into one user-facing surface.
+This module wires together the storage, ingestion, query, writeback,
+and retrieval layers into one user-facing surface.  Entity and triple
+extraction is delegated to the v9 LLM extraction prompt (via
+``FoundryConfig.extraction_url``).
 """
 
 from __future__ import annotations
@@ -9,7 +11,6 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-import re
 import time
 from typing import Any, Optional
 
@@ -25,7 +26,6 @@ from foundry.ingestion import (
     extract_entities_and_triples,
     extract_faceted_entities,
     extract_temporal,
-    extract_triples,
     fact_from_triple,
     infer_type,
     parse_conversation,
@@ -37,7 +37,6 @@ from foundry.query import QueryPlan
 from foundry.retrieval import (
     AgenticRetriever,
     CrossEncoderReranker,
-    DeterministicRouter,
     RetrievalTrace,
     search_temporal as retrieval_search_temporal,
 )
@@ -45,54 +44,6 @@ from foundry.storage import EntityGraph, EntityNode, Fact, FoundryStore, RawChun
 from foundry.writeback import SupersessionEngine
 
 
-_AGE_RE = re.compile(
-    r"\b(?P<subject>[A-Z][a-z]+)\s+is(?:\s+just)?(?:\s+about)?\s+(?P<age>\d+(?:\s*-\s*\d+)?)\s+(?P<unit>years?|months?)\s+old\b",
-    re.IGNORECASE,
-)
-_PRONOUN_AGE_RE = re.compile(
-    r"\b(?:he|she|they)\s*(?:is|'s)\s+(?:just\s+)?(?:about\s+)?(?P<age>\d+(?:\s*-\s*\d+)?)\s+(?P<unit>years?|months?)\s+old\b",
-    re.IGNORECASE,
-)
-_ADOPTION_YEAR_RE = re.compile(r"\b(?:adopted|got|bought)\s+(?:her|him|them|it)?\s*in\s*(?P<year>\d{4})\b", re.IGNORECASE)
-_NAMED_ANIMAL_RE = re.compile(
-    r"\b(?:a|an|my|our|the)?\s*(?P<descriptor>[a-z]+(?:\s+[a-z]+){0,2})\s+named\s+(?P<name>[A-Z][\w-]+)\b",
-    re.IGNORECASE,
-)
-_LOCATION_FACT_RE = re.compile(
-    r"\b(?:i|we)(?:\s+\w+){0,2}\s+(?P<verb>live in|lives in|moved to|relocated to)\s+(?P<place>[A-Z][A-Za-z\s-]+?)(?:\s+(?:last|this|next)\s+\w+)?(?:[.,]|$)",
-    re.IGNORECASE,
-)
-_FAVORITE_RESTAURANT_RE = re.compile(
-    r"\b(?:favorite restaurant(?: used to be)?|new favorite(?: restaurant)?(?: is| called)?)\s+(?P<restaurant>[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)\b",
-    re.IGNORECASE,
-)
-_CALLED_PLACE_RE = re.compile(r"\bcalled\s+(?P<restaurant>[A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)*)\b")
-_BIKE_LIST_RE = re.compile(
-    r"\b(?:i|we)\s+have\s+\w+\s+bikes?\s*-\s*a\s+(?P<first>[a-z]+)\s+bike,\s*a\s+(?P<second>[a-z]+)\s+bike,\s+and\s+a\s+(?P<third>[a-z]+)\s+bike\b",
-    re.IGNORECASE,
-)
-_BIKE_COST_RE = re.compile(
-    r"\bmy\s+(?P<name>[a-z]+)\s+bike\s+is\s+(?P<model>[A-Z][\w-]*(?:\s+[A-Z0-9][\w-]*)*),\s*cost(?: me)?\s+\$?(?P<cost>[\d,]+)\b",
-    re.IGNORECASE,
-)
-_BREED_SIMPLE_RE = re.compile(r"\b(?P<subject>[A-Z][a-z]+)\s+is\s+a\s+(?P<breed>[a-z-]+)\b", re.IGNORECASE)
-_BREED_PRONOUN_RE = re.compile(r"\b(?:he|she|they)\s+is\s+a\s+(?P<breed>[a-z-]+)\b", re.IGNORECASE)
-
-_ANIMAL_TO_TYPE = {
-    "betta fish": ("fish", "betta"),
-    "bird": ("bird", ""),
-    "cat": ("cat", ""),
-    "dog": ("dog", ""),
-    "fish": ("fish", ""),
-    "golden retriever": ("dog", "golden_retriever"),
-    "hamster": ("hamster", ""),
-    "kitten": ("cat", ""),
-    "labrador mix": ("dog", "labrador_mix"),
-    "parrot": ("parrot", ""),
-    "rabbit": ("rabbit", ""),
-    "rescue dog": ("dog", ""),
-    "retriever": ("dog", "retriever"),
-}
 _SUPERSeding_PREDICATES = {
     "city",
     "favorite_restaurant",
@@ -191,34 +142,6 @@ def _entity_doc_text(entity: EntityNode) -> str:
     for facts in entity.facts.values():
         parts.extend(fact.object for fact in facts)
     return " ".join(str(part) for part in parts if str(part).strip())
-
-
-def _infer_descriptor_types(descriptor: str) -> tuple[Optional[str], Optional[str]]:
-    normalized = " ".join(str(descriptor or "").strip().lower().split())
-    if not normalized:
-        return None, None
-    if normalized in _ANIMAL_TO_TYPE:
-        entity_type, breed = _ANIMAL_TO_TYPE[normalized]
-        return entity_type, breed or None
-    parts = normalized.split()
-    if parts and parts[-1] in _ANIMAL_TO_TYPE:
-        entity_type, _breed = _ANIMAL_TO_TYPE[parts[-1]]
-        if parts[0] in {"adopted", "found", "got", "has", "have", "keep", "owned", "owns"}:
-            breed = None
-        else:
-            breed = _normalize_name(normalized) if len(parts) > 1 else None
-        return entity_type, breed
-    return None, None
-
-
-def _first_named_subject(chunk: RawChunk) -> Optional[str]:
-    for triple in extract_triples(chunk, llm_url=""):
-        if triple.subject and triple.subject != "user":
-            return triple.subject
-    match = re.search(r"\b([A-Z][a-z]+)\b", chunk.text)
-    if match:
-        return match.group(1)
-    return None
 
 
 class Foundry:
@@ -465,23 +388,6 @@ class Foundry:
             self._retrieval_counts[_normalize_name(question)] += 1
         return evidence, trace
 
-    def retrieve_deterministic(self, question: str) -> tuple[str, Any]:
-        router = DeterministicRouter(
-            self._store,
-            budget=self._retrieval_budget(),
-            llm_url=self.config.extraction_url,
-            llm_model=self.config.agent_model,
-            reranker=self._reranker.rerank if self._reranker is not None else None,
-        )
-        pipeline = router.route(question)
-        evidence, meta = router.execute(question, pipeline)
-        if meta.get("fallback") == "agentic":
-            fallback_evidence, trace = self.retrieve(question)
-            return fallback_evidence, {"pipeline": pipeline, "fallback": "agentic", "trace": trace}
-        if evidence.strip():
-            self._retrieval_counts[_normalize_name(question)] += 1
-        return evidence, meta
-
     def decompose(self, question: str) -> list[str]:
         """Decompose a multi-hop question into chained sub-queries."""
 
@@ -585,10 +491,8 @@ class Foundry:
 
         auto_entities: list[FacetEntity] = []
         auto_triples: list[ExtractedTriple] = []
-        auto_used_regex = False
-        llm_enabled = bool(self.config.extraction_url)
         if entities is None or triples is None:
-            auto_entities, auto_triples, auto_used_regex = _extract_entities_and_triples_with_mode(
+            auto_entities, auto_triples, _ = _extract_entities_and_triples_with_mode(
                 chunk,
                 self.config.extraction_url or "",
                 self.config.extraction_model,
@@ -596,8 +500,6 @@ class Foundry:
 
         entity_started = time.perf_counter()
         extracted_entities = list(entities if entities is not None else auto_entities)
-        if not llm_enabled or auto_used_regex:
-            extracted_entities.extend(self._supplemental_entities(chunk))
 
         chunk_entities: list[str] = []
         for extracted in extracted_entities:
@@ -628,8 +530,6 @@ class Foundry:
 
         triple_started = time.perf_counter()
         extracted_triples = list(triples if triples is not None else auto_triples)
-        if not llm_enabled or auto_used_regex:
-            extracted_triples.extend(self._supplemental_triples(chunk))
 
         facts_added = 0
         facts_superseded = 0
@@ -727,205 +627,5 @@ class Foundry:
                 for fact in facts:
                     self._store.properties.index(entity.canonical, predicate, fact.object, fact.object_type)
             self._store.bm25_entities.add(doc_id, _entity_doc_text(entity))
-
-    def _supplemental_entities(self, chunk: RawChunk) -> list[FacetEntity]:
-        rows: list[FacetEntity] = []
-
-        for match in _NAMED_ANIMAL_RE.finditer(chunk.text):
-            entity_type, _breed = _infer_descriptor_types(match.group("descriptor"))
-            if entity_type is None:
-                continue
-            rows.append(
-                FacetEntity(
-                    name=match.group("name"),
-                    facets={"what": entity_type},
-                    turn_idx=chunk.turn_idx,
-                    source_text=chunk.text,
-                )
-            )
-
-        bike_list = _BIKE_LIST_RE.search(chunk.text)
-        if bike_list:
-            for name in (bike_list.group("first"), bike_list.group("second"), bike_list.group("third")):
-                rows.append(
-                    FacetEntity(
-                        name=f"{name} bike",
-                        facets={"what": "bike"},
-                        turn_idx=chunk.turn_idx,
-                        source_text=chunk.text,
-                    )
-                )
-
-        return rows
-
-    def _supplemental_triples(self, chunk: RawChunk) -> list[ExtractedTriple]:
-        rows: list[ExtractedTriple] = []
-        last_named_subject = _first_named_subject(chunk)
-
-        for match in _NAMED_ANIMAL_RE.finditer(chunk.text):
-            entity_type, breed = _infer_descriptor_types(match.group("descriptor"))
-            if entity_type:
-                rows.append(
-                    ExtractedTriple(
-                        subject=match.group("name"),
-                        predicate="type",
-                        object=entity_type,
-                        source_text=chunk.text,
-                        turn_idx=chunk.turn_idx,
-                        chunk_idx=chunk.chunk_idx,
-                    )
-                )
-            if breed:
-                rows.append(
-                    ExtractedTriple(
-                        subject=match.group("name"),
-                        predicate="breed",
-                        object=breed.replace("_", " "),
-                        source_text=chunk.text,
-                        turn_idx=chunk.turn_idx,
-                        chunk_idx=chunk.chunk_idx,
-                    )
-                )
-
-        for match in _AGE_RE.finditer(chunk.text):
-            rows.append(
-                ExtractedTriple(
-                    subject=match.group("subject"),
-                    predicate="age",
-                    object=f"{match.group('age')} {match.group('unit')}".strip(),
-                    source_text=chunk.text,
-                    turn_idx=chunk.turn_idx,
-                    chunk_idx=chunk.chunk_idx,
-                )
-            )
-
-        for match in _BREED_SIMPLE_RE.finditer(chunk.text):
-            if match.group("breed").lower() in {"a", "an", "the"}:
-                continue
-            rows.append(
-                ExtractedTriple(
-                    subject=match.group("subject"),
-                    predicate="breed",
-                    object=match.group("breed"),
-                    source_text=chunk.text,
-                    turn_idx=chunk.turn_idx,
-                    chunk_idx=chunk.chunk_idx,
-                )
-            )
-
-        if last_named_subject is not None:
-            for match in _BREED_PRONOUN_RE.finditer(chunk.text):
-                rows.append(
-                    ExtractedTriple(
-                        subject=last_named_subject,
-                        predicate="breed",
-                        object=match.group("breed"),
-                        source_text=chunk.text,
-                        turn_idx=chunk.turn_idx,
-                        chunk_idx=chunk.chunk_idx,
-                    )
-                )
-            for match in _PRONOUN_AGE_RE.finditer(chunk.text):
-                rows.append(
-                    ExtractedTriple(
-                        subject=last_named_subject,
-                        predicate="age",
-                        object=f"{match.group('age')} {match.group('unit')}".strip(),
-                        source_text=chunk.text,
-                        turn_idx=chunk.turn_idx,
-                        chunk_idx=chunk.chunk_idx,
-                    )
-                )
-            adoption = _ADOPTION_YEAR_RE.search(chunk.text)
-            if adoption is not None:
-                rows.append(
-                    ExtractedTriple(
-                        subject=last_named_subject,
-                        predicate="adoption_year",
-                        object=adoption.group("year"),
-                        source_text=chunk.text,
-                        turn_idx=chunk.turn_idx,
-                        chunk_idx=chunk.chunk_idx,
-                    )
-                )
-
-        for match in _LOCATION_FACT_RE.finditer(chunk.text):
-            predicate = "lives_in"
-            rows.append(
-                ExtractedTriple(
-                    subject="user",
-                    predicate=predicate,
-                    object=match.group("place").strip(),
-                    source_text=chunk.text,
-                    turn_idx=chunk.turn_idx,
-                    chunk_idx=chunk.chunk_idx,
-                )
-            )
-
-        for match in _FAVORITE_RESTAURANT_RE.finditer(chunk.text):
-            rows.append(
-                ExtractedTriple(
-                    subject="user",
-                    predicate="favorite_restaurant",
-                    object=match.group("restaurant").strip(),
-                    source_text=chunk.text,
-                    turn_idx=chunk.turn_idx,
-                    chunk_idx=chunk.chunk_idx,
-                )
-            )
-
-        if "favorite" in chunk.text.casefold():
-            for match in _CALLED_PLACE_RE.finditer(chunk.text):
-                rows.append(
-                    ExtractedTriple(
-                        subject="user",
-                        predicate="favorite_restaurant",
-                        object=match.group("restaurant").strip(),
-                        source_text=chunk.text,
-                        turn_idx=chunk.turn_idx,
-                        chunk_idx=chunk.chunk_idx,
-                    )
-                )
-
-        bike_list = _BIKE_LIST_RE.search(chunk.text)
-        if bike_list:
-            for name in (bike_list.group("first"), bike_list.group("second"), bike_list.group("third")):
-                rows.append(
-                    ExtractedTriple(
-                        subject=f"{name} bike",
-                        predicate="type",
-                        object="bike",
-                        source_text=chunk.text,
-                        turn_idx=chunk.turn_idx,
-                        chunk_idx=chunk.chunk_idx,
-                    )
-                )
-
-        bike_cost = _BIKE_COST_RE.search(chunk.text)
-        if bike_cost:
-            bike_name = f"{bike_cost.group('name')} bike"
-            rows.append(
-                ExtractedTriple(
-                    subject=bike_name,
-                    predicate="type",
-                    object="bike",
-                    source_text=chunk.text,
-                    turn_idx=chunk.turn_idx,
-                    chunk_idx=chunk.chunk_idx,
-                )
-            )
-            rows.append(
-                ExtractedTriple(
-                    subject=bike_name,
-                    predicate="cost",
-                    object=bike_cost.group("cost"),
-                    source_text=chunk.text,
-                    turn_idx=chunk.turn_idx,
-                    chunk_idx=chunk.chunk_idx,
-                )
-            )
-
-        return rows
-
 
 __all__ = ["Foundry", "FoundryConfig"]
