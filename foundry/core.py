@@ -514,6 +514,7 @@ class Foundry:
             node.aliases.add(resolver.normalize(extracted.name))
             node.mention_turns.add(chunk.turn_idx)
             node.mention_chunks.add(chunk.chunk_idx)
+            self._store.mention_bridges.add(extracted.name, set(extracted.facets.values()))
             for type_label in entity_types:
                 node.register_type(type_label)
                 self._store.types.index(canonical, type_label)

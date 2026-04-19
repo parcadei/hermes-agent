@@ -129,6 +129,7 @@ def test_snapshot_serialization_schema_stability(tmp_path) -> None:
         "vector_meta.json",
         "vectors.npy",
         "types.json",
+        "mention_bridges.json",
         "properties.json",
         "temporal.json",
         "cooccurrence.json",

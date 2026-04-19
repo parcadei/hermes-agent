@@ -552,12 +552,90 @@ class TypeIndex:
 
     def __init__(self) -> None:
         self._index: dict[str, set[str]] = defaultdict(set)
+        self._subsumptions: dict[str, set[str]] = defaultdict(set)
+        self._reverse_subsumptions: dict[str, set[str]] = defaultdict(set)
+        self._subsumption_coverage: dict[tuple[str, str], float] = {}
+        self._type_assignments: dict[str, Counter[str]] = defaultdict(Counter)
 
     def index(self, entity_canonical: str, type_label: str) -> None:
         normalized_type = EntityType.normalize(type_label)
         if not normalized_type:
             return
-        self._index[normalized_type].add(_normalize_name(entity_canonical))
+        canonical = _normalize_name(entity_canonical)
+        self._index[normalized_type].add(canonical)
+        self._type_assignments[canonical][normalized_type] += 1
+
+    def add_subsumption(self, parent: str, child: str, coverage: float) -> None:
+        """Register parent→child type subsumption link."""
+
+        normalized_parent = EntityType.normalize(parent)
+        normalized_child = EntityType.normalize(child)
+        if not normalized_parent or not normalized_child or normalized_parent == normalized_child:
+            return
+        bounded_coverage = max(0.0, min(float(coverage), 1.0))
+        self._subsumptions[normalized_parent].add(normalized_child)
+        self._reverse_subsumptions[normalized_child].add(normalized_parent)
+        self._subsumption_coverage[(normalized_parent, normalized_child)] = bounded_coverage
+
+    def _descendants_with_depth(self, type_label: str, max_depth: Optional[int] = None) -> set[str]:
+        normalized_type = EntityType.normalize(type_label)
+        if not normalized_type:
+            return set()
+        descendants: set[str] = set()
+        stack: list[tuple[str, int]] = [(normalized_type, 0)]
+        while stack:
+            current, depth = stack.pop()
+            if current in descendants:
+                continue
+            descendants.add(current)
+            if max_depth is not None and depth >= max_depth:
+                continue
+            for child in sorted(self._subsumptions.get(current, set()), reverse=True):
+                stack.append((child, depth + 1))
+        return descendants
+
+    def descendants(self, type_label: str) -> set[str]:
+        """Return all transitive descendants of a type label."""
+
+        return self._descendants_with_depth(type_label)
+
+    def ancestors(self, type_label: str) -> list[str]:
+        """Return ancestor chain from child to root(s)."""
+
+        normalized_type = EntityType.normalize(type_label)
+        if not normalized_type:
+            return []
+        ancestors: list[str] = []
+        visited: set[str] = set()
+        stack = list(sorted(self._reverse_subsumptions.get(normalized_type, set()), reverse=True))
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            ancestors.append(current)
+            for parent in sorted(self._reverse_subsumptions.get(current, set()), reverse=True):
+                stack.append(parent)
+        return ancestors
+
+    def specificity(self, entity: str, type_label: str) -> float:
+        """Return TF-IDF specificity score for an entity's type assignment."""
+
+        canonical = _normalize_name(entity)
+        normalized_type = EntityType.normalize(type_label)
+        assignments = self._type_assignments.get(canonical)
+        if not assignments or not normalized_type:
+            return 0.0
+        total_assignments = sum(assignments.values())
+        if total_assignments <= 0 or assignments[normalized_type] <= 0:
+            return 0.0
+        total_entities = sum(1 for counts in self._type_assignments.values() if sum(counts.values()) > 0)
+        entities_with_type = sum(1 for counts in self._type_assignments.values() if counts[normalized_type] > 0)
+        if total_entities <= 0 or entities_with_type <= 0:
+            return 0.0
+        tf = assignments[normalized_type] / total_assignments
+        idf = math.log(total_entities / entities_with_type)
+        return tf * idf
 
     def lookup(self, type_label: str) -> list[str]:
         normalized_type = EntityType.normalize(type_label)
@@ -567,13 +645,145 @@ class TypeIndex:
         return len(self.lookup(type_label))
 
     def to_dict(self) -> dict[str, Any]:
-        return {type_label: sorted(entities) for type_label, entities in sorted(self._index.items())}
+        return {
+            "index": {type_label: sorted(entities) for type_label, entities in sorted(self._index.items())},
+            "subsumptions": {
+                parent: sorted(children) for parent, children in sorted(self._subsumptions.items())
+            },
+            "subsumption_coverage": {
+                f"{parent}|{child}": coverage
+                for (parent, child), coverage in sorted(self._subsumption_coverage.items())
+            },
+            "type_assignments": {
+                entity: dict(sorted(counts.items()))
+                for entity, counts in sorted(self._type_assignments.items())
+            },
+        }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TypeIndex":
         index = cls()
-        for type_label, entities in payload.items():
+        if payload and "index" not in payload:
+            for type_label, entities in payload.items():
+                index._index[type_label] = {_normalize_name(entity) for entity in entities}
+            return index
+
+        for type_label, entities in dict(payload.get("index", {})).items():
             index._index[type_label] = {_normalize_name(entity) for entity in entities}
+        for parent, children in dict(payload.get("subsumptions", {})).items():
+            normalized_parent = EntityType.normalize(parent)
+            if not normalized_parent:
+                continue
+            for child in children:
+                normalized_child = EntityType.normalize(child)
+                if not normalized_child:
+                    continue
+                index._subsumptions[normalized_parent].add(normalized_child)
+                index._reverse_subsumptions[normalized_child].add(normalized_parent)
+        for key, coverage in dict(payload.get("subsumption_coverage", {})).items():
+            if "|" not in key:
+                continue
+            parent, child = key.split("|", 1)
+            normalized_parent = EntityType.normalize(parent)
+            normalized_child = EntityType.normalize(child)
+            if not normalized_parent or not normalized_child:
+                continue
+            index._subsumption_coverage[(normalized_parent, normalized_child)] = float(coverage)
+        for entity, counts in dict(payload.get("type_assignments", {})).items():
+            canonical = _normalize_name(entity)
+            counter = Counter()
+            for type_label, count in dict(counts).items():
+                normalized_type = EntityType.normalize(type_label)
+                if not normalized_type:
+                    continue
+                counter[normalized_type] = int(count)
+            if counter:
+                index._type_assignments[canonical] = counter
+        return index
+
+
+class MentionBridgeIndex:
+    """Links entity names to facet values from the same extraction mention."""
+
+    def __init__(self) -> None:
+        self._forward: dict[str, set[str]] = defaultdict(set)
+        self._reverse: dict[str, set[str]] = defaultdict(set)
+
+    @staticmethod
+    def _normalize(value: str) -> str:
+        if not isinstance(value, str):
+            value = str(value)
+        return " ".join(value.strip().lower().replace("_", " ").split())
+
+    def add(self, entity_name: str, facet_values: set[str]) -> None:
+        """Link an entity name to its facet values from the same mention."""
+
+        normalized_name = self._normalize(entity_name)
+        if not normalized_name or normalized_name == "?":
+            return
+        cleaned_values = {
+            normalized
+            for normalized in (self._normalize(value) for value in facet_values)
+            if normalized and normalized != "?"
+        }
+        if not cleaned_values:
+            return
+        self._forward[normalized_name].update(cleaned_values)
+        for value in cleaned_values:
+            self._reverse[value].add(normalized_name)
+
+    def expand(self, values: set[str]) -> set[str]:
+        """Given a set of values, expand via name↔facet bridges."""
+
+        expanded: set[str] = set()
+        for value in values:
+            normalized = self._normalize(value)
+            if not normalized:
+                continue
+            expanded.add(normalized)
+            expanded.update(self._forward.get(normalized, set()))
+            expanded.update(self._reverse.get(normalized, set()))
+        return expanded
+
+    def linked_to(self, value: str) -> set[str]:
+        """Return all values linked to this one (forward + reverse)."""
+
+        normalized = self._normalize(value)
+        if not normalized:
+            return set()
+        return set(self._forward.get(normalized, set())) | set(self._reverse.get(normalized, set()))
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize for persistence."""
+
+        return {
+            "forward": {key: sorted(values) for key, values in sorted(self._forward.items())},
+            "reverse": {key: sorted(values) for key, values in sorted(self._reverse.items())},
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "MentionBridgeIndex":
+        """Deserialize."""
+
+        index = cls()
+        if not payload:
+            return index
+        forward_payload = dict(payload.get("forward", {}))
+        reverse_payload = dict(payload.get("reverse", {}))
+        if not forward_payload and reverse_payload:
+            for value, names in reverse_payload.items():
+                normalized_value = cls._normalize(value)
+                if not normalized_value:
+                    continue
+                for name in names:
+                    normalized_name = cls._normalize(name)
+                    if not normalized_name:
+                        continue
+                    index._reverse[normalized_value].add(normalized_name)
+                    index._forward[normalized_name].add(normalized_value)
+            return index
+        for name, facet_values in forward_payload.items():
+            index.add(name, set(facet_values))
         return index
 
 
@@ -1558,6 +1768,7 @@ class FoundryStore:
     bm25_entities: BM25Index = field(default_factory=BM25Index)
     vectors: VectorIndex = field(default_factory=VectorIndex)
     types: TypeIndex = field(default_factory=TypeIndex)
+    mention_bridges: MentionBridgeIndex = field(default_factory=MentionBridgeIndex)
     properties: PropertyIndex = field(default_factory=PropertyIndex)
     temporal: TemporalIndex = field(default_factory=TemporalIndex)
     cooccurrence: CooccurrenceIndex = field(default_factory=CooccurrenceIndex)
@@ -1579,6 +1790,7 @@ class FoundryStore:
                 "vector_meta.json",
                 "vectors.npy",
                 "types.json",
+                "mention_bridges.json",
                 "properties.json",
                 "temporal.json",
                 "cooccurrence.json",
@@ -1608,6 +1820,7 @@ class FoundryStore:
             self._write_json(tmp / "vector_meta.json", self.vectors.to_metadata_dict())
             np.save(tmp / "vectors.npy", self.vectors._matrix)
             self._write_json(tmp / "types.json", self.types.to_dict())
+            self._write_json(tmp / "mention_bridges.json", self.mention_bridges.to_dict())
             self._write_json(tmp / "properties.json", self.properties.to_dict())
             self._write_json(tmp / "temporal.json", self.temporal.to_dict())
             self._write_json(tmp / "cooccurrence.json", self.cooccurrence.to_dict())
@@ -1655,6 +1868,7 @@ class FoundryStore:
         matrix = np.load(root / "vectors.npy", allow_pickle=False)
         store.vectors = VectorIndex.from_parts(vector_meta.get("doc_ids", []), matrix)
         store.types = TypeIndex.from_dict(cls._read_json(root / "types.json"))
+        store.mention_bridges = MentionBridgeIndex.from_dict(cls._read_json(root / "mention_bridges.json"))
         store.properties = PropertyIndex.from_dict(cls._read_json(root / "properties.json"))
         store.temporal = TemporalIndex.from_dict(cls._read_json(root / "temporal.json"))
         store.cooccurrence = CooccurrenceIndex.from_dict(cls._read_json(root / "cooccurrence.json"))
@@ -1681,6 +1895,7 @@ class FoundryStore:
             "vector_meta": self.vectors.to_metadata_dict(),
             "vectors": self.vectors._matrix.tolist(),
             "types": self.types.to_dict(),
+            "mention_bridges": self.mention_bridges.to_dict(),
             "properties": self.properties.to_dict(),
             "temporal": self.temporal.to_dict(),
             "cooccurrence": self.cooccurrence.to_dict(),
@@ -1701,6 +1916,7 @@ class FoundryStore:
         matrix = np.array(vectors_payload, dtype=np.float32) if vectors_payload is not None else np.zeros((0, 0), dtype=np.float32)
         store.vectors = VectorIndex.from_parts(vector_meta.get("doc_ids", []), matrix)
         store.types = TypeIndex.from_dict(payload.get("types", {}))
+        store.mention_bridges = MentionBridgeIndex.from_dict(payload.get("mention_bridges", {}))
         store.properties = PropertyIndex.from_dict(payload.get("properties", {}))
         store.temporal = TemporalIndex.from_dict(payload.get("temporal", {}))
         store.cooccurrence = CooccurrenceIndex.from_dict(payload.get("cooccurrence", {}))

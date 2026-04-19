@@ -353,8 +353,35 @@ class QueryPlan:
             set_op=self._set_op if set_op is None else set_op,  # type: ignore[arg-type]
         )
 
-    def type(self, type_label: str) -> "QueryPlan":
-        return self.filter(FilterOp(field="type", operator="$eq", value=EntityType.normalize(type_label)))
+    def type(self, type_label: str, depth: int = 0) -> "QueryPlan":
+        """Filter to entities of a given type."""
+
+        normalized_type = EntityType.normalize(type_label)
+        if depth <= 0:
+            return self.filter(FilterOp(field="type", operator="$eq", value=normalized_type))
+
+        descendant_types = self._store.types._descendants_with_depth(normalized_type, max_depth=max(0, int(depth)))
+        type_terms = {" ".join(descendant.split("_")) for descendant in descendant_types}
+        expanded_terms = self._store.mention_bridges.expand(type_terms)
+        bridged_names = {
+            _normalize_name(value)
+            for value in (expanded_terms - type_terms)
+            if _normalize_name(value)
+        }
+
+        ops: list[FilterOp] = [
+            FilterOp(field="type", operator="$eq", value=descendant)
+            for descendant in sorted(descendant_types)
+        ]
+        ops.extend(
+            FilterOp(field="canonical", operator="$eq", value=canonical)
+            for canonical in sorted(bridged_names)
+        )
+        if not ops:
+            return self.filter(FilterOp(field="type", operator="$eq", value=normalized_type))
+        if len(ops) == 1:
+            return self.filter(ops[0])
+        return self.or_(*ops)
 
     def types(self, type_labels: list[str]) -> "QueryPlan":
         ops = tuple(
