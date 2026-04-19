@@ -272,6 +272,67 @@ class Foundry:
         report.grounding_failures = failures
         return report
 
+    def build_type_hierarchy(self, threshold: float = 0.7) -> int:
+        """Build type subsumption hierarchy from the unified pool.
+
+        Runs co-occurrence subsumption over entity names, type labels,
+        and bridge-linked facet values. Must be called AFTER all chunks
+        are ingested (needs the full corpus for subsumption).
+
+        Returns the number of subsumption links added.
+        """
+        # Step 1: Build unified pool — value → set of chunk indices
+        val_chunks: dict[str, set[int]] = defaultdict(set)
+        val_covals: dict[str, set[str]] = defaultdict(set)
+
+        for entity in self._store.entity_graph.all_entities():
+            name = entity.canonical
+            chunks = entity.mention_chunks
+            if not chunks:
+                continue
+
+            # Collect all values from this entity
+            mention_vals: set[str] = set()
+            mention_vals.add(name)
+            for t in entity.types:
+                mention_vals.add(t)
+            # Add bridge-linked facet values
+            bridge_vals = self._store.mention_bridges._forward.get(
+                self._store.mention_bridges._normalize(name), set()
+            )
+            mention_vals.update(bridge_vals)
+
+            for v in mention_vals:
+                val_chunks[v].update(chunks)
+            # Track co-occurrence from same entity
+            for v in mention_vals:
+                val_covals[v] |= mention_vals - {v}
+
+        # Step 2: Co-occurrence subsumption
+        added = 0
+        seen_pairs: set[frozenset[str]] = set()
+        for val, covals in val_covals.items():
+            for coval in covals:
+                pair = frozenset([val, coval])
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                ca = val_chunks.get(val, set())
+                cb = val_chunks.get(coval, set())
+                if not ca or not cb or len(ca) == len(cb):
+                    continue
+                if len(ca) < len(cb):
+                    overlap = len(ca & cb) / len(ca) if ca else 0
+                    if overlap >= threshold:
+                        self._store.types.add_subsumption(coval, val, overlap)
+                        added += 1
+                else:
+                    overlap = len(ca & cb) / len(cb) if cb else 0
+                    if overlap >= threshold:
+                        self._store.types.add_subsumption(val, coval, overlap)
+                        added += 1
+        return added
+
     def rebuild_derived(self) -> None:
         builder = DerivedLayerBuilder(self._store)
         builder.build()

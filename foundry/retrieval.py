@@ -615,7 +615,8 @@ def aggregate(
     overfetch = limit
     if overfetch is None:
         overfetch = None
-    plan = QueryPlan(store).type(entity_type)
+    depth = 2 if store.types._subsumptions else 0
+    plan = QueryPlan(store).type(entity_type, depth=depth)
     entities = plan.execute()
 
     if normalized_op == "count":
