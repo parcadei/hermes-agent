@@ -247,3 +247,34 @@ class TestQueryPlanTypeHierarchy:
         loaded = FoundryStore.load(str(path))
 
         assert loaded.mention_bridges.expand({"digital piano"}) == {"digital piano", "korg b1"}
+
+    def test_bridge_only_who_and_what_facets(self) -> None:
+        """Non-type facets (when, where, quantity, etc.) must not pollute the bridge.
+
+        Simulates the filtering in core.py line 517: only who+what facets
+        are passed to mention_bridges.add(), not the other 7.
+        """
+        facets = {
+            "what": "digital piano",
+            "who": "musician",
+            "where": "guitar center",
+            "when": "last tuesday",
+            "quantity": "$500",
+            "frequency": "weekly",
+            "how": "online",
+            "sentiment": "happy",
+            "status": "new",
+        }
+        bridge_facets = {v for k, v in facets.items() if k in ("who", "what")}
+
+        idx = MentionBridgeIndex()
+        idx.add("korg b1", bridge_facets)
+
+        linked = idx.linked_to("korg b1")
+        assert "digital piano" in linked
+        assert "musician" in linked
+        assert "guitar center" not in linked
+        assert "last tuesday" not in linked
+        assert "$500" not in linked
+        assert "weekly" not in linked
+        assert len(linked) == 2
