@@ -1035,15 +1035,18 @@ def recall(
         else:
             header = f"{result} (from: {', '.join(entities)})" if entities else str(result)
         parts = [header]
-        # Attach raw turn evidence so the answering LLM has source text
-        remaining = char_budget - len(header)
-        if remaining > 200:
-            evidence = _recall_retrieve(
-                store, query, top_k=top_k, char_budget=remaining,
-                embed_fn=embed_fn, reranker=reranker,
-            )
-            if evidence:
-                parts.append(evidence)
+        # Only attach BM25 evidence if aggregate found no entities
+        # (i.e., it's uncertain). When entities are found, the structured
+        # answer IS the evidence — BM25 can confuse with conflicting numbers.
+        if not entities:
+            remaining = char_budget - len(header)
+            if remaining > 200:
+                evidence = _recall_retrieve(
+                    store, query, top_k=top_k, char_budget=remaining,
+                    embed_fn=embed_fn, reranker=reranker,
+                )
+                if evidence:
+                    parts.append(evidence)
         return "\n".join(parts)
 
     # ── Route: when / temporal → Allen engine + BM25 evidence ─────
