@@ -82,8 +82,14 @@ TOOLS: dict[str, dict[str, str]] = {
     "aggregate": {
         "signature": "(entity_type: str, op: str) -> {result, entities}",
         "description": (
-            "Count, sum, average, distinct-list, or enumerate entities of a given "
-            "type. Best for how-many and simple aggregate questions."
+            "Count or sum entities of a given type. entity_type matches the 'what' "
+            "facet (e.g. 'bike', 'pet_fish', 'doctor', 'luxury_item'). "
+            "op is one of: count, sum, list. "
+            "count: sums quantity values across entities of that type (not just a count of names). "
+            "sum: total of their numeric values (prices, amounts). "
+            "list: returns names and quantities of matching entities. "
+            "Use for 'how many X' or 'total cost of X' questions. "
+            "Sub-types are resolved via hierarchy (e.g. 'pet_fish' excludes caught fish)."
         ),
     },
     "execute_python": {
@@ -98,6 +104,155 @@ TOOLS: dict[str, dict[str, str]] = {
         "description": "Return gathered evidence and terminate the retrieval loop.",
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# ReAct loop infrastructure
+# ---------------------------------------------------------------------------
+
+_REACT_SYSTEM_PROMPT = """\
+You are a memory search agent. Your job is to find information in a user's
+conversation history to answer their question.
+
+You have these tools:
+
+{tool_descriptions}
+
+RULES:
+- Think step-by-step about what information you need.
+- Start with the most specific search (entities or keywords from the question).
+- If initial search doesn't find enough, try DIFFERENT search terms or tools.
+- Use search_entities for WHO/WHAT/WHERE, then get_related to explore connections.
+- For "how many X" questions, try aggregate(type, "count") or aggregate(type, "list") FIRST.
+  Use a short noun as type (e.g. "fish", "doctor", "bike").
+- Use read_turn to read full text when a snippet looks promising.
+- Call answer() once you have sufficient evidence. Don't over-search.
+- Maximum {max_steps} tool calls allowed. Budget wisely.
+- IMPORTANT: Your answer() evidence should contain the specific facts/numbers
+  from the conversation, not guesses. Only state what the data shows.
+- Each Thought/Action must be on its own line.
+
+FORMAT (strict):
+Thought: <your reasoning about what to search for next>
+Action: <tool_name>(<arguments>)
+
+After each Action, you'll see an Observation with the results.
+When ready, use: Action: answer(<your collected evidence>)"""
+
+
+_ACTION_RE = re.compile(
+    r"Action:\s*(\w+)\((.+?)\)\s*$",
+    re.MULTILINE | re.DOTALL,
+)
+_THOUGHT_RE = re.compile(r"Thought:\s*(.+?)(?=\nAction:|\Z)", re.DOTALL)
+
+# Maps tool name → ordered parameter names for positional arg parsing.
+_TOOL_PARAMS: dict[str, list[str]] = {
+    "search_memory": ["query"],
+    "search_entities": ["query"],
+    "get_related": ["entity"],
+    "search_temporal": ["query"],
+    "read_turn": ["turn_id"],
+    "aggregate": ["entity_type", "op", "property_predicate"],
+    "execute_python": ["code"],
+    "answer": ["evidence"],
+}
+
+
+def _build_tool_descriptions() -> str:
+    """Build tool description text from the TOOLS registry."""
+    lines: list[str] = []
+    for name, info in TOOLS.items():
+        lines.append(f"{name}{info['signature']}")
+        lines.append(f"  {info['description']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _split_react_args(s: str) -> list[str]:
+    """Split comma-separated arguments respecting quoted strings."""
+    parts: list[str] = []
+    current: list[str] = []
+    in_quote: str | None = None
+    for ch in s:
+        if ch in ('"', "'") and in_quote is None:
+            in_quote = ch
+        elif ch == in_quote:
+            in_quote = None
+        elif ch == "," and in_quote is None:
+            parts.append("".join(current).strip().strip('"').strip("'"))
+            current = []
+            continue
+        current.append(ch)
+    if current:
+        parts.append("".join(current).strip().strip('"').strip("'"))
+    return parts
+
+
+def parse_react_output(text: str) -> tuple[str, str, str]:
+    """Parse LLM output into (thought, tool_name, raw_args).
+
+    Returns ("", "", "") if parsing fails.
+    """
+    thought = ""
+    tm = _THOUGHT_RE.search(text)
+    if tm:
+        thought = tm.group(1).strip()
+
+    am = _ACTION_RE.search(text)
+    if not am:
+        return thought, "", ""
+
+    tool_name = am.group(1).strip()
+    raw_args = am.group(2).strip()
+    if (raw_args.startswith('"') and raw_args.endswith('"')) or \
+       (raw_args.startswith("'") and raw_args.endswith("'")):
+        raw_args = raw_args[1:-1]
+    return thought, tool_name, raw_args
+
+
+def _parse_react_args(tool_name: str, raw_args: str) -> dict[str, Any]:
+    """Convert positional ReAct arguments into keyword arguments."""
+    params = _TOOL_PARAMS.get(tool_name, [])
+    if not params:
+        return {}
+    if len(params) == 1:
+        return {params[0]: raw_args}
+    parts = _split_react_args(raw_args)
+    return {param: parts[i] for i, param in enumerate(params) if i < len(parts)}
+
+
+_OBS_BUDGET = 2000
+
+
+def _format_observation(result: Any) -> str:
+    """Format tool result to fit within budget without losing key information."""
+    import json as _json
+
+    if isinstance(result, list):
+        if not result:
+            return "No results found."
+        for n in range(len(result), 0, -1):
+            out = _json.dumps(result[:n], indent=None, default=str)
+            if len(out) <= _OBS_BUDGET:
+                return out
+        item = dict(result[0]) if isinstance(result[0], dict) else result[0]
+        if isinstance(item, dict) and "text" in item:
+            item["text"] = item["text"][:300] + "..."
+        return _json.dumps([item], indent=None, default=str)[:_OBS_BUDGET]
+
+    if isinstance(result, dict):
+        if "error" in result:
+            return f"Error: {result['error']}"
+        if "co_mentions" in result:
+            out = dict(result)
+            for n in range(len(out["co_mentions"]), -1, -1):
+                out["co_mentions"] = result["co_mentions"][:n]
+                s = _json.dumps(out, indent=None, default=str)
+                if len(s) <= _OBS_BUDGET:
+                    return s
+        return _json.dumps(result, indent=None, default=str)[:_OBS_BUDGET]
+    return str(result)[:_OBS_BUDGET]
 
 
 @dataclass(frozen=True)
@@ -603,6 +758,119 @@ def read_turn(store: FoundryStore, turn_id: int) -> dict[str, Any]:
     return {"text": text, "role": role, "turn_id": int(turn_id)}
 
 
+def _latest_numeric_fact(entity: EntityNode, predicate: str) -> Optional[float]:
+    """Get the numeric value from the most recent (highest chunk_idx) fact.
+
+    Handles temporal supersession: when the same entity has quantity facts
+    across multiple chunks (e.g. bikes: qty=3 at chunk 61, qty=four at chunk 661),
+    the latest chunk wins.
+    """
+    from foundry.storage import _parse_numeric
+
+    facts = entity.facts.get(predicate, [])
+    if not facts:
+        return None
+    # Sort by chunk_idx descending, take the first parseable numeric
+    for fact in sorted(facts, key=lambda f: -f.chunk_idx):
+        if fact.superseded:
+            continue
+        n = _parse_numeric(fact.object)
+        if n is not None:
+            return n
+    return None
+
+
+_GARBAGE_NAMES = {
+    "i", "me", "my", "the", "a", "an", "is", "are", "was", "were",
+    "be", "been", "do", "does", "did", "have", "has", "had", "will",
+    "would", "could", "should", "can", "may", "might", "shall",
+    "in", "on", "at", "to", "for", "of", "with", "by", "from",
+    "and", "or", "but", "not", "no", "so", "if", "then", "than",
+    "that", "this", "these", "those", "it", "its", "there", "here",
+    "how", "what", "when", "where", "which", "who", "whom", "why",
+    "they", "them", "he", "she", "we", "you", "your", "his", "her",
+    "ask", "arrange", "check", "consider", "create", "design",
+    "don", "experiment", "follow", "however", "incorporate", "leave",
+    "look", "mimic", "nature", "provide", "sat", "sleek", "also",
+    "about", "answer", "question", "many", "much", "some", "any",
+    "all", "both", "each", "every", "total", "category",
+}
+
+
+def _is_garbage_entity(entity: EntityNode) -> bool:
+    """Filter extraction artifacts: stopwords, verbs, chunk-0-only mentions."""
+    name = entity.canonical
+    if len(name) <= 2:
+        return True
+    if name.lower() in _GARBAGE_NAMES:
+        return True
+    mt = getattr(entity, "mention_turns", set())
+    if mt and mt == {0}:
+        return True
+    return False
+
+
+def _dedup_quantity_entities(
+    entity_qty_pairs: list[tuple["EntityNode", float]],
+) -> list[tuple["EntityNode", float]]:
+    """Deduplicate entities with the same quantity and overlapping mention chunks.
+
+    When the extractor creates two entities for the same real-world group
+    (e.g. 'schooling_fish' qty=10 and 'neon_tetras' qty=10 in the same chunk),
+    only count the quantity once to avoid double-counting.
+    """
+    if len(entity_qty_pairs) <= 1:
+        return entity_qty_pairs
+
+    used = [False] * len(entity_qty_pairs)
+    result: list[tuple["EntityNode", float]] = []
+
+    for i, (e_i, q_i) in enumerate(entity_qty_pairs):
+        if used[i]:
+            continue
+        result.append((e_i, q_i))
+        used[i] = True
+        for j in range(i + 1, len(entity_qty_pairs)):
+            if used[j]:
+                continue
+            e_j, q_j = entity_qty_pairs[j]
+            if q_i != q_j:
+                continue
+            chunks_i = e_i.mention_chunks
+            chunks_j = e_j.mention_chunks
+            if not chunks_i or not chunks_j:
+                continue
+            overlap = len(chunks_i & chunks_j)
+            smaller = min(len(chunks_i), len(chunks_j))
+            if smaller > 0 and overlap / smaller >= 0.5:
+                used[j] = True
+
+    return result
+
+
+def _type_confidence(
+    entity_canonical: str,
+    queried_type: str,
+    type_index: Any,
+) -> float:
+    """Fraction of entity's type assignments belonging to the queried type family.
+
+    Uses the TypeSubsumptionIndex's internal assignment counts.  An entity
+    typed as 'fish' in 1 out of 5 chunks (with 'website' in the other 4)
+    gets 20% confidence for 'fish' — likely a false assignment.
+    """
+    assignments = type_index._type_assignments.get(entity_canonical)
+    if not assignments:
+        return 1.0
+    total = sum(assignments.values())
+    if total == 0:
+        return 1.0
+    relevant = type_index._descendants_with_depth(queried_type)
+    relevant.add(_normalize_name(queried_type))
+    matching = sum(assignments.get(t, 0) for t in relevant)
+    return matching / total
+
+
 def aggregate(
     store: FoundryStore,
     entity_type: str,
@@ -617,10 +885,36 @@ def aggregate(
         overfetch = None
     depth = 2 if store.types._subsumptions else 0
     plan = QueryPlan(store).type(entity_type, depth=depth)
-    entities = plan.execute()
+    entities = [e for e in plan.execute() if not _is_garbage_entity(e)]
+
+    # Type confidence filter: remove entities whose type assignment is
+    # low-confidence (e.g. 'facebook' indexed as 'fish' in 1 out of 5 chunks).
+    if len(entities) > 2:
+        confident = [
+            e for e in entities
+            if _type_confidence(e.canonical, entity_type, store.types) >= 0.5
+        ]
+        if confident:
+            entities = confident
 
     if normalized_op == "count":
-        result: Any = len(entities)
+        # L1/L2: if entities have quantity facts, sum their latest values
+        # instead of just counting entity objects. This handles:
+        #   - "how many fish?" → sum qty facets (10+5+1+1=17)
+        #   - "how many bikes?" → take latest qty per entity (3→4)
+        entity_qty_pairs: list[tuple[EntityNode, float]] = []
+        for entity in entities:
+            n = _latest_numeric_fact(entity, "quantity")
+            if n is not None:
+                entity_qty_pairs.append((entity, n))
+        # Deduplicate same-quantity entities with overlapping chunks
+        entity_qty_pairs = _dedup_quantity_entities(entity_qty_pairs)
+        if entity_qty_pairs:
+            qty_total = sum(q for _, q in entity_qty_pairs)
+            result: Any = int(qty_total) if qty_total == int(qty_total) else qty_total
+        else:
+            # No quantity facets — fall back to entity count
+            result = len(entities)
     elif normalized_op == "list":
         result = [entity.canonical for entity in entities]
     elif normalized_op == "distinct":
@@ -678,6 +972,202 @@ def answer(evidence: str) -> str:
     return str(evidence or "")
 
 
+# ---------------------------------------------------------------------------
+# recall() — single-function retrieval combining all indices
+# ---------------------------------------------------------------------------
+
+def recall(
+    store: "FoundryStore",
+    query: str,
+    *,
+    entity: str = "",
+    predicate: str = "",
+    time: str = "",
+    top_k: int = 20,
+    char_budget: int = 12000,
+    embed_fn: Optional[Callable[[str], np.ndarray]] = None,
+    reranker: Optional["CrossEncoderReranker"] = None,
+) -> str:
+    """Single retrieval function — the LLM fills entity/predicate/time,
+    the system auto-configures which engines to use.
+
+    The caller (an LLM) decomposes the user's question into structured
+    parameters.  ``recall()`` dispatches to the optimal retrieval path
+    based on what's populated:
+
+      predicate=count + entity → type hierarchy count (aggregate)
+      predicate=sum   + entity → type hierarchy sum of quantity facets
+      predicate=list  + entity → type hierarchy entity names
+      predicate=when  or time  → Allen temporal engine + BM25 evidence
+      default (factual)        → BM25 + cosine RRF + cross-encoder rerank
+
+    All available infrastructure is used automatically — no manual depth
+    knob.  If ``embed_fn`` is provided, cosine search is active.  If
+    ``reranker`` is provided, cross-encoder reranking is active.
+
+    Args:
+        store: The FoundryStore with BM25, entity graph, vectors, etc.
+        query: Natural language question (always passed for BM25 fallback).
+        entity: Entity type for hierarchy lookup (e.g. "instrument", "fish").
+        predicate: What to compute: count, sum, list, when, or "" (factual).
+        time: Temporal constraint (e.g. "last month", "2023/05").
+        top_k: Max results per search pass.
+        char_budget: Max total characters in returned evidence.
+        embed_fn: Embedding function for cosine search.
+        reranker: CrossEncoderReranker for cross-encoder reranking.
+
+    Returns:
+        Evidence string (concatenated turn texts, separated by newlines).
+    """
+    norm_predicate = predicate.strip().lower()
+    norm_entity = entity.strip().lower().replace(" ", "_")
+
+    # ── Route: count / sum / list → aggregate via type hierarchy ──
+    if norm_predicate in {"count", "sum", "list"} and norm_entity:
+        agg = aggregate(store, norm_entity, norm_predicate)
+        result = agg.get("result")
+        entities = agg.get("entities", [])
+        # Format structured answer + supporting BM25 evidence
+        if norm_predicate == "list":
+            header = ", ".join(str(e) for e in (result if isinstance(result, list) else entities))
+        elif norm_predicate == "count":
+            header = f"{result} (entities: {', '.join(entities)})" if entities else str(result)
+        else:
+            header = f"{result} (from: {', '.join(entities)})" if entities else str(result)
+        parts = [header]
+        # Attach raw turn evidence so the answering LLM has source text
+        remaining = char_budget - len(header)
+        if remaining > 200:
+            evidence = _recall_retrieve(
+                store, query, top_k=top_k, char_budget=remaining,
+                embed_fn=embed_fn, reranker=reranker,
+            )
+            if evidence:
+                parts.append(evidence)
+        return "\n".join(parts)
+
+    # ── Route: when / temporal → Allen engine + BM25 evidence ─────
+    if norm_predicate == "when" or time:
+        parts: list[str] = []
+        remaining = char_budget
+        # Allen temporal search
+        if hasattr(store, "temporal") and store.temporal is not None:
+            temporal_q = f"{query} {time}".strip() if time else query
+            temporal_entities = [norm_entity] if norm_entity else None
+            try:
+                temporal_result = search_temporal(
+                    store, temporal_q, top_k=top_k,
+                    entities=temporal_entities,
+                )
+                for event in temporal_result.get("matched_events", []):
+                    text = event.get("text", "")
+                    date = event.get("date", "")
+                    if date and text:
+                        line = f"[{date}] {text}"
+                    else:
+                        line = text
+                    if line.strip() and len(line) >= 20:
+                        parts.append(line)
+                        remaining -= len(line)
+                        if remaining <= 0:
+                            break
+            except Exception:
+                pass
+        # Supplement with BM25+cosine+rerank evidence
+        if remaining > 200:
+            evidence = _recall_retrieve(
+                store, query, top_k=top_k, char_budget=remaining,
+                embed_fn=embed_fn, reranker=reranker,
+            )
+            if evidence:
+                parts.append(evidence)
+        return "\n".join(parts)
+
+    # ── Default route: factual → BM25 + cosine RRF + rerank ──────
+    return _recall_retrieve(
+        store, query, top_k=top_k, char_budget=char_budget,
+        embed_fn=embed_fn, reranker=reranker,
+    )
+
+
+def _recall_retrieve(
+    store: "FoundryStore",
+    query: str,
+    *,
+    top_k: int = 20,
+    char_budget: int = 12000,
+    embed_fn: Optional[Callable[[str], np.ndarray]] = None,
+    reranker: Optional["CrossEncoderReranker"] = None,
+) -> str:
+    """Core retrieval: BM25 + cosine RRF + cross-encoder rerank.
+
+    Uses all available infrastructure automatically — no depth knob.
+    """
+    evidence_parts: list[str] = []
+    seen_ids: set[int] = set()
+    total_chars = 0
+
+    def _add(text: str, doc_id: int = -1) -> bool:
+        nonlocal total_chars
+        if doc_id in seen_ids and doc_id >= 0:
+            return True
+        if not text.strip() or len(text) < 20:
+            return True
+        if total_chars + len(text) > char_budget:
+            return False
+        evidence_parts.append(text)
+        total_chars += len(text)
+        if doc_id >= 0:
+            seen_ids.add(doc_id)
+        return True
+
+    bm25_texts = getattr(store.bm25_chunks, "_texts", {})
+
+    def _full_text(doc_id: int) -> str:
+        return bm25_texts.get(doc_id, "")
+
+    # BM25 candidates
+    use_cosine = embed_fn is not None and store.vectors._doc_ids
+    candidate_k = top_k * 2 if use_cosine else top_k
+    bm25_hits = store.bm25_chunks.query(query, top_k=candidate_k)
+
+    # Cosine candidates (if embeddings available)
+    cosine_hits: list[tuple[int, float]] = []
+    if use_cosine:
+        try:
+            query_emb = np.asarray(embed_fn(query), dtype=np.float32)
+            cosine_hits = store.vectors.query(query_emb, top_k=candidate_k)
+        except Exception:
+            pass
+
+    # RRF merge
+    merged = _rrf_merge([bm25_hits, cosine_hits]) if cosine_hits else bm25_hits
+
+    # Cross-encoder rerank (if reranker available)
+    if reranker is not None and merged:
+        candidates = []
+        for doc_id, score in merged[:top_k * 2]:
+            text = _full_text(int(doc_id))
+            if text.strip():
+                candidates.append({"text": text, "doc_id": int(doc_id), "score": score})
+        if candidates:
+            reranked = reranker.rerank(query, candidates, top_k=top_k)
+            for item in reranked:
+                if not _add(item["text"], item["doc_id"]):
+                    break
+            return "\n".join(evidence_parts)
+
+    # No reranker — use merged ranking directly
+    for doc_id, _score in merged[:top_k]:
+        text = _full_text(int(doc_id))
+        if not text.strip():
+            continue
+        if not _add(text, int(doc_id)):
+            break
+
+    return "\n".join(evidence_parts)
+
+
 def _summarize_memory_hits(hits: list[dict[str, Any]], *, limit: int = 5) -> str:
     lines = [
         f"turn {hit['turn_id']}: {hit['text']}"
@@ -696,12 +1186,12 @@ class AgenticRetriever:
     - ``toolkit`` as a ``FoundryStore`` (wrapped into the built-in tools)
     """
 
-    early_termination_after: int = 4
-
     def __init__(
         self,
         toolkit: Any,
         *,
+        llm_base_url: Optional[str] = None,
+        llm_api_key: Optional[str] = None,
         llm_model: str = "gpt-4o-mini",
         budget: RetrievalBudget = RetrievalBudget(),
         temperature: float = 0.0,
@@ -709,6 +1199,11 @@ class AgenticRetriever:
         reranker: Optional[RerankerFn] = None,
         embed_fn: Optional[Callable[[str], np.ndarray]] = None,
     ) -> None:
+        import os
+        self.llm_base_url = llm_base_url or os.environ.get(
+            "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
+        )
+        self.llm_api_key = llm_api_key or os.environ.get("OPENROUTER_API_KEY", "")
         self.llm_model = llm_model
         self.budget = budget
         self.temperature = float(temperature)
@@ -718,6 +1213,7 @@ class AgenticRetriever:
         self.dedup = DeduplicationTracker()
         self.toolkit = self._build_toolkit(toolkit)
         self.store = toolkit if isinstance(toolkit, FoundryStore) else None
+        self._client: Any = None
 
     def _build_toolkit(self, toolkit: Any) -> Optional[dict[str, Callable[..., Any]]]:
         if toolkit is None:
@@ -765,6 +1261,16 @@ class AgenticRetriever:
             }
         return None
 
+    def _ensure_client(self) -> Any:
+        """Lazily create an OpenAI-compatible client for the ReAct loop."""
+        if self._client is None:
+            from openai import OpenAI
+            self._client = OpenAI(
+                base_url=self.llm_base_url,
+                api_key=self.llm_api_key,
+            )
+        return self._client
+
     def _record_step(
         self,
         trace: RetrievalTrace,
@@ -781,6 +1287,7 @@ class AgenticRetriever:
                 "tool": tool_name,
                 "arguments": arguments,
                 "observation": rendered,
+                "result": observation,
                 "duration_ms": (time.perf_counter() - started_at) * 1000.0,
             }
         )
@@ -798,52 +1305,55 @@ class AgenticRetriever:
             return
         prefix = trace.steps[:-self.budget.sliding_window_after]
         suffix = trace.steps[-self.budget.sliding_window_after :]
+        # Compress observation strings for logging but preserve raw results
+        # so budget-exhaustion evidence can extract actual text content.
+        all_results: list[Any] = [s.get("result") for s in prefix if s.get("result") is not None]
         summary = "; ".join(f"{step['tool']}({step['arguments']})" for step in prefix)
         trace.steps = [
-            {"tool": "summary", "arguments": {}, "observation": summary[: self.budget.max_observation_chars]}
+            {
+                "tool": "summary",
+                "arguments": {},
+                "observation": summary[: self.budget.max_observation_chars],
+                "result": all_results,
+            }
         ] + suffix
 
-    def retrieve(self, question: str) -> tuple[str, RetrievalTrace]:
-        trace = RetrievalTrace(question=str(question or ""))
-        started = time.perf_counter()
-        self.dedup.reset()
+    def _deterministic_retrieve(
+        self, trace: RetrievalTrace, started: float
+    ) -> tuple[str, RetrievalTrace]:
+        """Deterministic fallback when no LLM is available.
 
-        if not trace.question.strip():
-            trace.terminated_by = "no_action"
-            return "", trace
-
-        if self.toolkit is None:
-            trace.terminated_by = "no_action"
-            return "", trace
-
+        Runs search_memory → search_entities → search_temporal in order,
+        collects evidence, then calls answer.
+        """
         evidence_parts: list[str] = []
-        planned_tools: list[tuple[str, dict[str, Any]]] = [("search_memory", {"query": trace.question, "top_k": 5})]
+        planned: list[tuple[str, dict[str, Any]]] = [
+            ("search_memory", {"query": trace.question, "top_k": 5}),
+        ]
         if "search_entities" in self.toolkit:
-            planned_tools.append(("search_entities", {"query": trace.question, "top_k": 5}))
+            planned.append(("search_entities", {"query": trace.question, "top_k": 5}))
         if "search_temporal" in self.toolkit:
-            planned_tools.append(("search_temporal", {"query": trace.question, "top_k": 5}))
+            planned.append(("search_temporal", {"query": trace.question, "top_k": 5}))
 
-        for step_idx, (tool_name, arguments) in enumerate(planned_tools[: self.budget.max_steps], start=1):
+        for tool_name, arguments in planned[: self.budget.max_steps]:
             if (time.perf_counter() - started) * 1000.0 >= self.budget.max_total_ms:
                 trace.terminated_by = "budget"
                 break
             observation = self._execute_tool(tool_name, trace=trace, **arguments)
             if tool_name == "search_memory":
-                evidence = _summarize_memory_hits(observation, limit=5)
-                if evidence:
-                    evidence_parts.append(evidence)
+                ev = _summarize_memory_hits(observation, limit=5) if isinstance(observation, list) else ""
+                if ev:
+                    evidence_parts.append(ev)
             elif tool_name == "search_temporal":
                 lines = [
                     f"{row['event']} @ {row['date']}"
-                    for row in observation.get("matched_events", [])
+                    for row in (observation.get("matched_events", []) if isinstance(observation, dict) else [])
                 ]
                 if lines:
                     evidence_parts.append("\n".join(lines))
-            elif tool_name == "aggregate":
-                evidence_parts.append(str(observation.get("result", "")))
             elif tool_name == "search_entities":
-                entity_lines = []
-                for hit in observation:
+                entity_lines: list[str] = []
+                for hit in (observation if isinstance(observation, list) else []):
                     entity_lines.append(hit["entity"])
                     for fact in hit.get("facts", [])[:2]:
                         entity_lines.append(f"{hit['entity']}: {fact['predicate']} {fact['object']}")
@@ -851,20 +1361,133 @@ class AgenticRetriever:
                     evidence_parts.append("\n".join(entity_lines))
 
             if evidence_parts and "answer" in self.toolkit:
-                joined = _OBSERVATION_SEPARATOR.join(part for part in evidence_parts if part.strip())
+                joined = _OBSERVATION_SEPARATOR.join(p for p in evidence_parts if p.strip())
                 final = self._execute_tool("answer", trace=trace, evidence=joined)
                 trace.evidence = str(final)
                 trace.terminated_by = "answer"
+                trace.total_ms = (time.perf_counter() - started) * 1000.0
+                return trace.evidence, trace
+
+        if not trace.terminated_by:
+            trace.evidence = _OBSERVATION_SEPARATOR.join(p for p in evidence_parts if p.strip())
+            trace.terminated_by = "budget" if trace.evidence else "no_action"
+
+        trace.total_ms = (time.perf_counter() - started) * 1000.0
+        return trace.evidence, trace
+
+    def retrieve(self, question: str) -> tuple[str, RetrievalTrace]:
+        """Run a ReAct loop: LLM decides which tools to call.
+
+        Falls back to a single search_memory call when no LLM is
+        available (missing API key or import error).
+        """
+        import json as _json
+        import logging
+
+        _log = logging.getLogger(__name__)
+
+        trace = RetrievalTrace(question=str(question or ""))
+        started = time.perf_counter()
+        self.dedup.reset()
+
+        if not trace.question.strip() or self.toolkit is None:
+            trace.terminated_by = "no_action"
+            return "", trace
+
+        # --- Fallback: no LLM available → deterministic tool plan -----------
+        try:
+            client = self._ensure_client()
+        except Exception:
+            client = None
+
+        if client is None or not self.llm_api_key:
+            return self._deterministic_retrieve(trace, started)
+
+        # --- ReAct loop: LLM picks tools -----------------------------------
+        system = _REACT_SYSTEM_PROMPT.format(
+            tool_descriptions=_build_tool_descriptions(),
+            max_steps=self.budget.max_steps,
+        )
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": trace.question},
+        ]
+
+        for step_i in range(self.budget.max_steps):
+            if (time.perf_counter() - started) * 1000.0 >= self.budget.max_total_ms:
+                trace.terminated_by = "budget"
                 break
 
-            if step_idx >= self.early_termination_after:
+            try:
+                resp = client.chat.completions.create(
+                    model=self.llm_model,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                )
+                llm_text = resp.choices[0].message.content or ""
+            except Exception as exc:
+                _log.warning("LLM call failed at step %d: %s", step_i, exc)
+                trace.terminated_by = "error"
                 break
+
+            thought, tool_name, raw_args = parse_react_output(llm_text)
+
+            if not tool_name:
+                _log.info("No action parsed at step %d, using text as evidence", step_i)
+                trace.evidence = llm_text
+                trace.terminated_by = "no_action"
+                break
+
+            # Terminal tool: answer
+            if tool_name == "answer":
+                trace.steps.append({
+                    "tool": "answer",
+                    "arguments": {"evidence": raw_args},
+                    "observation": raw_args,
+                    "duration_ms": 0.0,
+                })
+                trace.evidence = raw_args
+                trace.terminated_by = "answer"
+                break
+
+            # Parse positional args → kwargs and execute
+            kwargs = _parse_react_args(tool_name, raw_args)
+            if tool_name not in self.toolkit:
+                obs_text = f"Error: unknown tool '{tool_name}'"
+            else:
+                try:
+                    observation = self._execute_tool(tool_name, trace=trace, **kwargs)
+                    obs_text = _format_observation(observation)
+                except Exception as exc:
+                    obs_text = f"Error: {exc}"
+                    self._record_step(trace, tool_name, kwargs, obs_text, time.perf_counter())
+
+            messages.append({"role": "assistant", "content": llm_text})
+            messages.append({"role": "user", "content": f"Observation: {obs_text}"})
 
             self._compress_observations(trace)
 
-        if not trace.terminated_by:
-            trace.evidence = _OBSERVATION_SEPARATOR.join(part for part in evidence_parts if part.strip())
-            trace.terminated_by = "budget" if trace.evidence else "no_action"
+        else:
+            # Budget exhausted — extract actual content from raw results.
+            # Summary steps pack multiple results into a list; flatten them.
+            trace.terminated_by = "budget"
+            all_texts: list[str] = []
+
+            def _extract_texts(obj: Any) -> None:
+                if isinstance(obj, list):
+                    for item in obj:
+                        _extract_texts(item)
+                elif isinstance(obj, dict) and "text" in obj:
+                    t = str(obj["text"]).strip()
+                    if t:
+                        all_texts.append(t)
+
+            for s in trace.steps:
+                result = s.get("result")
+                if result is not None:
+                    _extract_texts(result)
+            trace.evidence = "\n---\n".join(all_texts) if all_texts else ""
 
         trace.total_ms = (time.perf_counter() - started) * 1000.0
         return trace.evidence, trace

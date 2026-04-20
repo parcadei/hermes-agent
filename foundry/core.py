@@ -32,7 +32,7 @@ from foundry.ingestion import (
     track_cooccurrences,
     verify_grounding,
 )
-from foundry.ontology import GroundingLayer
+from foundry.ontology import GroundingLayer, PropertyType
 from foundry.query import QueryPlan
 from foundry.retrieval import (
     AgenticRetriever,
@@ -40,7 +40,7 @@ from foundry.retrieval import (
     RetrievalTrace,
     search_temporal as retrieval_search_temporal,
 )
-from foundry.storage import EntityGraph, EntityNode, Fact, FoundryStore, RawChunk, _normalize_name
+from foundry.storage import EntityGraph, EntityNode, Fact, FoundryStore, RawChunk, _normalize_name, _normalize_predicate
 from foundry.writeback import SupersessionEngine
 
 
@@ -159,8 +159,23 @@ class Foundry:
         reranker_model = str(self.config.reranker_model or "").strip()
         if reranker_model:
             self._reranker = CrossEncoderReranker(reranker_model)
+        # Lazy-loaded embedding model for cosine search
+        self._embedder: Any = None
         if self.config.synonym_dict:
             self.rebuild_inferred(self.config.synonym_dict)
+
+    def _ensure_embedder(self) -> Any:
+        """Lazily load the SentenceTransformer embedding model."""
+        if self._embedder is None:
+            from sentence_transformers import SentenceTransformer
+            self._embedder = SentenceTransformer(self.config.embedding_model)
+        return self._embedder
+
+    def _embed(self, text: str) -> "np.ndarray":
+        """Embed a single text using the configured embedding model."""
+        import numpy as np
+        embedder = self._ensure_embedder()
+        return np.asarray(embedder.encode(text), dtype=np.float32)
 
     @classmethod
     def load(cls, path: str, config: FoundryConfig) -> "Foundry":
@@ -273,64 +288,41 @@ class Foundry:
         return report
 
     def build_type_hierarchy(self, threshold: float = 0.7) -> int:
-        """Build type subsumption hierarchy from the unified pool.
+        """Build type subsumption hierarchy from extraction schema.
 
-        Runs co-occurrence subsumption over entity names, type labels,
-        and bridge-linked facet values. Must be called AFTER all chunks
-        are ingested (needs the full corpus for subsumption).
+        Uses the structured extraction data (entity types from ``what``
+        facet) to build parent→child links.  An entity whose canonical
+        name is also a type label creates a chain:
+        ``parent_type → canonical → child_entities``.
+
+        For example, entity "guitar" with types {guitar, instrument}
+        registers ``instrument → guitar`` because "guitar" is itself a
+        type label (other entities have type=guitar).
+
+        Must be called AFTER all chunks are ingested.
 
         Returns the number of subsumption links added.
         """
-        # Step 1: Build unified pool — value → set of chunk indices
-        val_chunks: dict[str, set[int]] = defaultdict(set)
-        val_covals: dict[str, set[str]] = defaultdict(set)
-
-        for entity in self._store.entity_graph.all_entities():
-            name = entity.canonical
-            chunks = entity.mention_chunks
-            if not chunks:
-                continue
-
-            # Collect all values from this entity
-            mention_vals: set[str] = set()
-            mention_vals.add(name)
-            for t in entity.types:
-                mention_vals.add(t)
-            # Add bridge-linked facet values
-            bridge_vals = self._store.mention_bridges._forward.get(
-                self._store.mention_bridges._normalize(name), set()
-            )
-            mention_vals.update(bridge_vals)
-
-            for v in mention_vals:
-                val_chunks[v].update(chunks)
-            # Track co-occurrence from same entity
-            for v in mention_vals:
-                val_covals[v] |= mention_vals - {v}
-
-        # Step 2: Co-occurrence subsumption
+        type_labels = set(self._store.types._index.keys())
         added = 0
         seen_pairs: set[frozenset[str]] = set()
-        for val, covals in val_covals.items():
-            for coval in covals:
-                pair = frozenset([val, coval])
+
+        for entity in self._store.entity_graph.all_entities():
+            canonical = entity.canonical
+            if canonical not in type_labels:
+                continue
+            for parent_type in entity.types:
+                if parent_type == canonical:
+                    continue
+                if parent_type not in type_labels:
+                    continue
+                pair = frozenset([parent_type, canonical])
                 if pair in seen_pairs:
                     continue
                 seen_pairs.add(pair)
-                ca = val_chunks.get(val, set())
-                cb = val_chunks.get(coval, set())
-                if not ca or not cb or len(ca) == len(cb):
-                    continue
-                if len(ca) < len(cb):
-                    overlap = len(ca & cb) / len(ca) if ca else 0
-                    if overlap >= threshold:
-                        self._store.types.add_subsumption(coval, val, overlap)
-                        added += 1
-                else:
-                    overlap = len(ca & cb) / len(cb) if cb else 0
-                    if overlap >= threshold:
-                        self._store.types.add_subsumption(val, coval, overlap)
-                        added += 1
+                self._store.types.add_subsumption(parent_type, canonical, 1.0)
+                added += 1
+
         return added
 
     def rebuild_derived(self) -> None:
@@ -437,12 +429,15 @@ class Foundry:
         return deltas
 
     def retrieve(self, question: str) -> tuple[str, RetrievalTrace]:
+        embed_fn = self._embed if self._embedder is not None else None
         retriever = AgenticRetriever(
             self._store,
+            llm_base_url=self.config.extraction_url,
             llm_model=self.config.agent_model,
             budget=self._retrieval_budget(),
             temperature=self.config.agent_temperature,
             reranker=self._reranker.rerank if self._reranker is not None else None,
+            embed_fn=embed_fn,
         )
         evidence, trace = retriever.retrieve(question)
         if evidence.strip():
@@ -548,6 +543,13 @@ class Foundry:
         store_started = time.perf_counter()
         self._store.chunks.store(chunk)
         self._store.bm25_chunks.add(chunk.chunk_idx, chunk.text)
+        # Embed chunk for cosine search (lazy — only if model configured)
+        if self.config.embedding_model:
+            try:
+                emb = self._embed(chunk.text)
+                self._store.vectors.add(chunk.chunk_idx, emb)
+            except Exception:
+                pass  # embedding is optional; BM25 still works
         tracker.mark("store_chunk", store_started)
 
         auto_entities: list[FacetEntity] = []
@@ -565,6 +567,13 @@ class Foundry:
         chunk_entities: list[str] = []
         for extracted in extracted_entities:
             entity_types = _canonical_type_set(infer_type(extracted))
+            # Unified pool: index who facet as type too (spec §2.1)
+            who_val = extracted.facets.get("who", "").strip()
+            if who_val and who_val != "?":
+                from foundry.ontology import EntityType
+                who_type = EntityType.normalize(who_val)
+                if who_type:
+                    entity_types.add(who_type)
             canonical = resolver.resolve_or_create(extracted.name, hint_type=next(iter(entity_types), None))
             if canonical in existing_entities:
                 report.entities_resolved += 1
@@ -580,6 +589,20 @@ class Foundry:
             for type_label in entity_types:
                 node.register_type(type_label)
                 self._store.types.index(canonical, type_label)
+            # Store all facets as facts on the entity
+            for facet_key, facet_val in extracted.facets.items():
+                if not facet_val or facet_val == "?":
+                    continue
+                node.add_fact(Fact(
+                    id=f"{canonical}:{facet_key}:{chunk.chunk_idx}",
+                    subject=canonical,
+                    predicate=_normalize_predicate(facet_key),
+                    object=str(facet_val),
+                    object_type=PropertyType.STRING,
+                    turn_idx=chunk.turn_idx,
+                    chunk_idx=chunk.chunk_idx,
+                    source_text=extracted.source_text[:200] if extracted.source_text else "",
+                ))
             if canonical not in chunk_entities:
                 chunk_entities.append(canonical)
         tracker.mark("entities", entity_started)

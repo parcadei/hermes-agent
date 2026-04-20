@@ -517,14 +517,19 @@ class QueryPlan:
         normalized_op = str(op).lower()
         if normalized_op == "count":
             return len(entities)
-        values: list[str] = []
-        for entity in entities:
-            values.extend(_entity_values_for_field(entity, property_predicate, current_only=True))
-        if normalized_op == "list":
-            return values
-        if normalized_op == "distinct":
+        if normalized_op in ("list", "distinct"):
+            values: list[str] = []
+            for entity in entities:
+                values.extend(_entity_values_for_field(entity, property_predicate, current_only=True))
+            if normalized_op == "list":
+                return values
             return sorted(set(values))
-        numerics = [number for number in (_parse_numeric(value) for value in values) if number is not None]
+        # Numeric ops: dedup per entity by taking latest chunk_idx value
+        numerics: list[float] = []
+        for entity in entities:
+            n = _latest_numeric_for_entity(entity, property_predicate)
+            if n is not None:
+                numerics.append(n)
         if normalized_op == "sum":
             return float(sum(numerics))
         if normalized_op == "avg":
@@ -745,6 +750,26 @@ def _entity_values_for_field(entity: EntityNode, field: str, current_only: bool 
     facts = entity.facts.get(normalized_field, [])
     values = [fact.object for fact in facts if not current_only or not fact.superseded]
     return values
+
+
+def _latest_numeric_for_entity(entity: EntityNode, field: str) -> Optional[float]:
+    """Get the latest (highest chunk_idx) numeric value for a field.
+
+    Handles temporal supersession: when the same entity has the same predicate
+    across multiple chunks, the most recent chunk wins. This prevents double-
+    counting from repeated mentions.
+    """
+    normalized_field = _normalize_predicate(field)
+    facts = entity.facts.get(normalized_field, [])
+    if not facts:
+        return None
+    for fact in sorted(facts, key=lambda f: -f.chunk_idx):
+        if fact.superseded:
+            continue
+        n = _parse_numeric(fact.object)
+        if n is not None:
+            return n
+    return None
 
 
 def _filter_matches_entity(entity: EntityNode, filter_op: FilterOp) -> bool:
