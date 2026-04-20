@@ -475,6 +475,14 @@ def _system_prompt_for_dataset(dataset: str) -> str:
             "You are a recommendation system. Based on the provided evidence about "
             "user preferences, recommend items. Be concise."
         )
+    if "longmemeval" in dataset:
+        return (
+            "Answer the question concisely using ONLY the provided evidence. "
+            "If the answer requires counting items, computing totals, or doing arithmetic "
+            "from the evidence, do the computation and give the final number. "
+            "Use digits, not words (e.g. '3' not 'three'). "
+            "If the evidence doesn't contain enough information, say 'unknown'."
+        )
     # Generic fallback
     return (
         "Answer the question concisely using ONLY the provided evidence. "
