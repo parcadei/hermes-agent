@@ -1027,27 +1027,17 @@ def recall(
         agg = aggregate(store, norm_entity, norm_predicate)
         result = agg.get("result")
         entities = agg.get("entities", [])
-        # Format structured answer + supporting BM25 evidence
-        if norm_predicate == "list":
-            header = ", ".join(str(e) for e in (result if isinstance(result, list) else entities))
-        elif norm_predicate == "count":
-            header = f"{result} (entities: {', '.join(entities)})" if entities else str(result)
-        else:
-            header = f"{result} (from: {', '.join(entities)})" if entities else str(result)
-        parts = [header]
-        # Only attach BM25 evidence if aggregate found no entities
-        # (i.e., it's uncertain). When entities are found, the structured
-        # answer IS the evidence — BM25 can confuse with conflicting numbers.
-        if not entities:
-            remaining = char_budget - len(header)
-            if remaining > 200:
-                evidence = _recall_retrieve(
-                    store, query, top_k=top_k, char_budget=remaining,
-                    embed_fn=embed_fn, reranker=reranker,
-                )
-                if evidence:
-                    parts.append(evidence)
-        return "\n".join(parts)
+        if entities:
+            # Aggregate succeeded — format structured answer
+            if norm_predicate == "list":
+                header = ", ".join(str(e) for e in (result if isinstance(result, list) else entities))
+            elif norm_predicate == "count":
+                header = f"{result} (entities: {', '.join(entities)})"
+            else:
+                header = f"{result} (from: {', '.join(entities)})"
+            return header
+        # Aggregate found nothing — fall through to factual BM25 path
+        # so the LLM can answer from raw evidence instead of seeing "0"
 
     # ── Route: when / temporal → Allen engine + BM25 evidence ─────
     if norm_predicate == "when" or time:
