@@ -21,3 +21,4 @@ db6434c	41.67	44.25	discard	sort reranked evidence by turn index. -2: relevance 
 f5575d1	43.33	44.73	discard	upgrade embeddings all-MiniLM-L6-v2→all-mpnet-base-v2. -1: bigger model ≠ better RRF, 3x slower
 c27fe0c	35.00	42.18	discard	LME prompt: encourage computation + use digits. -6: gold answers use WORDS not digits
 801d280	43.33	43.70	discard	LME prompt v2: computation only (no digits). -1: 0 gains, prompt irrelevant
+919d9ca	45.00	45.54	discard	always include BM25 evidence with aggregate. 0 flips: extra evidence is noise
