@@ -1149,7 +1149,7 @@ def _recall_retrieve(
     # BM25 candidates — strip question noise for better lexical matching
     bm25_query = _clean_bm25_query(query)
     use_cosine = embed_fn is not None and store.vectors._doc_ids
-    candidate_k = top_k * 2 if use_cosine else top_k
+    candidate_k = top_k * 4 if use_cosine else top_k * 2
     bm25_hits = store.bm25_chunks.query(bm25_query, top_k=candidate_k)
 
     # Cosine candidates (if embeddings available)
