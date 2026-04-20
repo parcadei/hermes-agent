@@ -1151,11 +1151,21 @@ def _recall_retrieve(
 
     # BM25 candidates — strip question noise for better lexical matching
     bm25_query = _clean_bm25_query(query)
-    candidate_k = top_k * 2
+    use_cosine = embed_fn is not None and store.vectors._doc_ids
+    candidate_k = top_k * 2 if use_cosine else top_k
     bm25_hits = store.bm25_chunks.query(bm25_query, top_k=candidate_k)
 
-    # Skip cosine — let BM25 feed directly to reranker for maximum precision
-    merged = bm25_hits
+    # Cosine candidates (if embeddings available)
+    cosine_hits: list[tuple[int, float]] = []
+    if use_cosine:
+        try:
+            query_emb = np.asarray(embed_fn(query), dtype=np.float32)
+            cosine_hits = store.vectors.query(query_emb, top_k=candidate_k)
+        except Exception:
+            pass
+
+    # RRF merge
+    merged = _rrf_merge([bm25_hits, cosine_hits]) if cosine_hits else bm25_hits
 
     # Cross-encoder rerank (if reranker available)
     if reranker is not None and merged:
