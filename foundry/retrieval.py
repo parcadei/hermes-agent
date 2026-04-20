@@ -1149,12 +1149,11 @@ def _recall_retrieve(
     def _full_text(doc_id: int) -> str:
         return bm25_texts.get(doc_id, "")
 
-    # Dual BM25: cleaned query (content words) + original query (preserves phrases)
+    # BM25 candidates — strip question noise for better lexical matching
     bm25_query = _clean_bm25_query(query)
     use_cosine = embed_fn is not None and store.vectors._doc_ids
     candidate_k = top_k * 2 if use_cosine else top_k
-    bm25_clean_hits = store.bm25_chunks.query(bm25_query, top_k=candidate_k)
-    bm25_orig_hits = store.bm25_chunks.query(query, top_k=candidate_k)
+    bm25_hits = store.bm25_chunks.query(bm25_query, top_k=candidate_k)
 
     # Cosine candidates (if embeddings available)
     cosine_hits: list[tuple[int, float]] = []
@@ -1165,11 +1164,8 @@ def _recall_retrieve(
         except Exception:
             pass
 
-    # RRF merge all signals
-    rankings = [bm25_clean_hits, bm25_orig_hits]
-    if cosine_hits:
-        rankings.append(cosine_hits)
-    merged = _rrf_merge(rankings)
+    # RRF merge
+    merged = _rrf_merge([bm25_hits, cosine_hits]) if cosine_hits else bm25_hits
 
     # Cross-encoder rerank (if reranker available)
     if reranker is not None and merged:
