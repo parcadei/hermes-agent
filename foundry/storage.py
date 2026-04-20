@@ -47,10 +47,20 @@ def _normalize_predicate(value: str) -> str:
     return _normalize_name(value)
 
 
+try:
+    from nltk.stem import PorterStemmer as _PorterStemmer
+    _STEMMER = _PorterStemmer()
+except ImportError:
+    _STEMMER = None
+
+
 def _tokenize(text: str) -> list[str]:
     if not text:
         return []
-    return [token.lower() for token in _TOKEN_RE.findall(text)]
+    tokens = [token.lower() for token in _TOKEN_RE.findall(text)]
+    if _STEMMER is not None:
+        return [_STEMMER.stem(t) for t in tokens]
+    return tokens
 
 
 def _parse_datetime(value: Any) -> Optional[datetime]:
