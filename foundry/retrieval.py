@@ -1090,6 +1090,26 @@ def recall(
     )
 
 
+_BM25_NOISE = {
+    "how", "many", "much", "long", "what", "which", "where", "when", "who",
+    "whom", "why", "did", "do", "does", "is", "are", "was", "were", "have",
+    "has", "had", "can", "could", "would", "should", "will", "shall", "may",
+    "might", "the", "a", "an", "i", "me", "my", "we", "our", "you", "your",
+    "in", "on", "at", "to", "for", "of", "with", "by", "from", "and", "or",
+    "but", "not", "that", "this", "it", "its", "be", "been", "being",
+    "there", "here", "if", "so", "than", "then", "about", "between",
+    "typically", "currently", "usually", "total", "different", "any",
+    "answer", "question", "based", "history", "chats", "concisely",
+}
+
+
+def _clean_bm25_query(query: str) -> str:
+    """Strip question boilerplate so BM25 matches on content words only."""
+    tokens = re.findall(r"[a-zA-Z0-9']+", query.lower())
+    content = [t for t in tokens if t not in _BM25_NOISE and len(t) > 1]
+    return " ".join(content) if content else query
+
+
 def _recall_retrieve(
     store: "FoundryStore",
     query: str,
@@ -1126,10 +1146,11 @@ def _recall_retrieve(
     def _full_text(doc_id: int) -> str:
         return bm25_texts.get(doc_id, "")
 
-    # BM25 candidates
+    # BM25 candidates — strip question noise for better lexical matching
+    bm25_query = _clean_bm25_query(query)
     use_cosine = embed_fn is not None and store.vectors._doc_ids
     candidate_k = top_k * 2 if use_cosine else top_k
-    bm25_hits = store.bm25_chunks.query(query, top_k=candidate_k)
+    bm25_hits = store.bm25_chunks.query(bm25_query, top_k=candidate_k)
 
     # Cosine candidates (if embeddings available)
     cosine_hits: list[tuple[int, float]] = []
