@@ -1149,18 +1149,6 @@ def _recall_retrieve(
 
     # BM25 candidates — strip question noise for better lexical matching
     bm25_query = _clean_bm25_query(query)
-    # Expand query with entity names from graph (helps find turns mentioning
-    # specific entity names when the question uses generic terms)
-    if hasattr(store, "bm25_entities") and store.bm25_entities._texts:
-        entity_hits = store.bm25_entities.query(bm25_query, top_k=5)
-        entity_names = []
-        for eid, _s in entity_hits:
-            # Get just the canonical name (first word of entity doc text)
-            doc_text = store.bm25_entities._texts.get(eid, "")
-            if doc_text:
-                entity_names.append(doc_text.split()[0])
-        if entity_names:
-            bm25_query = bm25_query + " " + " ".join(entity_names)
     use_cosine = embed_fn is not None and store.vectors._doc_ids
     candidate_k = top_k * 2 if use_cosine else top_k
     bm25_hits = store.bm25_chunks.query(bm25_query, top_k=candidate_k)
