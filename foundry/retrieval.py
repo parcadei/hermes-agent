@@ -322,11 +322,13 @@ def _rrf_merge(
     rankings: Sequence[list[tuple[int, float]]],
     *,
     k: float = _RRF_K,
+    weights: Optional[Sequence[float]] = None,
 ) -> list[tuple[int, float]]:
     scores: dict[int, float] = {}
-    for ranking in rankings:
+    for i, ranking in enumerate(rankings):
+        w = weights[i] if weights else 1.0
         for rank, (doc_id, _score) in enumerate(ranking, start=1):
-            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+            scores[doc_id] = scores.get(doc_id, 0.0) + w / (k + rank)
     merged = list(scores.items())
     merged.sort(key=lambda item: (-item[1], item[0]))
     return merged
@@ -1164,8 +1166,8 @@ def _recall_retrieve(
         except Exception:
             pass
 
-    # RRF merge
-    merged = _rrf_merge([bm25_hits, cosine_hits]) if cosine_hits else bm25_hits
+    # RRF merge — BM25 weighted 2x (primary signal, cosine adds diversity)
+    merged = _rrf_merge([bm25_hits, cosine_hits], weights=[2.0, 1.0]) if cosine_hits else bm25_hits
 
     # Cross-encoder rerank (if reranker available)
     if reranker is not None and merged:
