@@ -1,0 +1,21 @@
+commit	subem	f1	status	description
+5e25954	41.67	43.15	keep	baseline: recall() predicate dispatch + dedup + type confidence + routing fix
+da97992	45.00	45.32	keep	strip BM25 question noise (_clean_bm25_query). +2 questions: Nu pogodi, social media breaks
+b28a88a	43.33	44.99	discard	increase reranker candidate pool (top_k*2 → top_k*4). -1 question: diluted RRF hurts
+75feb3f	43.33	29.58	discard	answer prompt quotes evidence verbatim. -1 question + F1 tank: verbose answers hurt SubEM
+4c792d3	41.67	41.77	discard	increase char_budget 12000→16000. -2 questions: extra context confused LLM
+76d3018	41.67	44.60	discard	digits not words in system prompt. +3/-5: gold answers inconsistent (some use words)
+0c3eb04	45.00	45.27	discard	feed ALL merged candidates to reranker (not just top_k*2). Neutral: reranker already finds best in top-40
+8d46cd0	45.00	45.21	keep	skip BM25 evidence for aggregate with entities. Neutral but simpler (removes unused code path)
+1ed116a	45.00	44.69	discard	dual BM25 (cleaned + original). Neutral: BM25 IDF already handles stopwords. Extra BM25 pass is redundant
+ceff7b7	41.67	41.79	discard	disable cosine, pure BM25→reranker. -2 questions: cosine RRF adds recall diversity
+c5bbf81	43.33	44.58	discard	Porter stemming in BM25 tokenizer. -1 question: over-generalization dilutes precision
+193e452	41.67	41.57	discard	weighted RRF (BM25 2x). -2 questions: equal weighting is optimal, biasing hurts
+af9e1ae	43.33	43.22	discard	aggregate fallthrough to factual BM25 when 0 entities. -1: LLM can't count from raw turns
+c6f30ee	43.33	43.71	discard	singularize entity type for aggregate (doctors→doctor). 0 agg flips: types differ entirely
+f02a4e4	36.67	38.14	discard	reduce char_budget 12000→6000. -5 questions: lower-ranked passages contain needed answers
+c151d70	43.33	43.01	discard	entity-expanded BM25 query (append entity names). -1: dilutes BM25 lexical precision
+a1dd56e	45.00	44.91	discard	temporal digit normalization (Three weeks→3 weeks). +2/-2: gold format inconsistent
+db6434c	41.67	44.25	discard	sort reranked evidence by turn index. -2: relevance order > temporal order for LLM
+18428d4	41.67	45.34	discard	upgrade to mxbai-rerank-large. -2: larger reranker reorders evidence differently, 2x slower
+f5575d1	43.33	44.73	discard	upgrade embeddings all-MiniLM-L6-v2→all-mpnet-base-v2. -1: bigger model ≠ better RRF, 3x slower

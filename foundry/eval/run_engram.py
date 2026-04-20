@@ -210,7 +210,7 @@ def parse_args():
                         help="Use AgenticRetriever instead of direct BM25")
     parser.add_argument("--use_recall", action="store_true",
                         help="Use recall() — auto-routes based on query (BM25+cosine+rerank, aggregate, temporal)")
-    parser.add_argument("--embed_model", type=str, default="sentence-transformers/all-mpnet-base-v2",
+    parser.add_argument("--embed_model", type=str, default="sentence-transformers/all-MiniLM-L6-v2",
                         help="SentenceTransformer model for cosine search")
     parser.add_argument("--rerank_model", type=str, default="mixedbread-ai/mxbai-rerank-base-v1",
                         help="Cross-encoder model for reranking")
