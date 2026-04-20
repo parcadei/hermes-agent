@@ -1167,7 +1167,7 @@ def _recall_retrieve(
     # Cross-encoder rerank (if reranker available)
     if reranker is not None and merged:
         candidates = []
-        for doc_id, score in merged[:top_k * 2]:
+        for doc_id, score in merged:
             text = _full_text(int(doc_id))
             if text.strip():
                 candidates.append({"text": text, "doc_id": int(doc_id), "score": score})
