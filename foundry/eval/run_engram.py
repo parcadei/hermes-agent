@@ -482,33 +482,6 @@ def _system_prompt_for_dataset(dataset: str) -> str:
     )
 
 
-_WORD_TO_DIGIT = {
-    "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
-    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
-    "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
-    "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
-    "nineteen": "19", "twenty": "20",
-}
-_TIME_UNITS_RE = re.compile(
-    r"\b(" + "|".join(_WORD_TO_DIGIT) + r")\s+"
-    r"(weeks?|days?|months?|years?|hours?|minutes?)\b",
-    re.IGNORECASE,
-)
-
-
-def _normalize_temporal_digits(text: str) -> str:
-    """Convert number words before time units to digits.
-
-    'Three weeks ago' → '3 weeks ago'.  Only converts when followed by a
-    time unit — safe for general use, does not affect non-temporal numbers.
-    """
-    def _replace(m: re.Match) -> str:
-        word = m.group(1).lower()
-        unit = m.group(2)
-        return f"{_WORD_TO_DIGIT.get(word, m.group(1))} {unit}"
-    return _TIME_UNITS_RE.sub(_replace, text)
-
-
 def generate_answer(query: str, evidence: str, model: str, dataset: str,
                     max_tokens: int = 64) -> str:
     """Use LLM to produce an answer from retrieved evidence."""
@@ -527,8 +500,7 @@ def generate_answer(query: str, evidence: str, model: str, dataset: str,
             )},
         ],
     )
-    answer = resp.choices[0].message.content.strip()
-    return _normalize_temporal_digits(answer)
+    return resp.choices[0].message.content.strip()
 
 
 # ---------------------------------------------------------------------------
