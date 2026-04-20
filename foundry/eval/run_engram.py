@@ -475,10 +475,12 @@ def _system_prompt_for_dataset(dataset: str) -> str:
             "You are a recommendation system. Based on the provided evidence about "
             "user preferences, recommend items. Be concise."
         )
-    # Generic fallback
+    # Generic fallback (LME, longmemeval)
     return (
-        "Answer the question concisely using ONLY the provided evidence. "
-        "If the evidence doesn't contain the answer, say 'unknown'."
+        "Answer the question using ONLY the provided evidence. "
+        "Quote relevant phrases from the evidence verbatim when possible. "
+        "Keep your answer short (1-2 sentences) but include enough context "
+        "to be self-contained. If the evidence doesn't contain the answer, say 'unknown'."
     )
 
 
