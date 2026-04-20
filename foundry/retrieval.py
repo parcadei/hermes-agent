@@ -1025,6 +1025,11 @@ def recall(
     # ── Route: count / sum / list → aggregate via type hierarchy ──
     if norm_predicate in {"count", "sum", "list"} and norm_entity:
         agg = aggregate(store, norm_entity, norm_predicate)
+        # Retry with singular form if plural didn't match
+        if not agg.get("entities"):
+            singular = _singularize_entity(norm_entity)
+            if singular != norm_entity:
+                agg = aggregate(store, singular, norm_predicate)
         result = agg.get("result")
         entities = agg.get("entities", [])
         # Format structured answer + supporting BM25 evidence
@@ -1089,6 +1094,22 @@ def recall(
         store, query, top_k=top_k, char_budget=char_budget,
         embed_fn=embed_fn, reranker=reranker,
     )
+
+
+def _singularize_entity(name: str) -> str:
+    """Simple depluralization for entity type names (e.g. 'doctors' → 'doctor').
+
+    For compound names like 'fitness_classes', singularizes the last component.
+    """
+    parts = name.split("_")
+    w = parts[-1]
+    if w.endswith("ies") and len(w) > 3:
+        parts[-1] = w[:-3] + "y"
+    elif w.endswith(("ses", "xes", "zes", "ches", "shes")):
+        parts[-1] = w[:-2]
+    elif w.endswith("s") and not w.endswith("ss") and len(w) > 2:
+        parts[-1] = w[:-1]
+    return "_".join(parts)
 
 
 _BM25_NOISE = {
