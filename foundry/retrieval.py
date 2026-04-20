@@ -1174,24 +1174,9 @@ def _recall_retrieve(
                 candidates.append({"text": text, "doc_id": int(doc_id), "score": score})
         if candidates:
             reranked = reranker.rerank(query, candidates, top_k=top_k)
-            # Collect results that fit budget, then sort by doc_id (temporal order)
-            collected: list[tuple[int, str]] = []
             for item in reranked:
-                doc_id = item["doc_id"]
-                text = item["text"]
-                if doc_id in seen_ids and doc_id >= 0:
-                    continue
-                if not text.strip() or len(text) < 20:
-                    continue
-                if total_chars + len(text) > char_budget:
+                if not _add(item["text"], item["doc_id"]):
                     break
-                collected.append((doc_id, text))
-                total_chars += len(text)
-                if doc_id >= 0:
-                    seen_ids.add(doc_id)
-            # Present in conversation order (earlier turns first)
-            collected.sort(key=lambda x: x[0])
-            evidence_parts.extend(text for _, text in collected)
             return "\n".join(evidence_parts)
 
     # No reranker — use merged ranking directly
