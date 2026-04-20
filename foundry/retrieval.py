@@ -984,7 +984,7 @@ def recall(
     predicate: str = "",
     time: str = "",
     top_k: int = 20,
-    char_budget: int = 6000,
+    char_budget: int = 12000,
     embed_fn: Optional[Callable[[str], np.ndarray]] = None,
     reranker: Optional["CrossEncoderReranker"] = None,
 ) -> str:
