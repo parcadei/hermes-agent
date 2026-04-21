@@ -334,7 +334,11 @@ def decompose_recall_params(question: str) -> dict:
 
     # Counting: "how many X"
     elif "how many" in q_lower:
-        predicate = "count"
+        # Guard: "how many X do I need/require" asks for a threshold, not a count
+        if _re.search(r'\bneed\b|\brequired?\b|\bto (?:get|earn|redeem|qualify)\b', q_lower):
+            predicate = ""  # factual route
+        else:
+            predicate = "count"
         m = _COUNT_RE.search(q_lower)
         if m:
             entity = _clean_entity(m.group(1))
