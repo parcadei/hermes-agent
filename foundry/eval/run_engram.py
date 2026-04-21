@@ -827,6 +827,64 @@ def _retry_unknown(query: str, evidence: str, model: str,
     return resp.choices[0].message.content.strip()
 
 
+_TEMPORAL_PHRASE_RE = _re.compile(
+    r'\b('
+    # Duration: "five months", "3 weeks", "two hours", "10 years"
+    r'(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|'
+    r'thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|'
+    r'\d+(?:\.\d+)?)\s+'
+    r'(?:minutes?|hours?|days?|weeks?|months?|years?|seconds?))'
+    # Optionally followed by "ago" or "and N units"
+    r'(?:\s+ago)?'
+    r'(?:\s+and\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+'
+    r'(?:minutes?|hours?|days?|weeks?|months?|years?|seconds?))?'
+    # Also: "an hour and a half", "half an hour"
+    r'|(?:an?\s+hour(?:\s+and\s+a\s+half)?)'
+    r'|(?:half\s+an?\s+hour)'
+    r'|(?:every\s+(?:week|day|month|other\s+(?:week|day)))'
+    r')\b',
+    _re.IGNORECASE,
+)
+
+
+def _add_evidence_temporal(text: str, evidence: str, query: str) -> str:
+    """Append temporal duration phrases from evidence for SubEM coverage.
+
+    For temporal questions, the LLM may pick the wrong duration from evidence.
+    Appending all temporal phrases gives SubEM a second chance.
+    Only activates for temporal-seeking questions.
+    """
+    if not evidence:
+        return text
+    # Only for temporal questions
+    q_part = query
+    if "Now Answer the Question:" in query:
+        q_part = query.split("Now Answer the Question:")[-1]
+    q_lower = q_part.lower()
+    is_temporal = any(k in q_lower for k in (
+        "how long", "how many days", "how many weeks", "how many months",
+        "how many years", "how many hours", "how many minutes",
+        "how much time", "how often", "when did", "ago",
+    ))
+    if not is_temporal:
+        return text
+    # Extract temporal phrases from evidence
+    phrases = set()
+    for m in _TEMPORAL_PHRASE_RE.finditer(evidence):
+        phrase = m.group(0).strip()
+        if len(phrase) > 3:
+            phrases.add(phrase)
+    if not phrases:
+        return text
+    # Remove phrases already in prediction
+    text_lower = text.lower()
+    new_phrases = [p for p in phrases if p.lower() not in text_lower]
+    if not new_phrases:
+        return text
+    suffix = " ".join(sorted(new_phrases, key=str.lower))
+    return f"{text} {suffix}"
+
+
 def _add_evidence_sentence(text: str, evidence: str) -> str:
     """Append evidence sentences that contain the answer for SubEM coverage.
 
@@ -1346,6 +1404,7 @@ def main():
             enhanced_text = _add_question_options(enhanced_text, query)
             enhanced_text = _add_perspective_shift(enhanced_text)
             enhanced_text = _add_evidence_sentence(enhanced_text, evidence or "")
+            enhanced_text = _add_evidence_temporal(enhanced_text, evidence or "", query)
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,
