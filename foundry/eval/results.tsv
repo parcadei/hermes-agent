@@ -37,3 +37,4 @@ b351078	50.00	40.57	discard	bidirectional number normalization (word↔digit suf
 604a074	50.00	26.79	discard	evidence suffix for short preds (≤2 words). 0 flips, F1 cratered (gold phrase never contiguous in evidence)
 e5da7cc	48.33	44.86	discard	numeric-specialized retry (output ONLY number). -1: forced 50% instead of verbose sentence with 20%
 de3b633	50.00	44.39	discard	broaden retry trigger (endswith unknown ≤10w, i don't have enough, not enough). 0 flips: retry catches qi=1 but evidence is aggregate counts not text
+f926524	50.00	44.46	discard	remove 'concisely' from system prompt. 0 flips: qi=11 'Pilsner or lager'→'A pilsner or lager' (still no full sentence)
