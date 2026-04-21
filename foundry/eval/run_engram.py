@@ -763,9 +763,11 @@ def main():
                     total_chars += len(text)
                 evidence = "\n".join(evidence_parts)
 
-            # Generate answer from evidence — use clean question (less noise)
+            # Generate answer from evidence
+            # Use full query for LLM (includes options/instructions),
+            # retrieval_query was only for BM25 search
             answer_text = generate_answer(
-                retrieval_query, evidence or "", args.agent_model,
+                query, evidence or "", args.agent_model,
                 sub_ds, max_tokens=gen_max_len,
             )
             query_time = time.time() - query_start
