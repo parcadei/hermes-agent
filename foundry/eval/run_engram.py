@@ -141,10 +141,9 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
 
     # Rebuild BM25 and chunk store with individual turns
     store = foundry._store
-    new_bm25 = BM25Index()
 
+    # First pass: store turn chunks (raw text for evidence retrieval)
     for idx, (turn_text, role) in enumerate(all_turns):
-        new_bm25.add(idx, turn_text)
         turn_chunk = RawChunk(
             chunk_idx=idx,
             turn_idx=idx,
@@ -152,8 +151,6 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
             role=role,
         )
         store.chunks.store(turn_chunk)
-
-    store.bm25_chunks = new_bm25
 
     # Realign entity mention_turns to new BM25 turn indices.
     # Original mention_turns reference 512-token chunk indices; the new BM25
@@ -164,20 +161,45 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
         entity_names[ent.canonical] = ent
         for alias in ent.aliases:
             entity_names[alias] = ent
+    # turn_idx → set of EntityNodes that appear in that turn
+    turn_entities: dict[int, set] = {}
     if entity_names:
-        # Clear old mention_turns (they referred to 512-token chunks)
         for ent in store.entity_graph.all_entities():
             ent.mention_turns = set()
-        # Rebuild mention_turns from actual turn text
         for idx, (turn_text, _role) in enumerate(all_turns):
             turn_lower = turn_text.lower()
             for name, ent in entity_names.items():
                 if name and len(name) > 2 and name in turn_lower:
                     ent.mention_turns.add(idx)
+                    turn_entities.setdefault(idx, set()).add(ent)
         aligned = sum(1 for e in store.entity_graph.all_entities() if e.mention_turns)
         print(f"  Aligned {aligned}/{len(store.entity_graph)} entity mention_turns to BM25 indices")
 
-    print(f"  Rebuilt BM25: {len(context_chunks)} session chunks → {len(all_turns)} individual turns")
+    # Second pass: build BM25 with fact-augmented key expansion.
+    # Append entity types to each turn so BM25 matches on type queries
+    # (e.g. "fish" matches a turn mentioning "neon_tetras" with type "fish").
+    new_bm25 = BM25Index()
+    enriched = 0
+    for idx, (turn_text, role) in enumerate(all_turns):
+        ents = turn_entities.get(idx, set())
+        if ents:
+            # Collect unique type labels from entity facts
+            type_labels = set()
+            for ent in ents:
+                for pred, facts in ent.facts.items():
+                    if pred in ("what", "who"):
+                        for f in facts:
+                            if f.object and f.object != "?" and len(f.object) > 1:
+                                type_labels.add(f.object.replace("_", " "))
+            if type_labels:
+                suffix = " " + " ".join(sorted(type_labels))
+                new_bm25.add(idx, turn_text + suffix)
+                enriched += 1
+                continue
+        new_bm25.add(idx, turn_text)
+    store.bm25_chunks = new_bm25
+
+    print(f"  Rebuilt BM25: {len(context_chunks)} session chunks → {len(all_turns)} individual turns ({enriched} fact-augmented)")
 
 
 def _embed_turns(foundry: "Foundry", embed_model: str) -> "Any":
