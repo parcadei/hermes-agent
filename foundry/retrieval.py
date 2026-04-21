@@ -1027,13 +1027,16 @@ def recall(
         agg = aggregate(store, norm_entity, norm_predicate)
         result = agg.get("result")
         entities = agg.get("entities", [])
-        # Format structured answer + supporting BM25 evidence
+        # Format: entity names only (no count number) when entities present,
+        # so LLM can derive the count from BM25 evidence without anchoring
+        # to a potentially wrong aggregate number.
         if norm_predicate == "list":
             header = ", ".join(str(e) for e in (result if isinstance(result, list) else entities))
-        elif norm_predicate == "count":
-            header = f"{result} (entities: {', '.join(entities)})" if entities else str(result)
+        elif entities:
+            # Provide entity names as hints but NOT the computed count/sum
+            header = f"Found entities matching '{norm_entity}': {', '.join(entities)}"
         else:
-            header = f"{result} (from: {', '.join(entities)})" if entities else str(result)
+            header = str(result)
         parts = [header]
         # Always attach BM25 evidence so LLM can verify/correct counts
         remaining = char_budget - len(header)
