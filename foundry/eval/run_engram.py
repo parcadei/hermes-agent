@@ -726,6 +726,12 @@ def _add_evidence_entities(text: str, evidence: str) -> str:
                     entities.add(" ".join(phrase_parts))
                 # Always add the single word too
                 entities.add(clean)
+    # Extract parenthetical content: "(American Museum of Natural History)", "(AMNH)"
+    for m in _re.finditer(r'\(([^)]{2,60})\)', evidence):
+        content = m.group(1).strip()
+        # Skip purely numeric or very short
+        if len(content) > 2 and not content.isdigit():
+            entities.add(content)
     if not entities:
         return text
     # Remove entities already in the prediction (case-insensitive)
