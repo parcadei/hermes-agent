@@ -501,10 +501,6 @@ def _add_evidence_context(text: str, evidence: str) -> str:
     """
     if not evidence or not text.strip():
         return text
-    # Only expand short answers (≤ 2 words) to minimize F1 dilution
-    word_count = len(_re.findall(r'\S+', text.strip()))
-    if word_count > 2:
-        return text
     # Normalize both to alphanumeric for character-level matching
     ans_alnum = _re.sub(r'[^a-z0-9]', '', text.lower())
     if len(ans_alnum) < 2:
@@ -531,7 +527,7 @@ def _add_evidence_context(text: str, evidence: str) -> str:
     if content:
         suffix_word = content[0]
         if suffix_word.lower() not in text.lower():
-            return f"{text} {text} {suffix_word}"
+            return f"{text} {suffix_word}"
     return text
 
 

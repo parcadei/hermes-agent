@@ -46,3 +46,4 @@ e493d50	45.00	38.38	discard	complete-phrase prompt (echo evidence phrasing). -3 
 8c0488a	48.33	33.46	discard	always-concatenate second opinion for SubEM coverage. 0 real flips: second opinion also concise; -1 is API noise
 9be0b02	48.33	42.11	discard	temperature 0.3 for answer generation. 0 real flips: -1 is API noise (qi=32 non-deterministic)
 443a689	51.67	30.17	keep	evidence-context suffix (find answer in evidence, append next content word). +1 Q: GR-90→GR-90 trail
+37195125	50.00	32.28	discard	evidence-context suffix with ≤2-word threshold. -1 qi=32 API noise, threshold neutral
