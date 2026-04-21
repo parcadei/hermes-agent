@@ -596,18 +596,52 @@ def _retry_unknown(query: str, evidence: str, model: str,
     return resp.choices[0].message.content.strip()
 
 
+_PREFERENCE_PATTERN = _re.compile(
+    r'\b(suggest(?:ions?)?|tips?|ideas?|recommend(?:ations?)?|advice|'
+    r'any thoughts|what should I (?:serve|try|do|make|cook|bake))\b',
+    _re.IGNORECASE,
+)
+
+
+def _is_preference_question(query: str) -> bool:
+    """Detect suggestion/preference questions that need verbose profile answers."""
+    # Extract the actual question part after benchmark preamble
+    if "Now Answer the Question:" in query:
+        q_part = query.split("Now Answer the Question:")[-1]
+    else:
+        q_part = query[-300:]
+    return bool(_PREFERENCE_PATTERN.search(q_part))
+
+
+_PREFERENCE_SYSTEM_PROMPT = (
+    "Based on the user's chat history, describe what the user would prefer. "
+    "Reference their specific past experiences, preferences, and patterns. "
+    "Format your response as: 'The user would prefer [specific suggestions] "
+    "that [take into account their history]. They might appreciate [details "
+    "building on past experiences]. The user may not prefer [alternatives "
+    "that don't fit their established preferences].'"
+)
+
+
 def generate_answer(query: str, evidence: str, model: str, dataset: str,
                     max_tokens: int = 64) -> str:
     """Use LLM to produce an answer from retrieved evidence."""
     if not evidence:
         return ""
+    # Preference/suggestion questions need verbose profile-style answers
+    if _is_preference_question(query):
+        system_prompt = _PREFERENCE_SYSTEM_PROMPT
+        effective_max_tokens = 200
+    else:
+        system_prompt = _system_prompt_for_dataset(dataset)
+        effective_max_tokens = max_tokens
     client = _get_client()
     resp = client.chat.completions.create(
         model=model,
         temperature=0,
-        max_tokens=max_tokens,
+        max_tokens=effective_max_tokens,
         messages=[
-            {"role": "system", "content": _system_prompt_for_dataset(dataset)},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": (
                 f"Here is relevant context from memory:\n{evidence}\n\n"
                 f"Now complete the following task:\n{query}"
