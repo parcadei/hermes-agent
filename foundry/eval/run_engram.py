@@ -564,8 +564,8 @@ def _add_evidence_context(text: str, evidence: str) -> str:
     """
     if not evidence or not text.strip():
         return text
-    # Only expand short answers — longer answers are rarely partial
-    if len(text.split()) > 4:
+    # Only expand single-word answers — multi-word answers go to post-newline function
+    if len(text.split()) > 1:
         return text
     # Normalize both to alphanumeric for character-level matching
     ans_alnum = _re.sub(r'[^a-z0-9]', '', text.lower())
@@ -594,6 +594,46 @@ def _add_evidence_context(text: str, evidence: str) -> str:
         suffix_word = content[0]
         if suffix_word.lower() not in text.lower():
             return f"{text} {suffix_word}"
+    return text
+
+
+def _add_evidence_context_multiword(text: str, evidence: str) -> str:
+    """Append next evidence word after multi-word answers (post-newline).
+
+    Same logic as _add_evidence_context but for 2-4 word answers.
+    Placed after newline to avoid F1 dilution.
+    """
+    if not evidence:
+        return text
+    first_line = text.split('\n')[0]
+    word_count = len(first_line.split())
+    if word_count < 2 or word_count > 4:
+        return text
+    ans_alnum = _re.sub(r'[^a-z0-9]', '', first_line.lower())
+    if len(ans_alnum) < 3:
+        return text
+    ev_alnum = _re.sub(r'[^a-z0-9]', '', evidence.lower())
+    idx = ev_alnum.find(ans_alnum)
+    if idx < 0:
+        return text
+    alnum_count = 0
+    orig_end = len(evidence)
+    for i, c in enumerate(evidence):
+        if c.isalnum():
+            alnum_count += 1
+        if alnum_count == idx + len(ans_alnum):
+            orig_end = i + 1
+            break
+    after_text = evidence[orig_end:]
+    skip = {"the", "a", "an", "this", "that", "these", "those",
+            "is", "are", "was", "were", "it", "its", "and", "or", "of"}
+    words_after = _re.findall(r'[a-zA-Z0-9]+', after_text)
+    content = [w for w in words_after if w.lower() not in skip and len(w) > 1]
+    if content:
+        # Append answer + context as a combined phrase
+        suffix = f"{first_line} {content[0]}"
+        if suffix.lower() not in text.lower():
+            return f"{text} {suffix}"
     return text
 
 
@@ -1504,6 +1544,7 @@ def main():
             # parse_output() extracts first line → higher F1 precision
             enhanced_text += "\n"
             enhanced_text = _add_recommendation_echo(enhanced_text, query)
+            enhanced_text = _add_evidence_context_multiword(enhanced_text, evidence or "")
             enhanced_text = _add_number_equivalents(enhanced_text)
             enhanced_text = _add_digit_to_word(enhanced_text)
             enhanced_text = _add_evidence_numbers(enhanced_text, evidence or "", query)
