@@ -837,16 +837,10 @@ def main():
                 sub_ds, max_tokens=gen_max_len,
             )
 
-            # Retry: if model refuses/hedges but we have substantive evidence,
+            # Retry: if model says "unknown" but we have substantive evidence,
             # re-ask with a best-effort prompt (zero-risk: only triggers on failures)
-            ans_low = answer_text.lower().strip().rstrip('.')
-            _is_refusal = (
-                ans_low == "unknown"
-                or ans_low.startswith("i'm sorry")
-                or ans_low.startswith("i cannot")
-                or ans_low.startswith("i don't have enough")
-            )
-            if _is_refusal and evidence and len(evidence) > 100:
+            if (answer_text.lower().strip().rstrip('.') == "unknown"
+                    and evidence and len(evidence) > 200):
                 answer_text = _retry_unknown(
                     query, evidence, args.agent_model, gen_max_len,
                 )
