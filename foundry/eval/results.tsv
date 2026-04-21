@@ -51,3 +51,4 @@ e493d50	45.00	38.38	discard	complete-phrase prompt (echo evidence phrasing). -3 
 778253cd	51.67	41.83	keep	≤1-word threshold for evidence-context suffix. Same SubEM, F1 +4.15 more (41.83 vs 37.68)
 10a4c7e9	51.67	41.86	discard	broader retry triggers (I'm sorry/I cannot) + threshold 200→100c. 0 flips: retry fires but evidence insufficient
 58dbaa9f	51.67	41.80	discard	expanded suffix skip list (prepositions, pronouns, verbs). 0 flips: problematic suffixes are nouns, not function words
+cc1b3310	46.67	37.03	discard	remove 'say unknown' from prompt. -3 Qs: model hedges/guesses wrong, retry never fires (qi=40 regressed)
