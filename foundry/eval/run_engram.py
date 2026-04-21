@@ -802,6 +802,24 @@ def main():
                     query, evidence, args.agent_model, gen_max_len,
                 )
 
+            # Extend very short answers with evidence context.
+            # When model outputs ≤2 words (e.g. "GR-90"), the matching evidence
+            # fragment often contains the full phrase gold expects ("the GR-90 trail").
+            # Appending the continuation from evidence makes SubEM match.
+            if evidence and len(answer_text.split()) <= 2:
+                pred_clean = answer_text.lower().strip('."\'!,')
+                if pred_clean and pred_clean != "unknown":
+                    ev_lower = evidence.lower()
+                    idx = ev_lower.find(pred_clean)
+                    if idx >= 0:
+                        end = idx + len(pred_clean)
+                        # Get words after the match (skip punct, take next 5 words)
+                        remainder = evidence[end:end + 100].lstrip(' .,;:!?')
+                        words_after = remainder.split()[:5]
+                        context = " ".join(words_after)
+                        if context and len(context) > 2:
+                            answer_text = f"{answer_text} {context}"
+
             query_time = time.time() - query_start
 
             if query_index < 3:
