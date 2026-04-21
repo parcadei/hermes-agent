@@ -1092,6 +1092,7 @@ def recall(
 
 
 _BM25_NOISE = {
+    # Question words and auxiliaries
     "how", "many", "much", "long", "what", "which", "where", "when", "who",
     "whom", "why", "did", "do", "does", "is", "are", "was", "were", "have",
     "has", "had", "can", "could", "would", "should", "will", "shall", "may",
@@ -1101,6 +1102,13 @@ _BM25_NOISE = {
     "there", "here", "if", "so", "than", "then", "about", "between",
     "typically", "currently", "usually", "total", "different", "any",
     "answer", "question", "based", "history", "chats", "concisely",
+    # Common question verbs (base form rarely matches inflected corpus text)
+    "get", "give", "take", "make", "know", "find", "need", "earn",
+    "spend", "attend", "receive", "own", "use", "visit", "meet",
+    # Time/comparison modifiers (don't match corpus content)
+    "ago", "older", "younger", "first", "last", "since", "during",
+    # Meta/measurement
+    "percentage", "number",
 }
 
 
@@ -1162,32 +1170,8 @@ def _recall_retrieve(
         except Exception:
             pass
 
-    # Entity-linked retrieval: find turns mentioning entities from the query
-    entity_hits: list[tuple[int, float]] = []
-    if store.bm25_entities._texts:
-        try:
-            ent_results = store.bm25_entities.query(bm25_query, top_k=5)
-            entity_turn_ids: list[int] = []
-            for ent_doc_id, _ent_score in ent_results[:3]:
-                entity = _candidate_entity_for_doc(store, ent_doc_id,
-                    getattr(store.bm25_entities, "_texts", {}).get(ent_doc_id, ""))
-                if entity is not None:
-                    for turn_idx in entity.mention_turns:
-                        if int(turn_idx) not in entity_turn_ids:
-                            entity_turn_ids.append(int(turn_idx))
-            # Assign rank-based scores (turn order within entity)
-            for rank, tid in enumerate(entity_turn_ids[:candidate_k]):
-                entity_hits.append((tid, 1.0 / (rank + 1)))
-        except Exception:
-            pass
-
     # RRF merge
-    all_lists = [bm25_hits]
-    if cosine_hits:
-        all_lists.append(cosine_hits)
-    if entity_hits:
-        all_lists.append(entity_hits)
-    merged = _rrf_merge(all_lists) if len(all_lists) > 1 else bm25_hits
+    merged = _rrf_merge([bm25_hits, cosine_hits]) if cosine_hits else bm25_hits
 
     # Cross-encoder rerank (if reranker available)
     if reranker is not None and merged:
