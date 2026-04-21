@@ -1084,10 +1084,61 @@ def recall(
         return "\n".join(parts)
 
     # ── Default route: factual → BM25 + cosine RRF + rerank ──────
-    return _recall_retrieve(
+    evidence = _recall_retrieve(
         store, query, top_k=top_k, char_budget=char_budget,
         embed_fn=embed_fn, reranker=reranker,
     )
+    # Enrich evidence with structured entity-graph facts
+    suffix = _enrich_with_entity_facts(store, evidence)
+    if suffix:
+        return evidence + "\n" + suffix
+    return evidence
+
+
+def _enrich_with_entity_facts(store: "FoundryStore", evidence: str) -> str:
+    """Scan evidence for entity names and append their graph facts.
+
+    After BM25 retrieval, the evidence contains raw conversation turns.
+    This scans for entity names, looks up structured facts (type, quantity,
+    related entities), and appends a concise summary.  This bridges the gap
+    between unstructured text evidence and the entity graph's structured
+    knowledge — inspired by Observational Memory's "observations > raw data".
+    """
+    if not evidence or not store.entity_graph:
+        return ""
+
+    evidence_lower = evidence.lower()
+    matched: list[tuple[str, "EntityNode"]] = []
+    seen_canonical: set[str] = set()
+
+    for entity in store.entity_graph.all_entities():
+        if entity.canonical in seen_canonical:
+            continue
+        # Match entity name in evidence text
+        name = entity.canonical.replace("_", " ")
+        if len(name) < 3:
+            continue
+        if name in evidence_lower:
+            seen_canonical.add(entity.canonical)
+            matched.append((name, entity))
+
+    if not matched:
+        return ""
+
+    lines: list[str] = []
+    for name, entity in matched[:15]:  # Cap to avoid bloat
+        parts: list[str] = []
+        for pred, facts in entity.facts.items():
+            if pred in ("what", "who", "quantity", "how_much", "when", "where"):
+                latest = facts[-1] if facts else None
+                if latest and latest.object and latest.object != "?":
+                    parts.append(f"{pred}={latest.object}")
+        if parts:
+            lines.append(f"{name}: {', '.join(parts)}")
+
+    if not lines:
+        return ""
+    return "Known facts: " + "; ".join(lines)
 
 
 _BM25_NOISE = {
