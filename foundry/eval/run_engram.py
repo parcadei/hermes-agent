@@ -1075,7 +1075,6 @@ def main():
                         parse_args._reranker = CrossEncoderReranker(args.rerank_model, top_k=10)
                     reranker = parse_args._reranker
                 params = decompose_recall_params(retrieval_query)
-                pref_budget = 16000 if _is_preference_question(query) else 12000
                 evidence = recall(
                     foundry._store,
                     retrieval_query,
@@ -1083,7 +1082,7 @@ def main():
                     predicate=params["predicate"],
                     time=params["time"],
                     top_k=args.retrieve_top_k,
-                    char_budget=pref_budget,
+                    char_budget=12000,
                     embed_fn=embed_fn,
                     reranker=reranker,
                 )

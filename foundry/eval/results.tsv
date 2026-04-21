@@ -84,3 +84,4 @@ n/a	52.00	42.14	keep	5-context exp80 definitive (300 Qs). Same SubEM as exp78, F
 n/a	75.00	48.31	keep	top_k=30 (vs 20). Same SubEM, F1 +1.59. Config change only, sweet spot for reranker candidates.
 n/a	73.33	47.85	discard	top_k=40. -1 SubEM (qi=39 lost: too many candidates dilute reranker)
 6d80e2bb	75.00	47.41	discard	char_budget 12000→14000. 0 SubEM flips, F1 +0.69 marginal. Not worth 2K extra chars.
+e8c38f3e	75.00	47.87	discard	preference-only char_budget 16000. 0 SubEM flips, LLM-judge still WRONG on qi=10,13 (retrieval miss, not budget)
