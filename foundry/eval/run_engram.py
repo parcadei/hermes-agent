@@ -794,10 +794,17 @@ def main():
                 sub_ds, max_tokens=gen_max_len,
             )
 
-            # Retry: if model says "unknown" but we have substantive evidence,
-            # re-ask with a best-effort prompt (zero-risk: only triggers on failures)
-            if (answer_text.lower().strip().rstrip('.') == "unknown"
-                    and evidence and len(evidence) > 200):
+            # Retry: if model effectively says "unknown" but we have substantive
+            # evidence, re-ask with a best-effort prompt.
+            # Detect both exact "unknown" and verbose variants.
+            _ans_lower = answer_text.lower().strip().rstrip('.')
+            _is_unknown = (
+                _ans_lower == "unknown"
+                or (_ans_lower.endswith("unknown") and len(answer_text.split()) <= 10)
+                or _ans_lower.startswith("i don't have enough")
+                or _ans_lower.startswith("not enough")
+            )
+            if _is_unknown and evidence and len(evidence) > 200:
                 answer_text = _retry_unknown(
                     query, evidence, args.agent_model, gen_max_len,
                 )
