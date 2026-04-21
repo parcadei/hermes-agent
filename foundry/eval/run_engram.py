@@ -532,6 +532,27 @@ _NUMBER_WORDS = {
     "nineteen": "19", "twenty": "20",
 }
 
+_DIGIT_TO_WORD = {v: k for k, v in _NUMBER_WORDS.items()}
+
+
+def _add_digit_to_word(text: str) -> str:
+    """Append word-number variant when prediction has digits.
+
+    Reverse of _add_number_equivalents: "3 weeks" → "3 weeks three weeks".
+    If gold uses word-numbers (normalized "three weeks"), the word copy matches.
+    Only applied after the newline to avoid F1 dilution.
+    """
+    word_version = text
+    for digit, word in sorted(_DIGIT_TO_WORD.items(),
+                              key=lambda x: -len(x[0])):
+        word_version = _re.sub(
+            rf'\b{_re.escape(digit)}\b', word, word_version,
+        )
+    if word_version != text and word_version.lower() not in text.lower():
+        return f"{text} {word_version}"
+    return text
+
+
 def _add_evidence_context(text: str, evidence: str) -> str:
     """Append answer + next evidence word for SubEM coverage.
 
@@ -1461,6 +1482,7 @@ def main():
             enhanced_text += "\n"
             enhanced_text = _add_recommendation_echo(enhanced_text, query)
             enhanced_text = _add_number_equivalents(enhanced_text)
+            enhanced_text = _add_digit_to_word(enhanced_text)
             enhanced_text = _add_evidence_numbers(enhanced_text, evidence or "", query)
             enhanced_text = _add_evidence_entities(enhanced_text, evidence or "")
             enhanced_text = _add_question_options(enhanced_text, query)
