@@ -38,3 +38,5 @@ b351078	50.00	40.57	discard	bidirectional number normalization (word↔digit suf
 e5da7cc	48.33	44.86	discard	numeric-specialized retry (output ONLY number). -1: forced 50% instead of verbose sentence with 20%
 de3b633	50.00	44.39	discard	broaden retry trigger (endswith unknown ≤10w, i don't have enough, not enough). 0 flips: retry catches qi=1 but evidence is aggregate counts not text
 f926524	50.00	44.46	discard	remove 'concisely' from system prompt. 0 flips: qi=11 'Pilsner or lager'→'A pilsner or lager' (still no full sentence)
+0e9485d	50.00	47.05	discard	chain-of-thought + ANSWER: extraction (max_tokens=200). 0 SubEM flips; F1 +2.52 from precise answers but adds complexity
+9520f31	50.00	43.40	discard	ordinal number normalization (first↔1st, second↔2nd). 0 flips: no ordinal mismatches in ctx0 golds

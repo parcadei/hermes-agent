@@ -490,54 +490,20 @@ _NUMBER_WORDS = {
     "nineteen": "19", "twenty": "20",
 }
 
-_ORDINAL_WORDS = {
-    "first": "1st", "second": "2nd", "third": "3rd", "fourth": "4th",
-    "fifth": "5th", "sixth": "6th", "seventh": "7th", "eighth": "8th",
-    "ninth": "9th", "tenth": "10th", "eleventh": "11th", "twelfth": "12th",
-    "thirteenth": "13th", "fourteenth": "14th", "fifteenth": "15th",
-    "sixteenth": "16th", "seventeenth": "17th", "eighteenth": "18th",
-    "nineteenth": "19th", "twentieth": "20th",
-}
-_ORDINAL_DIGITS = {v: k for k, v in _ORDINAL_WORDS.items()}
-
-
 def _add_number_equivalents(text: str) -> str:
-    """Append normalized copies so SubEM matches regardless of number format.
+    """Append digit-normalized copy so SubEM matches regardless of number format.
 
-    Cardinals: 'Three weeks ago' → 'Three weeks ago 3 weeks ago'
-    Ordinals:  'the first time'  → 'the first time the 1st time'
-    Both directions appended so either format in gold matches.
+    'Three weeks ago' → 'Three weeks ago 3 weeks ago'
+    Original preserved (word-golds match) + digit copy appended (digit-golds match).
     """
-    parts = [text]
-
-    # Cardinal word→digit
     digit_version = text
     for word, digit in _NUMBER_WORDS.items():
         digit_version = _re.sub(
             rf'\b{word}\b', digit, digit_version, flags=_re.IGNORECASE,
         )
     if digit_version != text:
-        parts.append(digit_version)
-
-    # Ordinal word→digit (first→1st)
-    ord_digit = text
-    for word, digit in _ORDINAL_WORDS.items():
-        ord_digit = _re.sub(
-            rf'\b{word}\b', digit, ord_digit, flags=_re.IGNORECASE,
-        )
-    if ord_digit != text:
-        parts.append(ord_digit)
-
-    # Ordinal digit→word (1st→first)
-    ord_word = text
-    for digit, word in _ORDINAL_DIGITS.items():
-        ord_word = _re.sub(
-            rf'\b{_re.escape(digit)}\b', word, ord_word, flags=_re.IGNORECASE,
-        )
-    if ord_word != text:
-        parts.append(ord_word)
-
-    return " ".join(parts) if len(parts) > 1 else text
+        return f"{text} {digit_version}"
+    return text
 
 
 def _retry_unknown(query: str, evidence: str, model: str,
