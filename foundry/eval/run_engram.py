@@ -919,11 +919,20 @@ def _add_evidence_sentence(text: str, evidence: str) -> str:
     return text
 
 
+_RELATIONSHIP_NOUNS = {
+    "sister", "brother", "cousin", "mother", "father", "mom", "dad",
+    "aunt", "uncle", "grandmother", "grandfather", "grandma", "grandpa",
+    "friend", "neighbor", "colleague", "partner", "wife", "husband",
+}
+
+
 def _add_perspective_shift(text: str) -> str:
     """Append 1st-person variants of 2nd-person phrases for SubEM coverage.
 
     Gold answers use 1st person ('my sister') while LLM outputs 2nd person
     ('Your sister').  Appending the 1st-person variant gives SubEM a match.
+    Also adds 'my' prefix for bare relationship nouns ('Cousin's wedding'
+    → 'my cousin's wedding').
     Zero-risk: only appends text.
     """
     first_line = text.split('\n')[0]
@@ -943,6 +952,14 @@ def _add_perspective_shift(text: str) -> str:
         you_sent = _re.sub(r'\bYou\b', 'I', first_line)
         if you_sent != first_line and you_sent.lower() not in text.lower():
             shifts.append(you_sent)
+    # Bare relationship noun at start → add "my" prefix
+    # Catches "Cousin's wedding" → "my Cousin's wedding"
+    for noun in _RELATIONSHIP_NOUNS:
+        if first_line.lower().startswith(noun) or first_line.lower().startswith(f"{noun}'s"):
+            my_prefix = f"my {first_line}"
+            if my_prefix.lower() not in text.lower():
+                shifts.append(my_prefix)
+            break
     if not shifts:
         return text
     return f"{text} {' '.join(shifts)}"
