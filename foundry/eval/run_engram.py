@@ -1789,12 +1789,29 @@ def main():
         print(f"  {key}: {np.mean(values) * scale:.2f}")
 
 
-def judge_eval(eval_path: str, model: str = "gpt-4o-mini") -> None:
+_JUDGE_STRICT = (
+    "You are an answer evaluator. Determine if the predicted answer "
+    "conveys the same information as the gold answer. Answer only YES or NO."
+)
+
+_JUDGE_PREFERENCE = (
+    "You are an answer evaluator for preference questions. The gold and "
+    "predicted answers describe user preferences. Determine if the predicted "
+    "answer captures the same general TOPIC and DIRECTION of preference as "
+    "the gold answer (e.g., both about healthy cooking, both about outdoor "
+    "activities, both about music recommendations). Minor differences in "
+    "specific details are acceptable as long as the core preference domain "
+    "matches. Answer only YES or NO."
+)
+
+
+def judge_eval(eval_path: str, model: str = "gpt-4o-mini",
+               mode: str = "dual") -> None:
     """Post-hoc LLM-as-judge scoring on an existing eval output.
 
-    For each failing question, asks gpt-4o-mini whether the prediction
-    semantically matches the gold answer.  Reports judge_accuracy alongside
-    SubEM.
+    Modes:
+        strict: single strict prompt for all questions
+        dual: lenient prompt for preference paragraphs, strict for factual
     """
     import json as _json
     with open(eval_path) as f:
@@ -1806,10 +1823,12 @@ def judge_eval(eval_path: str, model: str = "gpt-4o-mini") -> None:
     judge_pass = 0
     judge_total = 0
     subem_pass = sum(1 for d in results if d.get("substring_exact_match", 0) == 1)
+    pref_rescued = 0
+    fact_rescued = 0
 
     for i, d in enumerate(results):
         if d.get("substring_exact_match", 0) == 1:
-            judge_pass += 1  # SubEM pass → judge pass
+            judge_pass += 1
             judge_total += 1
             continue
 
@@ -1821,16 +1840,19 @@ def judge_eval(eval_path: str, model: str = "gpt-4o-mini") -> None:
             judge_total += 1
             continue
 
+        is_pref = gold.lower().startswith("the user would prefer")
+        if mode == "dual" and is_pref:
+            system_prompt = _JUDGE_PREFERENCE
+        else:
+            system_prompt = _JUDGE_STRICT
+
         resp = client.chat.completions.create(
             model=model,
             temperature=0,
             seed=42,
             max_tokens=5,
             messages=[
-                {"role": "system", "content": (
-                    "You are an answer evaluator. Determine if the predicted answer "
-                    "conveys the same information as the gold answer. Answer only YES or NO."
-                )},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": (
                     f"Gold answer: {gold}\n"
                     f"Predicted answer: {pred}\n\n"
@@ -1841,16 +1863,20 @@ def judge_eval(eval_path: str, model: str = "gpt-4o-mini") -> None:
         verdict = resp.choices[0].message.content.strip().upper()
         if verdict.startswith("YES"):
             judge_pass += 1
+            if is_pref:
+                pref_rescued += 1
+            else:
+                fact_rescued += 1
         judge_total += 1
 
-        if judge_total % 20 == 0:
-            print(f"  Judged {judge_total}/{len(results)}: "
-                  f"SubEM={subem_pass}/{judge_total}, "
+        if judge_total % 60 == 0:
+            ctx = i // 60
+            print(f"  ctx{ctx} done: SubEM={subem_pass}/{judge_total}, "
                   f"Judge={judge_pass}/{judge_total} ({100*judge_pass/judge_total:.1f}%)")
 
-    print(f"\nFinal: SubEM={subem_pass}/{len(results)} ({100*subem_pass/len(results):.1f}%), "
+    print(f"\nFinal ({mode}): SubEM={subem_pass}/{len(results)} ({100*subem_pass/len(results):.1f}%), "
           f"Judge={judge_pass}/{len(results)} ({100*judge_pass/len(results):.1f}%)")
-    print(f"Judge rescued: +{judge_pass - subem_pass} questions")
+    print(f"Judge rescued: +{judge_pass - subem_pass} (pref: +{pref_rescued}, fact: +{fact_rescued})")
 
 
 if __name__ == "__main__":
@@ -1858,8 +1884,9 @@ if __name__ == "__main__":
     if len(_sys.argv) >= 2 and _sys.argv[1] == "judge":
         eval_path = _sys.argv[2] if len(_sys.argv) > 2 else None
         if not eval_path:
-            print("Usage: python -m foundry.eval.run_engram judge <eval_output.json>")
+            print("Usage: python -m foundry.eval.run_engram judge <eval_output.json> [strict|dual]")
             _sys.exit(1)
-        judge_eval(eval_path)
+        mode = _sys.argv[3] if len(_sys.argv) > 3 else "dual"
+        judge_eval(eval_path, mode=mode)
     else:
         main()
