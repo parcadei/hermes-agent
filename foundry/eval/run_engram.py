@@ -537,7 +537,7 @@ def generate_answer(query: str, evidence: str, model: str, dataset: str,
     client = _get_client()
     resp = client.chat.completions.create(
         model=model,
-        temperature=0.3,
+        temperature=0,
         max_tokens=max_tokens,
         messages=[
             {"role": "system", "content": _system_prompt_for_dataset(dataset)},

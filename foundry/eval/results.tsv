@@ -44,3 +44,4 @@ c5ade27	41.67	42.32	discard	reverse evidence ordering (best-ranked last). -5 Qs:
 07dd7c8	50.00	45.36	discard	sandwich evidence (duplicate best at end). 0 SubEM flips; F1 +1.96 from stronger best-passage attention but adds complexity
 e493d50	45.00	38.38	discard	complete-phrase prompt (echo evidence phrasing). -3 Qs: verbose answers changed content, not just length
 8c0488a	48.33	33.46	discard	always-concatenate second opinion for SubEM coverage. 0 real flips: second opinion also concise; -1 is API noise
+9be0b02	48.33	42.11	discard	temperature 0.3 for answer generation. 0 real flips: -1 is API noise (qi=32 non-deterministic)
