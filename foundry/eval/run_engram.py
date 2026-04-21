@@ -804,6 +804,7 @@ def main():
                     predicate=params["predicate"],
                     time=params["time"],
                     top_k=args.retrieve_top_k,
+                    char_budget=10000,
                     embed_fn=embed_fn,
                     reranker=reranker,
                 )
