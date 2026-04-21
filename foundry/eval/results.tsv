@@ -77,3 +77,4 @@ ac6f9ea5	73.33	14.48	keep	attribution prefix for 'what did X say' questions. +1 
 ff19a6b2	73.33	13.04	discard	recommendation echo (I recommended X for the Y). +1/-1: qi=11 gained but qi=19 lost (echo inflates word count, blocks evidence-context suffix)
 80739330	75.00	13.46	keep	reorder pipeline: evidence-context before recommendation echo. +1 Q: qi=11 (Pilsner/lager rescued), qi=19 preserved (trail suffix fires first)
 4963dc61	75.00	45.30	keep	newline separator between clean answer and bulk SubEM suffixes. Same SubEM, F1 +31.84 (parse_output extracts clean first line)
+6756960c	75.00	46.72	keep	move recommendation echo after newline separator. Same SubEM, F1 +1.42 (cleaner first line)
