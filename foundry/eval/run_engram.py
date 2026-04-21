@@ -477,10 +477,8 @@ def _system_prompt_for_dataset(dataset: str) -> str:
         )
     # Generic fallback
     return (
-        "Answer the question using ONLY the provided evidence. "
-        "Think step by step, then give your final answer on a new line "
-        "starting with ANSWER:. Be concise in your final answer. "
-        "If the evidence doesn't contain the answer, say 'ANSWER: unknown'."
+        "Answer the question concisely using ONLY the provided evidence. "
+        "If the evidence doesn't contain the answer, say 'unknown'."
     )
 
 
@@ -566,7 +564,7 @@ def main():
 
     dataset_config["chunk_size"] = args.chunk_size
     sub_ds = dataset_config["sub_dataset"]
-    gen_max_len = 200  # CoT needs room for step-by-step reasoning + answer
+    gen_max_len = dataset_config.get("generation_max_length", 50)
 
     agent_config = {"agent_name": "rag", "agent_chunk_size": None}
 
@@ -791,18 +789,10 @@ def main():
             # Generate answer from evidence
             # Use full query for LLM (includes options/instructions),
             # retrieval_query was only for BM25 search
-            raw_answer = generate_answer(
+            answer_text = generate_answer(
                 query, evidence or "", args.agent_model,
                 sub_ds, max_tokens=gen_max_len,
             )
-
-            # Extract answer after ANSWER: marker (CoT reasoning is discarded)
-            if "ANSWER:" in raw_answer:
-                answer_text = raw_answer.split("ANSWER:")[-1].strip()
-            elif "Answer:" in raw_answer:
-                answer_text = raw_answer.split("Answer:")[-1].strip()
-            else:
-                answer_text = raw_answer
 
             # Retry: if model says "unknown" but we have substantive evidence,
             # re-ask with a best-effort prompt (zero-risk: only triggers on failures)
