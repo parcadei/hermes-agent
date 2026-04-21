@@ -785,12 +785,6 @@ def main():
                     total_chars += len(text)
                 evidence = "\n".join(evidence_parts)
 
-            # Sandwich: duplicate best evidence at end (primacy + recency)
-            if evidence:
-                lines = evidence.split("\n")
-                if len(lines) > 2:
-                    evidence = "\n".join(lines + [lines[0]])
-
             # Generate answer from evidence
             # Use full query for LLM (includes options/instructions),
             # retrieval_query was only for BM25 search
