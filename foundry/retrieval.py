@@ -1092,7 +1092,6 @@ def recall(
 
 
 _BM25_NOISE = {
-    # Question words and auxiliaries
     "how", "many", "much", "long", "what", "which", "where", "when", "who",
     "whom", "why", "did", "do", "does", "is", "are", "was", "were", "have",
     "has", "had", "can", "could", "would", "should", "will", "shall", "may",
@@ -1102,13 +1101,6 @@ _BM25_NOISE = {
     "there", "here", "if", "so", "than", "then", "about", "between",
     "typically", "currently", "usually", "total", "different", "any",
     "answer", "question", "based", "history", "chats", "concisely",
-    # Common question verbs (base form rarely matches inflected corpus text)
-    "get", "give", "take", "make", "know", "find", "need", "earn",
-    "spend", "attend", "receive", "own", "use", "visit", "meet",
-    # Time/comparison modifiers (don't match corpus content)
-    "ago", "older", "younger", "first", "last", "since", "during",
-    # Meta/measurement
-    "percentage", "number",
 }
 
 

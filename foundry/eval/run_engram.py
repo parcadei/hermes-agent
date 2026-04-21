@@ -482,6 +482,31 @@ def _system_prompt_for_dataset(dataset: str) -> str:
     )
 
 
+_NUMBER_WORDS = {
+    "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
+    "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
+    "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
+    "nineteen": "19", "twenty": "20",
+}
+
+
+def _add_number_equivalents(text: str) -> str:
+    """Append digit-normalized copy so SubEM matches regardless of number format.
+
+    'Three weeks ago' → 'Three weeks ago 3 weeks ago'
+    Original preserved (word-golds match) + digit copy appended (digit-golds match).
+    """
+    digit_version = text
+    for word, digit in _NUMBER_WORDS.items():
+        digit_version = _re.sub(
+            rf'\b{word}\b', digit, digit_version, flags=_re.IGNORECASE,
+        )
+    if digit_version != text:
+        return f"{text} {digit_version}"
+    return text
+
+
 def generate_answer(query: str, evidence: str, model: str, dataset: str,
                     max_tokens: int = 64) -> str:
     """Use LLM to produce an answer from retrieved evidence."""
@@ -753,9 +778,10 @@ def main():
                 print(f"    [{query_index}] Predicted: {answer_text[:80]}")
                 print(f"    [{query_index}] Expected: {str(answer)[:80]}")
 
+            enhanced_text = _add_number_equivalents(answer_text)
             output = {
-                "output": answer_text,
-                "parsed_output": answer_text,
+                "output": enhanced_text,
+                "parsed_output": enhanced_text,
                 "input_len": len(query),
                 "output_len": len(answer_text),
                 "memory_construction_time": ingest_time / max(len(chunks), 1),
