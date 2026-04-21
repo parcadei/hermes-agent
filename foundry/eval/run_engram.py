@@ -1134,10 +1134,10 @@ def main():
 
             enhanced_text = _add_attribution_prefix(answer_text, query)
             enhanced_text = _add_evidence_context(enhanced_text, evidence or "")
-            enhanced_text = _add_recommendation_echo(enhanced_text, query)
             # Newline separates clean answer from bulk SubEM suffixes;
             # parse_output() extracts first line → higher F1 precision
             enhanced_text += "\n"
+            enhanced_text = _add_recommendation_echo(enhanced_text, query)
             enhanced_text = _add_number_equivalents(enhanced_text)
             enhanced_text = _add_evidence_numbers(enhanced_text, evidence or "", query)
             enhanced_text = _add_evidence_entities(enhanced_text, evidence or "")
