@@ -81,3 +81,5 @@ ff19a6b2	73.33	13.04	discard	recommendation echo (I recommended X for the Y). +1
 n/a	52.00	13.94	keep	5-context exp78 baseline (300 Qs). Up from 42.00% (post-processing gains generalize: ctx1-4 avg 46.3%)
 n/a	83.33	46.72	keep	LLM-as-judge (gpt-4o-mini) on exp80 ctx0. +5 Qs vs SubEM: 4 preference + 1 temporal correct. 10 confirmed wrong.
 n/a	52.00	42.14	keep	5-context exp80 definitive (300 Qs). Same SubEM as exp78, F1 +28.20 from newline separator. All contexts benefit.
+n/a	75.00	48.31	keep	top_k=30 (vs 20). Same SubEM, F1 +1.59. Config change only, sweet spot for reranker candidates.
+n/a	73.33	47.85	discard	top_k=40. -1 SubEM (qi=39 lost: too many candidates dilute reranker)
