@@ -487,40 +487,24 @@ _NUMBER_WORDS = {
     "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
     "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
     "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
-    "nineteen": "19", "twenty": "20", "thirty": "30", "forty": "40",
-    "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80",
-    "ninety": "90", "hundred": "100",
+    "nineteen": "19", "twenty": "20",
 }
 
 
-_DIGIT_TO_WORD = {v: k for k, v in _NUMBER_WORDS.items()}
-
-
 def _add_number_equivalents(text: str) -> str:
-    """Append digit/word-normalized copies so SubEM matches regardless of format.
+    """Append digit-normalized copy so SubEM matches regardless of number format.
 
     'Three weeks ago' → 'Three weeks ago 3 weeks ago'
-    '3 weeks ago' → '3 weeks ago three weeks ago'
-    Both directions covered: word-golds and digit-golds both match.
+    Original preserved (word-golds match) + digit copy appended (digit-golds match).
     """
-    parts = [text]
-    # Word → digit
     digit_version = text
     for word, digit in _NUMBER_WORDS.items():
         digit_version = _re.sub(
             rf'\b{word}\b', digit, digit_version, flags=_re.IGNORECASE,
         )
     if digit_version != text:
-        parts.append(digit_version)
-    # Digit → word (reverse)
-    word_version = text
-    for digit, word in sorted(_DIGIT_TO_WORD.items(), key=lambda x: -len(x[0])):
-        word_version = _re.sub(
-            rf'\b{_re.escape(digit)}\b', word, word_version,
-        )
-    if word_version != text and word_version != digit_version:
-        parts.append(word_version)
-    return " ".join(parts) if len(parts) > 1 else text
+        return f"{text} {digit_version}"
+    return text
 
 
 def _retry_unknown(query: str, evidence: str, model: str,
