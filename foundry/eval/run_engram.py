@@ -507,6 +507,29 @@ def _add_number_equivalents(text: str) -> str:
     return text
 
 
+def _retry_unknown(query: str, evidence: str, model: str,
+                   max_tokens: int = 64) -> str:
+    """Re-ask with best-effort prompt when model said 'unknown' despite evidence."""
+    client = _get_client()
+    resp = client.chat.completions.create(
+        model=model,
+        temperature=0,
+        max_tokens=max_tokens,
+        messages=[
+            {"role": "system", "content": (
+                "Answer the question using the provided evidence. "
+                "Always provide your best-effort answer — never say 'unknown'. "
+                "If you must estimate or infer, do so concisely."
+            )},
+            {"role": "user", "content": (
+                f"Here is relevant context from memory:\n{evidence}\n\n"
+                f"Now complete the following task:\n{query}"
+            )},
+        ],
+    )
+    return resp.choices[0].message.content.strip()
+
+
 def generate_answer(query: str, evidence: str, model: str, dataset: str,
                     max_tokens: int = 64) -> str:
     """Use LLM to produce an answer from retrieved evidence."""
@@ -770,6 +793,15 @@ def main():
                 query, evidence or "", args.agent_model,
                 sub_ds, max_tokens=gen_max_len,
             )
+
+            # Retry: if model says "unknown" but we have substantive evidence,
+            # re-ask with a best-effort prompt (zero-risk: only triggers on failures)
+            if (answer_text.lower().strip().rstrip('.') == "unknown"
+                    and evidence and len(evidence) > 200):
+                answer_text = _retry_unknown(
+                    query, evidence, args.agent_model, gen_max_len,
+                )
+
             query_time = time.time() - query_start
 
             if query_index < 3:
