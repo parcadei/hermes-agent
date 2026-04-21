@@ -30,3 +30,5 @@ n/a	43.33	43.45	discard	retrieve_top_k=10 (vs 20). -1: fewer candidates = lower 
 ff2a825	45.00	45.31	discard	entity-linked retrieval as 3rd RRF signal. 0 flips: entity turns already in BM25+cosine pool
 f5953fb	45.00	45.34	discard	expand BM25 noise list (verbs + modifiers). 0 flips: query noise removal already optimal
 532ed3f	48.33	43.03	keep	number word→digit suffix post-processing. +2 Qs: Three→3 format matches digit golds
+5ccc08b	40.00	15.88	discard	pass clean question to LLM (no benchmark preamble). -5: model outputs 60 tokens, too verbose
+473aa12	50.00	44.53	keep	retry 'unknown' with best-effort prompt when evidence > 200 chars. +1 Q: 20% discount rescued
