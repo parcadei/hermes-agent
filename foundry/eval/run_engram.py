@@ -642,6 +642,7 @@ def _retry_unknown(query: str, evidence: str, model: str,
     resp = client.chat.completions.create(
         model=model,
         temperature=0,
+        seed=42,
         max_tokens=max_tokens,
         messages=[
             {"role": "system", "content": (
@@ -720,6 +721,7 @@ def generate_answer(query: str, evidence: str, model: str, dataset: str,
     resp = client.chat.completions.create(
         model=model,
         temperature=0,
+        seed=42,
         max_tokens=effective_max_tokens,
         messages=[
             {"role": "system", "content": system_prompt},
