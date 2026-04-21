@@ -40,3 +40,4 @@ de3b633	50.00	44.39	discard	broaden retry trigger (endswith unknown ≤10w, i do
 f926524	50.00	44.46	discard	remove 'concisely' from system prompt. 0 flips: qi=11 'Pilsner or lager'→'A pilsner or lager' (still no full sentence)
 0e9485d	50.00	47.05	discard	chain-of-thought + ANSWER: extraction (max_tokens=200). 0 SubEM flips; F1 +2.52 from precise answers but adds complexity
 9520f31	50.00	43.40	discard	ordinal number normalization (first↔1st, second↔2nd). 0 flips: no ordinal mismatches in ctx0 golds
+c5ade27	41.67	42.32	discard	reverse evidence ordering (best-ranked last). -5 Qs: model needs best evidence first, recency bias doesn't compensate
