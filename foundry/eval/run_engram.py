@@ -785,6 +785,12 @@ def main():
                     total_chars += len(text)
                 evidence = "\n".join(evidence_parts)
 
+            # Reverse evidence order: best-ranked last (recency bias)
+            if evidence:
+                lines = evidence.split("\n")
+                if len(lines) > 1:
+                    evidence = "\n".join(reversed(lines))
+
             # Generate answer from evidence
             # Use full query for LLM (includes options/instructions),
             # retrieval_query was only for BM25 search
