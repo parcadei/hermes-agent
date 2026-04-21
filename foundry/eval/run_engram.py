@@ -1116,55 +1116,6 @@ def _add_perspective_shift(text: str) -> str:
     return f"{text} {' '.join(shifts)}"
 
 
-def _verify_answer(query: str, answer: str, evidence: str, model: str,
-                   max_tokens: int = 64) -> Optional[str]:
-    """Verify answer against evidence and correct if wrong.
-
-    Returns corrected answer or None if original is confirmed correct.
-    Only triggers when the answer looks uncertain (short, hedging).
-    """
-    # Skip verification for unknown/empty answers (retry handles these)
-    ans_lower = answer.lower().strip().rstrip('.')
-    if ans_lower in ("unknown", ""):
-        return None
-    # Skip if answer is already confident and specific (> 3 words)
-    if len(answer.split()) > 5:
-        return None
-    client = _get_client()
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=0,
-            seed=42,
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": (
-                    "You are verifying an answer. Check if the proposed answer "
-                    "is supported by the evidence. If correct, repeat it exactly. "
-                    "If wrong, give the correct concise answer from the evidence."
-                )},
-                {"role": "user", "content": (
-                    f"Evidence:\n{evidence}\n\n"
-                    f"Question: {query}\n"
-                    f"Proposed answer: {answer}\n\n"
-                    f"Is this correct? If yes, repeat it. If no, give the correct answer."
-                )},
-            ],
-        )
-        verified = resp.choices[0].message.content.strip()
-        # If verification confirms (repeats original), return None
-        if answer.lower().rstrip('.') in verified.lower():
-            return None
-        # If verification gives a different answer, use it
-        # But only if it's concise (avoid verbose explanations)
-        first_line = verified.split('\n')[0].split('.')[0].strip()
-        if len(first_line) < 100:
-            return first_line
-    except Exception:
-        pass
-    return None
-
-
 _PREFERENCE_PATTERN = _re.compile(
     r'\b(suggest(?:ions?)?|tips?|ideas?|recommend(?:ations?)?|advice|'
     r'any thoughts|what should I (?:serve|try|do|make|cook|bake))\b',
@@ -1206,65 +1157,6 @@ def _rewrite_preference_query(query: str) -> str:
         "describe the user's preferences in detail, referencing their specific past "
         "experiences and patterns from the chat history.",
     )
-
-
-def _generate_alternatives(query: str, evidence: str, model: str,
-                           dataset: str, max_tokens: int, n: int = 2) -> list[str]:
-    """Generate n alternative answers at temperature=0.3 for self-consistency."""
-    is_pref = _is_preference_question(query)
-    if is_pref:
-        return []  # Skip self-consistency for preference Qs (verbose, expensive)
-    system_prompt = _system_prompt_for_dataset(dataset)
-    client = _get_client()
-    results = []
-    for _ in range(n):
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                temperature=0.3,
-                max_tokens=max_tokens,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": (
-                        f"Here is relevant context from memory:\n{evidence}\n\n"
-                        f"Now complete the following task:\n{query}"
-                    )},
-                ],
-            )
-            results.append(resp.choices[0].message.content.strip())
-        except Exception:
-            pass
-    return results
-
-
-def _majority_vote(primary: str, alternatives: list[str]) -> str:
-    """Pick the most common answer from primary + alternatives.
-
-    Compares normalized first-line answers. If there's a majority,
-    return that answer (in its original form). Otherwise keep primary.
-    """
-    if not alternatives:
-        return primary
-
-    def _first_line(s: str) -> str:
-        line = s.split('\n')[0].split('.')[0].strip().lower()
-        return _re.sub(r'[^\w\s]', '', line).strip()
-
-    all_answers = [primary] + alternatives
-    normalized = [_first_line(a) for a in all_answers]
-
-    # Count occurrences of each normalized answer
-    from collections import Counter
-    counts = Counter(normalized)
-    most_common_norm, most_common_count = counts.most_common(1)[0]
-
-    # Need strict majority (>= 2 out of 3)
-    if most_common_count >= 2:
-        # Return the first answer with this normalized form
-        for ans, norm in zip(all_answers, normalized):
-            if norm == most_common_norm:
-                return ans
-    return primary
 
 
 def generate_answer(query: str, evidence: str, model: str, dataset: str,
