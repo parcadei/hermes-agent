@@ -119,7 +119,6 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
     all_turns: list[tuple[str, str]] = []  # (text, role)
     counter = 0
     last_ts = ""
-    current_date = ""  # Track "Chat Time:" dates for temporal reasoning
     for chunk_data in context_chunks:
         turns, counter, last_ts = parse_chunk(str(chunk_data), counter, last_ts)
         for t in turns:
@@ -128,14 +127,10 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
             content = t.content.strip()
             if len(content) < 20:
                 continue
-            # Extract date from "Chat Time:" headers instead of skipping
+            # Skip bare timestamp headers
             if content.startswith("Chat Time:") and len(content) < 60:
-                # e.g. "Chat Time: 2022/11/17 (Thu) 12:04"
-                current_date = content.replace("Chat Time:", "").strip()
                 continue
-            prefix = f"[{current_date}] " if current_date else ""
-            if t.timestamp:
-                prefix = f"[{t.timestamp}] "
+            prefix = f"[{t.timestamp}] " if t.timestamp else ""
             role_tag = f"({t.role}) " if t.role != "continuation" else ""
             turn_text = f"{prefix}{role_tag}{t.content}"
             all_turns.append((turn_text, t.role))
