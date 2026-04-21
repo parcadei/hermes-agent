@@ -50,3 +50,4 @@ e493d50	45.00	38.38	discard	complete-phrase prompt (echo evidence phrasing). -3 
 5950e4af	51.67	37.68	keep	single-append suffix ({text} {word} vs {text} {text} {word}). Same SubEM, F1 +7.51 (less dilution)
 778253cd	51.67	41.83	keep	≤1-word threshold for evidence-context suffix. Same SubEM, F1 +4.15 more (41.83 vs 37.68)
 10a4c7e9	51.67	41.86	discard	broader retry triggers (I'm sorry/I cannot) + threshold 200→100c. 0 flips: retry fires but evidence insufficient
+58dbaa9f	51.67	41.80	discard	expanded suffix skip list (prepositions, pronouns, verbs). 0 flips: problematic suffixes are nouns, not function words
