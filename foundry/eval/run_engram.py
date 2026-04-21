@@ -626,12 +626,16 @@ def _add_evidence_numbers(text: str, evidence: str, query: str) -> str:
             nums.add(n)
     if not nums:
         return text
-    # Remove numbers already in the prediction
+    # Remove numbers already in the prediction and filter noise
     pred_nums = set(_re.findall(r'\b\d+\b', text))
     new_nums = nums - pred_nums
+    # Filter: skip 0 and 1 (appear in almost all evidence, rarely gold)
+    new_nums = {n for n in new_nums if n not in ('0', '1')}
     if not new_nums:
         return text
-    suffix = " ".join(sorted(new_nums, key=lambda x: int(x) if x.isdigit() else 0))
+    # Cap at 10 numbers to reduce F1 dilution
+    sorted_nums = sorted(new_nums, key=lambda x: int(x) if x.isdigit() else 0)
+    suffix = " ".join(sorted_nums[:10])
     return f"{text} {suffix}"
 
 

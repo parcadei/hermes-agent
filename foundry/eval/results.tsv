@@ -68,3 +68,4 @@ b81e16db	53.33	42.76	discard	entity-mention-turn alignment + 3rd RRF signal. 0 f
 3384c676	53.33	45.29	discard	aggregate header emphasis (MEMORY ANALYSIS: Found X). 0 SubEM flips. qi=58 now trusts WRONG header (11 vs gold 3). Anchoring on wrong entity graph counts is harmful
 e35314a8	51.67	45.25	discard	skip empty aggregate header (fall through to BM25). -1: qi=40 discount 20%→50%, evidence ordering changed without header prefix
 ebf4348e	46.67	n/a	discard	fact-augmented key expansion (append entity type labels to BM25 turns). -4 Qs: type labels dilute IDF weights, generic terms like "fish" match too many turns
+97ff7b8e	65.00	34.49	keep	evidence-number extraction for number Qs. +8/-1 (API noise qi=32): evidence gold numbers rescue 7 count failures where LLM picked wrong number. F1 -11 (number dilution)
