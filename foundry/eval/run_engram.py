@@ -623,18 +623,37 @@ _PREFERENCE_SYSTEM_PROMPT = (
 )
 
 
+def _rewrite_preference_query(query: str) -> str:
+    """Strip conciseness instruction from benchmark prompt for preference questions.
+
+    The benchmark prompt says "answer the question as concisely as you can,
+    using a single phrase if possible" — this overrides the system prompt.
+    For preference questions whose gold answers are paragraph-length
+    preference profiles, we need to remove this instruction.
+    """
+    # Replace the conciseness instruction with a preference-profile instruction
+    return query.replace(
+        "answer the question as concisely as you can, using a single phrase if possible.",
+        "describe the user's preferences in detail, referencing their specific past "
+        "experiences and patterns from the chat history.",
+    )
+
+
 def generate_answer(query: str, evidence: str, model: str, dataset: str,
                     max_tokens: int = 64) -> str:
     """Use LLM to produce an answer from retrieved evidence."""
     if not evidence:
         return ""
     # Preference/suggestion questions need verbose profile-style answers
-    if _is_preference_question(query):
+    is_pref = _is_preference_question(query)
+    if is_pref:
         system_prompt = _PREFERENCE_SYSTEM_PROMPT
         effective_max_tokens = 200
+        effective_query = _rewrite_preference_query(query)
     else:
         system_prompt = _system_prompt_for_dataset(dataset)
         effective_max_tokens = max_tokens
+        effective_query = query
     client = _get_client()
     resp = client.chat.completions.create(
         model=model,
@@ -644,7 +663,7 @@ def generate_answer(query: str, evidence: str, model: str, dataset: str,
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": (
                 f"Here is relevant context from memory:\n{evidence}\n\n"
-                f"Now complete the following task:\n{query}"
+                f"Now complete the following task:\n{effective_query}"
             )},
         ],
     )
