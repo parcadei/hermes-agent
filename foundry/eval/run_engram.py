@@ -161,8 +161,8 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
         entity_names[ent.canonical] = ent
         for alias in ent.aliases:
             entity_names[alias] = ent
-    # turn_idx → set of EntityNodes that appear in that turn
-    turn_entities: dict[int, set] = {}
+    # turn_idx → set of entity canonical names that appear in that turn
+    turn_entity_names: dict[int, set[str]] = {}
     if entity_names:
         for ent in store.entity_graph.all_entities():
             ent.mention_turns = set()
@@ -171,7 +171,7 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
             for name, ent in entity_names.items():
                 if name and len(name) > 2 and name in turn_lower:
                     ent.mention_turns.add(idx)
-                    turn_entities.setdefault(idx, set()).add(ent)
+                    turn_entity_names.setdefault(idx, set()).add(ent.canonical)
         aligned = sum(1 for e in store.entity_graph.all_entities() if e.mention_turns)
         print(f"  Aligned {aligned}/{len(store.entity_graph)} entity mention_turns to BM25 indices")
 
@@ -181,11 +181,14 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
     new_bm25 = BM25Index()
     enriched = 0
     for idx, (turn_text, role) in enumerate(all_turns):
-        ents = turn_entities.get(idx, set())
-        if ents:
+        ent_canonicals = turn_entity_names.get(idx, set())
+        if ent_canonicals:
             # Collect unique type labels from entity facts
             type_labels = set()
-            for ent in ents:
+            for canon in ent_canonicals:
+                ent = entity_names.get(canon)
+                if not ent:
+                    continue
                 for pred, facts in ent.facts.items():
                     if pred in ("what", "who"):
                         for f in facts:
@@ -302,6 +305,10 @@ _HOW_MUCH_RE = _re.compile(
     r"how much\b(.+?)(?:do|did|have|has|is|was|does)\b",
     _re.IGNORECASE,
 )
+_SPEND_ON_RE = _re.compile(
+    r"(?:spend|spent|pay|paid|cost)\s+(?:\w+\s+)*?(?:on|for)\s+(.+?)(?:\?|\s+in\b|\s+over\b|\s+during\b|$)",
+    _re.IGNORECASE,
+)
 _TOTAL_AMOUNT_RE = _re.compile(
     r"(?:total amount|total)\b.*?(?:spent on|of)\s+(.+?)(?:\s+in\b|\s+over\b|\?|$)",
     _re.IGNORECASE,
@@ -371,6 +378,11 @@ def decompose_recall_params(question: str) -> dict:
         m = _HOW_MUCH_RE.search(q_lower) or _TOTAL_AMOUNT_RE.search(q_lower)
         if m:
             entity = _clean_entity(m.group(1))
+        # Fallback: "spend/spent/paid on X" pattern captures entity AFTER verb
+        if not entity:
+            m_spend = _SPEND_ON_RE.search(q_lower)
+            if m_spend:
+                entity = _clean_entity(m_spend.group(1))
 
     # Percentage: "what percentage discount"
     elif "what percentage" in q_lower:
