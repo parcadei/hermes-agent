@@ -175,34 +175,14 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
         aligned = sum(1 for e in store.entity_graph.all_entities() if e.mention_turns)
         print(f"  Aligned {aligned}/{len(store.entity_graph)} entity mention_turns to BM25 indices")
 
-    # Second pass: build BM25 with fact-augmented key expansion.
-    # Append entity types to each turn so BM25 matches on type queries
-    # (e.g. "fish" matches a turn mentioning "neon_tetras" with type "fish").
+    # Second pass: build plain BM25 (no enrichment — exp70 showed type labels
+    # dilute IDF weights and hurt SubEM by -4 questions).
     new_bm25 = BM25Index()
-    enriched = 0
     for idx, (turn_text, role) in enumerate(all_turns):
-        ent_canonicals = turn_entity_names.get(idx, set())
-        if ent_canonicals:
-            # Collect unique type labels from entity facts
-            type_labels = set()
-            for canon in ent_canonicals:
-                ent = entity_names.get(canon)
-                if not ent:
-                    continue
-                for pred, facts in ent.facts.items():
-                    if pred in ("what", "who"):
-                        for f in facts:
-                            if f.object and f.object != "?" and len(f.object) > 1:
-                                type_labels.add(f.object.replace("_", " "))
-            if type_labels:
-                suffix = " " + " ".join(sorted(type_labels))
-                new_bm25.add(idx, turn_text + suffix)
-                enriched += 1
-                continue
         new_bm25.add(idx, turn_text)
     store.bm25_chunks = new_bm25
 
-    print(f"  Rebuilt BM25: {len(context_chunks)} session chunks → {len(all_turns)} individual turns ({enriched} fact-augmented)")
+    print(f"  Rebuilt BM25: {len(context_chunks)} session chunks → {len(all_turns)} individual turns")
 
 
 def _embed_turns(foundry: "Foundry", embed_model: str) -> "Any":
@@ -611,6 +591,50 @@ def _add_number_equivalents(text: str) -> str:
     return text
 
 
+_NUMBER_Q_RE = _re.compile(
+    r'\b(how many|how much|how long|how old|how far|how often|what percentage|'
+    r'what is the total|what was the total|total amount)\b',
+    _re.IGNORECASE,
+)
+
+
+def _add_evidence_numbers(text: str, evidence: str, query: str) -> str:
+    """Append distinct numbers from evidence for number questions.
+
+    When the question asks for a quantity but the LLM picks the wrong number,
+    this gives SubEM a second chance by including all candidate numbers from
+    the evidence.  Only activates for number-seeking questions.
+    Zero-risk: only adds text, can't break existing SubEM matches.
+    """
+    # Only for number-seeking questions
+    q_part = query
+    if "Now Answer the Question:" in query:
+        q_part = query.split("Now Answer the Question:")[-1]
+    if not _NUMBER_Q_RE.search(q_part):
+        return text
+    # Extract numbers from evidence (including $-prefixed)
+    nums = set()
+    # Dollar amounts: $1,200 → 1200
+    for m in _re.finditer(r'\$[\d,]+', evidence):
+        n = m.group().replace('$', '').replace(',', '')
+        if n and n != '0':
+            nums.add(n)
+    # Plain numbers
+    for m in _re.finditer(r'\b\d+\b', evidence):
+        n = m.group()
+        if len(n) <= 5 and n != '0':
+            nums.add(n)
+    if not nums:
+        return text
+    # Remove numbers already in the prediction
+    pred_nums = set(_re.findall(r'\b\d+\b', text))
+    new_nums = nums - pred_nums
+    if not new_nums:
+        return text
+    suffix = " ".join(sorted(new_nums, key=lambda x: int(x) if x.isdigit() else 0))
+    return f"{text} {suffix}"
+
+
 def _retry_unknown(query: str, evidence: str, model: str,
                    max_tokens: int = 64) -> str:
     """Re-ask with best-effort prompt when model said 'unknown' despite evidence."""
@@ -970,6 +994,7 @@ def main():
 
             enhanced_text = _add_evidence_context(answer_text, evidence or "")
             enhanced_text = _add_number_equivalents(enhanced_text)
+            enhanced_text = _add_evidence_numbers(enhanced_text, evidence or "", query)
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,
