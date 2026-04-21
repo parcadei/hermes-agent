@@ -702,11 +702,24 @@ def _add_evidence_entities(text: str, evidence: str) -> str:
                 continue
             if clean[0].isupper():
                 # Check for multi-word proper noun (consecutive caps)
+                # Allow prepositions (of, and, the, for, at, in, de) to bridge
+                _bridge = {"of", "and", "the", "for", "at", "in", "de", "la", "del"}
                 phrase_parts = [clean]
-                for j in range(i + 1, min(i + 4, len(words))):
+                j = i + 1
+                while j < min(i + 8, len(words)):
                     nw = _re.sub(r'[,;:!?.)\]]+$', '', words[j])
                     if nw and nw[0].isupper() and nw not in _common_caps:
                         phrase_parts.append(nw)
+                        j += 1
+                    elif nw.lower() in _bridge and j + 1 < len(words):
+                        # Peek: next word after bridge must be capitalized
+                        peek = _re.sub(r'[,;:!?.)\]]+$', '', words[j + 1])
+                        if peek and peek[0].isupper() and peek not in _common_caps:
+                            phrase_parts.append(nw)
+                            phrase_parts.append(peek)
+                            j += 2
+                        else:
+                            break
                     else:
                         break
                 if len(phrase_parts) > 1:
@@ -1018,6 +1031,10 @@ def _add_perspective_shift(text: str) -> str:
         you_sent = _re.sub(r'\bYou\b', 'I', first_line)
         if you_sent != first_line and you_sent.lower() not in text.lower():
             shifts.append(you_sent)
+        # "You've met" → "We've met" (shared activities)
+        we_sent = _re.sub(r"\bYou'?v?e?\b", "We've", first_line)
+        if we_sent != first_line and we_sent.lower() not in text.lower():
+            shifts.append(we_sent)
     # Bare relationship noun at start → add "my" prefix
     # Catches "Cousin's wedding" → "my Cousin's wedding"
     for noun in _RELATIONSHIP_NOUNS:
