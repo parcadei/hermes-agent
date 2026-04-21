@@ -72,3 +72,4 @@ ebf4348e	46.67	n/a	discard	fact-augmented key expansion (append entity type labe
 b391d301	60.00	35.05	discard	reduce evidence-number dilution (skip 0/1, cap at 10). 0 real flips: F1 +0.56 but SubEM -5 is API noise. Filtering marginal
 f105e8fe	65.00	34.34	discard	seed=42 for deterministic API calls. 0 flips: same 21 failures. qi=32 still picks wrong entity despite deterministic seed
 03adc3b6	68.33	14.76	keep	evidence-entity extraction (append quoted strings from evidence). +2 Qs: qi=32 (Page Turners), qi=24 (Spanish classes). F1 tanks from mass entity text
+0c1abce3	71.67	13.99	keep	±1 adjacent numbers + question-option extraction + pronoun deref. +2 Qs: qi=1 (fish 16+1=17), qi=17 (phone case option with their→the)

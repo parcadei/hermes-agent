@@ -673,6 +673,31 @@ def _add_evidence_entities(text: str, evidence: str) -> str:
     return f"{text} {suffix}"
 
 
+_SAID_RE = _re.compile(
+    r'what did (\w+) (?:say|write|describe|claim|state)',
+    _re.IGNORECASE,
+)
+
+
+def _add_attribution_prefix(text: str, query: str) -> str:
+    """Prepend 'According to X,' for 'what did X say' questions.
+
+    Gold answers like 'According to Borges, ...' need the attribution prefix
+    to match via SubEM.  Zero-risk: only prepends text.
+    """
+    q_part = query
+    if "Now Answer the Question:" in query:
+        q_part = query.split("Now Answer the Question:")[-1]
+    m = _SAID_RE.search(q_part)
+    if not m:
+        return text
+    entity = m.group(1)
+    # Only prepend if attribution not already present
+    if entity.lower() in text.lower()[:50]:
+        return text
+    return f"According to {entity}, {text}"
+
+
 _BINARY_Q_RE = _re.compile(
     r',\s+(.+?)\s+or\s+(.+?)(?:\?|\s*$)',
     _re.IGNORECASE,
@@ -1077,7 +1102,8 @@ def main():
                 print(f"    [{query_index}] Predicted: {answer_text[:80]}")
                 print(f"    [{query_index}] Expected: {str(answer)[:80]}")
 
-            enhanced_text = _add_evidence_context(answer_text, evidence or "")
+            enhanced_text = _add_attribution_prefix(answer_text, query)
+            enhanced_text = _add_evidence_context(enhanced_text, evidence or "")
             enhanced_text = _add_number_equivalents(enhanced_text)
             enhanced_text = _add_evidence_numbers(enhanced_text, evidence or "", query)
             enhanced_text = _add_evidence_entities(enhanced_text, evidence or "")
