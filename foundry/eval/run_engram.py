@@ -300,7 +300,8 @@ _PERCENTAGE_RE = _re.compile(
 _WHEN_RE = _re.compile(
     r"(?:when\s+did\b)"
     r"|(?:which\b.*?\bhappened\s+first\b)"
-    r"|(?:what\s+(?:is|was)\s+the\s+(?:order|sequence|chronological)\b)",
+    r"|(?:what\s+(?:is|was)\s+the\s+(?:order|sequence|chronological)\b)"
+    r"|(?:how\s+long\s+(?:did|have|has|was|were|do|does)\b)",
     _re.IGNORECASE,
 )
 _TIME_PHRASE_RE = _re.compile(
@@ -341,8 +342,8 @@ def decompose_recall_params(question: str) -> dict:
         if m:
             entity = _clean_entity(m.group(1))
 
-    # Counting: "how many X"
-    elif "how many" in q_lower:
+    # Counting: "how many X", "total number of X"
+    elif "how many" in q_lower or "total number" in q_lower:
         # Guard: "how many X do I need/require" asks for a threshold, not a count
         if _re.search(r'\bneed\b|\brequired?\b|\bto (?:get|earn|redeem|qualify)\b', q_lower):
             predicate = ""  # factual route
@@ -352,8 +353,8 @@ def decompose_recall_params(question: str) -> dict:
         if m:
             entity = _clean_entity(m.group(1))
 
-    # Spending: "how much did I spend", "total amount spent on"
-    elif "how much" in q_lower or "total amount" in q_lower:
+    # Spending: "how much did I spend", "total amount/time spent on"
+    elif "how much" in q_lower or "total amount" in q_lower or "total time" in q_lower:
         predicate = "sum"
         m = _HOW_MUCH_RE.search(q_lower) or _TOTAL_AMOUNT_RE.search(q_lower)
         if m:
