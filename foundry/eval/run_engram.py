@@ -574,26 +574,17 @@ def _retry_unknown(query: str, evidence: str, model: str,
 
 
 def generate_answer(query: str, evidence: str, model: str, dataset: str,
-                    max_tokens: int = 64, predicate: str = "") -> str:
+                    max_tokens: int = 64) -> str:
     """Use LLM to produce an answer from retrieved evidence."""
     if not evidence:
         return ""
     client = _get_client()
-    system = _system_prompt_for_dataset(dataset)
-    # For counting questions, add a counting instruction
-    if predicate == "count":
-        system = (
-            "Answer the question concisely using ONLY the provided evidence. "
-            "Count carefully by listing each distinct item before giving the total. "
-            "Output ONLY the final number. "
-            "If the evidence doesn't contain the answer, say 'unknown'."
-        )
     resp = client.chat.completions.create(
         model=model,
         temperature=0,
         max_tokens=max_tokens,
         messages=[
-            {"role": "system", "content": system},
+            {"role": "system", "content": _system_prompt_for_dataset(dataset)},
             {"role": "user", "content": (
                 f"Here is relevant context from memory:\n{evidence}\n\n"
                 f"Now complete the following task:\n{query}"
@@ -778,9 +769,6 @@ def main():
             # Extract actual question for retrieval
             retrieval_query = extract_retrieval_query(query, sub_ds)
 
-            # Decompose question params for predicate-aware prompting
-            params = decompose_recall_params(retrieval_query)
-
             # Retrieve evidence
             query_start = time.time()
             if args.use_agentic:
@@ -808,6 +796,7 @@ def main():
                     if not hasattr(parse_args, '_reranker'):
                         parse_args._reranker = CrossEncoderReranker(args.rerank_model, top_k=10)
                     reranker = parse_args._reranker
+                params = decompose_recall_params(retrieval_query)
                 evidence = recall(
                     foundry._store,
                     retrieval_query,
@@ -846,7 +835,6 @@ def main():
             answer_text = generate_answer(
                 query, evidence or "", args.agent_model,
                 sub_ds, max_tokens=gen_max_len,
-                predicate=params.get("predicate", ""),
             )
 
             # Retry: if model says "unknown" but we have substantive evidence,

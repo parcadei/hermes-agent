@@ -56,3 +56,4 @@ ee698768	51.67	41.49	discard	content-based evidence dedup (Jaccard >0.7). 0 flip
 73c4d1c2	53.33	42.87	keep	always attach BM25 evidence alongside aggregate header. +1 Q: qi=27 bikes 3→4 (LLM counts from evidence, not wrong agg count)
 9ad19e20	53.33	42.60	discard	remove aggregate count from header (anchor removal). 0 flips, F1 -0.27: LLM still miscounts from evidence
 018476c1	51.67	42.43	discard	skip aggregate path entirely, pure BM25 for count/sum/list. -1 Q: qi=27 lost bike count hint from aggregate entities
+18e7c368	48.33	33.46	discard	counting-specialized prompt for aggregate questions. -3 Qs: bare number outputs break post-processing (evidence-context suffix, number normalization)
