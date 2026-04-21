@@ -53,3 +53,4 @@ e493d50	45.00	38.38	discard	complete-phrase prompt (echo evidence phrasing). -3 
 58dbaa9f	51.67	41.80	discard	expanded suffix skip list (prepositions, pronouns, verbs). 0 flips: problematic suffixes are nouns, not function words
 cc1b3310	46.67	37.03	discard	remove 'say unknown' from prompt. -3 Qs: model hedges/guesses wrong, retry never fires (qi=40 regressed)
 ee698768	51.67	41.49	discard	content-based evidence dedup (Jaccard >0.7). 0 flips: evidence turns already distinct
+73c4d1c2	53.33	42.87	keep	always attach BM25 evidence alongside aggregate header. +1 Q: qi=27 bikes 3→4 (LLM counts from evidence, not wrong agg count)
