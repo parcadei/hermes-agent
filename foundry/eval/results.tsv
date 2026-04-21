@@ -42,3 +42,4 @@ f926524	50.00	44.46	discard	remove 'concisely' from system prompt. 0 flips: qi=1
 9520f31	50.00	43.40	discard	ordinal number normalization (first↔1st, second↔2nd). 0 flips: no ordinal mismatches in ctx0 golds
 c5ade27	41.67	42.32	discard	reverse evidence ordering (best-ranked last). -5 Qs: model needs best evidence first, recency bias doesn't compensate
 07dd7c8	50.00	45.36	discard	sandwich evidence (duplicate best at end). 0 SubEM flips; F1 +1.96 from stronger best-passage attention but adds complexity
+e493d50	45.00	38.38	discard	complete-phrase prompt (echo evidence phrasing). -3 Qs: verbose answers changed content, not just length
