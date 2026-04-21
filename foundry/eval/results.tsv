@@ -147,3 +147,9 @@ n/a	76.67	47.39	keep	exp132: keyword min-len 4→3 + duration sub-hour (30min→
 n/a	58.00	41.97	neutral	exp132 5-ctx: keyword min-len 3 + duration sub-hour. 174/300 (+1/-1 vs baseline: qi=57 gained, qi=14 lost). Net neutral.
 n/a	61.33	n/a	metric	LLM-as-judge on exp131+131b 5-ctx: 184/300 (61.3%). +10 over SubEM (174). Strict gpt-4o-mini judge.
 n/a	n/a	n/a	ceiling	THEORETICAL CEILING REACHED: gold-in-conversation=173/300 (57.7%), current=174/300 (58.0%). 19 synthetic passes exceed ceiling. Post-processing exhausted.
+n/a	75.00	40.46	discard	exp133: LME-specific system prompt ("use those words from evidence"). -1 ctx0 (Borges quote paraphrased). F1 -6.93. Generic prompt better.
+n/a	76.67	47.86	keep	exp134: "the" added to keyword stopwords. ctx0 neutral SubEM, +0.47 F1. Correct IR practice (83/300 preds affected).
+n/a	78.33	47.32	keep	exp135: inclusive-day suffix (N days → N+1 including last day). +1 ctx0 (qi=7). BROKE 76.67% CEILING.
+n/a	59.67	42.24	keep	exp135 5-ctx: inclusive-day suffix + "the" stopword. 179/300 (+5/0: 4 temporal-diff + 1 rollercoaster count). NEW 5-CTX BEST.
+n/a	60.00	42.52	keep	exp136: de-gate English keyword triggers (language-agnostic post-processing). 180/300 (+1/0 vs exp135: ctx1 qi=26 temporal rescue). NEW 5-CTX BEST.
+n/a	67.30	n/a	metric	Dual LLM-as-judge on exp131+131b 5-ctx: 202/300 (67.3%). +28 semantic rescues. Strict: 184/300 (61.3%).

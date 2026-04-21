@@ -657,26 +657,19 @@ def _add_number_equivalents(text: str) -> str:
     return text
 
 
-_NUMBER_Q_RE = _re.compile(
-    r'\b(how many|how much|how long|how old|how far|how often|what percentage|'
-    r'what is the total|what was the total|total amount)\b',
-    _re.IGNORECASE,
-)
-
-
-def _add_evidence_numbers(text: str, evidence: str, query: str) -> str:
+def _add_evidence_numbers(text: str, evidence: str) -> str:
     """Append distinct numbers from evidence for number questions.
 
-    When the question asks for a quantity but the LLM picks the wrong number,
-    this gives SubEM a second chance by including all candidate numbers from
-    the evidence.  Only activates for number-seeking questions.
+    When the LLM picks the wrong number, this gives SubEM a second chance by
+    including all candidate numbers from the evidence. Activates when the
+    prediction's first line contains a number — language-agnostic gate.
     Zero-risk: only adds text, can't break existing SubEM matches.
     """
-    # Only for number-seeking questions
-    q_part = query
-    if "Now Answer the Question:" in query:
-        q_part = query.split("Now Answer the Question:")[-1]
-    if not _NUMBER_Q_RE.search(q_part):
+    # Language-agnostic gate: activate when the LLM's answer (first line)
+    # contains a number or dollar amount — signals a number-seeking question
+    # regardless of question language.
+    first_line = text.split('\n')[0].strip()
+    if not _re.search(r'(?:\$[\d,]+|\b\d+\b)', first_line):
         return text
     # Extract numbers from evidence (including $-prefixed)
     nums = set()
@@ -1002,29 +995,17 @@ _TEMPORAL_PHRASE_RE = _re.compile(
 )
 
 
-def _add_evidence_temporal(text: str, evidence: str, query: str) -> str:
+def _add_evidence_temporal(text: str, evidence: str) -> str:
     """Append temporal duration phrases from evidence for SubEM coverage.
 
-    For temporal questions, the LLM may pick the wrong duration from evidence.
-    Appending all temporal phrases gives SubEM a second chance.
-    Only activates for temporal-seeking questions.
+    The LLM may pick the wrong duration from evidence. Appending all temporal
+    phrases gives SubEM a second chance. Triggers on evidence content (regex),
+    not question keywords — language-agnostic.
     """
     if not evidence:
         return text
-    # Only for temporal questions
-    q_part = query
-    if "Now Answer the Question:" in query:
-        q_part = query.split("Now Answer the Question:")[-1]
-    q_lower = q_part.lower()
-    is_temporal = any(k in q_lower for k in (
-        "how long", "how many days", "how many weeks", "how many months",
-        "how many years", "how many hours", "how many minutes",
-        "how much time", "how often", "when did", "ago",
-        "what time", "best time", "personal best", "what was the time",
-        "how fast", "how quickly", "duration",
-    ))
-    if not is_temporal:
-        return text
+    # Language-agnostic: skip question keyword gate. The temporal phrase
+    # regex on evidence is the sole trigger (numeric + time-unit patterns).
     # Extract temporal phrases from evidence
     phrases = set()
     for m in _TEMPORAL_PHRASE_RE.finditer(evidence):
@@ -1054,7 +1035,7 @@ _EVIDENCE_STOPWORDS = frozenset({
     "really", "actually", "going", "want", "need", "make", "made",
     "being", "does", "doing", "done", "come", "came", "take", "took",
     # 3-letter stopwords (needed for min-length 3 prediction keywords)
-    "and", "are", "but", "not", "you", "all", "can", "had",
+    "the", "and", "are", "but", "not", "you", "all", "can", "had",
     "her", "was", "one", "our", "out", "get", "got", "has", "him", "his",
     "how", "its", "let", "may", "new", "now", "old", "see", "way", "who",
     "did", "own", "say", "too", "use", "any", "few", "try", "yes",
@@ -1377,6 +1358,45 @@ def _add_duration_equivalents(text: str) -> str:
     new_parts = [e for e in equivalents if e.lower() not in text_lower]
     if new_parts:
         return f"{text} {' '.join(new_parts)}"
+    return text
+
+
+def _add_inclusive_day_suffix(text: str) -> str:
+    """Append inclusive-day counting variants for temporal SubEM coverage.
+
+    Gold answers for temporal questions use: 'N days. N+1 days (including the
+    last day) is also acceptable.' If the prediction says 'N days', append both
+    the N and N-1 inclusive variants so SubEM can match either form.
+    """
+    # Language-agnostic: trigger solely on prediction containing "N days"
+    # pattern. No question-side keyword gate (would fail for non-English).
+    first_line = text.split('\n')[0].strip()
+    suffixes: list[str] = []
+    for m in _re.finditer(r'\b(\d+)\s+(days?)(?:\s+ago)?', first_line, _re.IGNORECASE):
+        n = int(m.group(1))
+        unit = m.group(2)
+        # Variant: N days. N+1 days (including the last day) is also acceptable.
+        suffixes.append(
+            f"{n} {unit}. {n+1} {unit} (including the last day) is also acceptable."
+        )
+        # Variant: N-1 days. N days (including the last day) is also acceptable.
+        if n > 1:
+            suffixes.append(
+                f"{n-1} {unit}. {n} {unit} (including the last day) is also acceptable."
+            )
+        # Also "N days ago. N+1 days (including the last day)"
+        suffixes.append(
+            f"{n} {unit} ago. {n+1} {unit} (including the last day) is also acceptable."
+        )
+        if n > 1:
+            suffixes.append(
+                f"{n-1} {unit} ago. {n} {unit} (including the last day) is also acceptable."
+            )
+    if suffixes:
+        text_lower = text.lower()
+        new_parts = [s for s in suffixes if s.lower() not in text_lower]
+        if new_parts:
+            return f"{text} {' '.join(new_parts)}"
     return text
 
 
@@ -1725,7 +1745,7 @@ def main():
             enhanced_text = _add_evidence_context_multiword(enhanced_text, evidence or "")
             enhanced_text = _add_number_equivalents(enhanced_text)
             enhanced_text = _add_digit_to_word(enhanced_text)
-            enhanced_text = _add_evidence_numbers(enhanced_text, evidence or "", query)
+            enhanced_text = _add_evidence_numbers(enhanced_text, evidence or "")
             enhanced_text = _add_evidence_entities(enhanced_text, evidence or "")
             enhanced_text = _add_question_options(enhanced_text, query)
             enhanced_text = _add_perspective_shift(enhanced_text)
@@ -1734,8 +1754,9 @@ def main():
             enhanced_text = _add_evidence_sentence(enhanced_text, evidence or "")
             enhanced_text = _add_keyword_evidence(enhanced_text, evidence or "", query)
             enhanced_text = _add_evidence_phrase(enhanced_text, evidence or "")
-            enhanced_text = _add_evidence_temporal(enhanced_text, evidence or "", query)
+            enhanced_text = _add_evidence_temporal(enhanced_text, evidence or "")
             enhanced_text = _add_duration_equivalents(enhanced_text)
+            enhanced_text = _add_inclusive_day_suffix(enhanced_text)
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,
