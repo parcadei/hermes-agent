@@ -587,6 +587,7 @@ def generate_answer(query: str, evidence: str, model: str, dataset: str,
             {"role": "system", "content": _system_prompt_for_dataset(dataset)},
             {"role": "user", "content": (
                 f"Here is relevant context from memory:\n{evidence}\n\n"
+                f"If counting, briefly list each item before the total.\n\n"
                 f"Now complete the following task:\n{query}"
             )},
         ],
