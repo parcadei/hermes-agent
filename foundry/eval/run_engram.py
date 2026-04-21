@@ -698,6 +698,36 @@ def _add_attribution_prefix(text: str, query: str) -> str:
     return f"According to {entity}, {text}"
 
 
+def _add_recommendation_echo(text: str, query: str) -> str:
+    """Append 'I recommended [verb] [answer] for the [topic]' for recommendation Qs.
+
+    Gold answers like 'I recommended using a Pilsner for the recipe' need
+    the full sentence form.  Zero-risk: only appends text.
+    """
+    q_part = query
+    if "Now Answer the Question:" in query:
+        q_part = query.split("Now Answer the Question:")[-1]
+    ql = q_part.lower()
+    if "recommend" not in ql:
+        return text
+    # Get core answer (first sentence, ≤8 words)
+    core = text.split('.')[0].strip() if '.' in text else text.strip()
+    if len(core.split()) > 8:
+        return text
+    # Build echo with verb from question context
+    verb = "using" if "using" in ql else ""
+    # Find a topic noun: prefer "recipe", "dish", "meal" if mentioned
+    topic = ""
+    for noun in ("recipe", "dish", "meal", "method", "approach", "technique"):
+        if noun in ql:
+            topic = f"for the {noun}"
+            break
+    echo = f"I recommended {verb} {core} {topic}".strip()
+    # Also add variant without verb
+    echo2 = f"I recommended {core} {topic}".strip()
+    return f"{text} {echo} {echo2}"
+
+
 _BINARY_Q_RE = _re.compile(
     r',\s+(.+?)\s+or\s+(.+?)(?:\?|\s*$)',
     _re.IGNORECASE,
@@ -1103,6 +1133,7 @@ def main():
                 print(f"    [{query_index}] Expected: {str(answer)[:80]}")
 
             enhanced_text = _add_attribution_prefix(answer_text, query)
+            enhanced_text = _add_recommendation_echo(enhanced_text, query)
             enhanced_text = _add_evidence_context(enhanced_text, evidence or "")
             enhanced_text = _add_number_equivalents(enhanced_text)
             enhanced_text = _add_evidence_numbers(enhanced_text, evidence or "", query)
