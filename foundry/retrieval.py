@@ -1134,9 +1134,6 @@ def _recall_retrieve(
             return True
         if not text.strip() or len(text) < 20:
             return True
-        # Truncate verbose turns to keep signal-dense content
-        if len(text) > 500:
-            text = text[:500]
         if total_chars + len(text) > char_budget:
             return False
         evidence_parts.append(text)
@@ -1165,8 +1162,32 @@ def _recall_retrieve(
         except Exception:
             pass
 
+    # Entity-linked retrieval: find turns mentioning entities from the query
+    entity_hits: list[tuple[int, float]] = []
+    if store.bm25_entities._texts:
+        try:
+            ent_results = store.bm25_entities.query(bm25_query, top_k=5)
+            entity_turn_ids: list[int] = []
+            for ent_doc_id, _ent_score in ent_results[:3]:
+                entity = _candidate_entity_for_doc(store, ent_doc_id,
+                    getattr(store.bm25_entities, "_texts", {}).get(ent_doc_id, ""))
+                if entity is not None:
+                    for turn_idx in entity.mention_turns:
+                        if int(turn_idx) not in entity_turn_ids:
+                            entity_turn_ids.append(int(turn_idx))
+            # Assign rank-based scores (turn order within entity)
+            for rank, tid in enumerate(entity_turn_ids[:candidate_k]):
+                entity_hits.append((tid, 1.0 / (rank + 1)))
+        except Exception:
+            pass
+
     # RRF merge
-    merged = _rrf_merge([bm25_hits, cosine_hits]) if cosine_hits else bm25_hits
+    all_lists = [bm25_hits]
+    if cosine_hits:
+        all_lists.append(cosine_hits)
+    if entity_hits:
+        all_lists.append(entity_hits)
+    merged = _rrf_merge(all_lists) if len(all_lists) > 1 else bm25_hits
 
     # Cross-encoder rerank (if reranker available)
     if reranker is not None and merged:
