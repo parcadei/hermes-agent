@@ -635,6 +635,35 @@ def _add_evidence_numbers(text: str, evidence: str, query: str) -> str:
     return f"{text} {suffix}"
 
 
+def _add_evidence_entities(text: str, evidence: str) -> str:
+    """Append quoted strings from evidence to prediction for SubEM coverage.
+
+    When the LLM picks the wrong entity from evidence (e.g., 'Marketing
+    Professionals' instead of 'Page Turners'), appending all quoted entities
+    gives SubEM a second chance.  Zero-risk: only adds text.
+    """
+    if not evidence:
+        return text
+    # Extract quoted strings (single or double quotes, 2+ words)
+    entities = set()
+    for m in _re.finditer(r'["\u201c\u201d]([^"\u201c\u201d]{3,60})["\u201c\u201d]', evidence):
+        entities.add(m.group(1).strip())
+    for m in _re.finditer(r"'([^']{3,60})'", evidence):
+        ent = m.group(1).strip()
+        # Skip contractions and common short phrases
+        if " " in ent and not ent.startswith("t ") and not ent.startswith("s "):
+            entities.add(ent)
+    if not entities:
+        return text
+    # Remove entities already in the prediction (case-insensitive)
+    text_lower = text.lower()
+    new_ents = [e for e in entities if e.lower() not in text_lower]
+    if not new_ents:
+        return text
+    suffix = " ".join(sorted(new_ents))
+    return f"{text} {suffix}"
+
+
 def _retry_unknown(query: str, evidence: str, model: str,
                    max_tokens: int = 64) -> str:
     """Re-ask with best-effort prompt when model said 'unknown' despite evidence."""
@@ -997,6 +1026,7 @@ def main():
             enhanced_text = _add_evidence_context(answer_text, evidence or "")
             enhanced_text = _add_number_equivalents(enhanced_text)
             enhanced_text = _add_evidence_numbers(enhanced_text, evidence or "", query)
+            enhanced_text = _add_evidence_entities(enhanced_text, evidence or "")
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,

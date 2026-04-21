@@ -70,3 +70,4 @@ e35314a8	51.67	45.25	discard	skip empty aggregate header (fall through to BM25).
 ebf4348e	46.67	n/a	discard	fact-augmented key expansion (append entity type labels to BM25 turns). -4 Qs: type labels dilute IDF weights, generic terms like "fish" match too many turns
 97ff7b8e	65.00	34.49	keep	evidence-number extraction for number Qs. +8/-1 (API noise qi=32): evidence gold numbers rescue 7 count failures where LLM picked wrong number. F1 -11 (number dilution)
 b391d301	60.00	35.05	discard	reduce evidence-number dilution (skip 0/1, cap at 10). 0 real flips: F1 +0.56 but SubEM -5 is API noise. Filtering marginal
+f105e8fe	65.00	34.34	discard	seed=42 for deterministic API calls. 0 flips: same 21 failures. qi=32 still picks wrong entity despite deterministic seed
