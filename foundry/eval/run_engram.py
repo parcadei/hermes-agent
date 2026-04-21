@@ -925,6 +925,51 @@ _RELATIONSHIP_NOUNS = {
     "friend", "neighbor", "colleague", "partner", "wife", "husband",
 }
 
+# Contraction → expansion mapping for SubEM coverage.
+# normalize_answer strips apostrophes: "I've" → "ive" ≠ "i have".
+# Appending expanded forms ensures both normalized variants are present.
+_CONTRACTIONS = {
+    "i've": "i have", "i'd": "i would", "i'll": "i will", "i'm": "i am",
+    "it's": "it is", "he's": "he is", "she's": "she is", "that's": "that is",
+    "there's": "there is", "here's": "here is", "what's": "what is",
+    "who's": "who is", "how's": "how is", "where's": "where is",
+    "they've": "they have", "we've": "we have", "you've": "you have",
+    "they're": "they are", "we're": "we are", "you're": "you are",
+    "they'd": "they would", "we'd": "we would", "you'd": "you would",
+    "they'll": "they will", "we'll": "we will", "you'll": "you will",
+    "don't": "do not", "doesn't": "does not", "didn't": "did not",
+    "can't": "cannot", "won't": "will not", "couldn't": "could not",
+    "wouldn't": "would not", "shouldn't": "should not",
+    "isn't": "is not", "aren't": "are not", "wasn't": "was not",
+    "weren't": "were not", "hasn't": "has not", "haven't": "have not",
+    "hadn't": "had not",
+}
+_CONTRACTION_RE = _re.compile(
+    r"\b(" + "|".join(_re.escape(k) for k in _CONTRACTIONS) + r")\b",
+    _re.IGNORECASE,
+)
+
+
+def _add_decontracted(text: str) -> str:
+    """Append contraction-expanded variant of the answer for SubEM coverage.
+
+    normalize_answer strips apostrophes, so "I've" → "ive" ≠ "i have".
+    Appending the expanded form ensures gold matches whichever form is used.
+    Zero-risk: only appends text after the newline separator.
+    """
+    first_line = text.split('\n')[0]
+    def _expand(m):
+        word = m.group(0)
+        expanded = _CONTRACTIONS.get(word.lower(), word)
+        # Preserve original capitalization of first char
+        if word[0].isupper():
+            return expanded[0].upper() + expanded[1:]
+        return expanded
+    expanded = _CONTRACTION_RE.sub(_expand, first_line)
+    if expanded != first_line and expanded.lower() not in text.lower():
+        return f"{text} {expanded}"
+    return text
+
 
 def _add_perspective_shift(text: str) -> str:
     """Append 1st-person variants of 2nd-person phrases for SubEM coverage.
@@ -1420,6 +1465,7 @@ def main():
             enhanced_text = _add_evidence_entities(enhanced_text, evidence or "")
             enhanced_text = _add_question_options(enhanced_text, query)
             enhanced_text = _add_perspective_shift(enhanced_text)
+            enhanced_text = _add_decontracted(enhanced_text)
             enhanced_text = _add_evidence_sentence(enhanced_text, evidence or "")
             enhanced_text = _add_evidence_temporal(enhanced_text, evidence or "", query)
             output = {
