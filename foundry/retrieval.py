@@ -1035,8 +1035,28 @@ def recall(
         else:
             header = f"{result} (from: {', '.join(entities)})" if entities else str(result)
         parts = [header]
-        # Always attach BM25 evidence so LLM can verify/correct counts
         remaining = char_budget - len(header)
+        # Entity-sourced evidence: BM25 for each entity name to retrieve
+        # the specific turns where each entity was mentioned.
+        bm25_texts = getattr(store.bm25_chunks, "_texts", {})
+        entity_seen: set[int] = set()
+        entity_budget = min(remaining // 3, 4000)
+        entity_used = 0
+        for ename in entities[:5]:
+            search_term = ename.replace("_", " ")
+            for doc_id, _score in store.bm25_chunks.query(search_term, top_k=2):
+                if doc_id in entity_seen:
+                    continue
+                text = bm25_texts.get(doc_id, "")
+                if not text.strip() or len(text) < 20:
+                    continue
+                if entity_used + len(text) > entity_budget:
+                    break
+                parts.append(text)
+                entity_seen.add(doc_id)
+                entity_used += len(text)
+        remaining -= entity_used
+        # Always attach BM25 evidence so LLM can verify/correct counts
         if remaining > 200:
             evidence = _recall_retrieve(
                 store, query, top_k=top_k, char_budget=remaining,
