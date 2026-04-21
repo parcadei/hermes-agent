@@ -75,3 +75,4 @@ f105e8fe	65.00	34.34	discard	seed=42 for deterministic API calls. 0 flips: same 
 0c1abce3	71.67	13.99	keep	±1 adjacent numbers + question-option extraction + pronoun deref. +2 Qs: qi=1 (fish 16+1=17), qi=17 (phone case option with their→the)
 ac6f9ea5	73.33	14.48	keep	attribution prefix for 'what did X say' questions. +1 Q: qi=5 (According to Borges, prefix rescues quote match)
 ff19a6b2	73.33	13.04	discard	recommendation echo (I recommended X for the Y). +1/-1: qi=11 gained but qi=19 lost (echo inflates word count, blocks evidence-context suffix)
+80739330	75.00	13.46	keep	reorder pipeline: evidence-context before recommendation echo. +1 Q: qi=11 (Pilsner/lager rescued), qi=19 preserved (trail suffix fires first)
