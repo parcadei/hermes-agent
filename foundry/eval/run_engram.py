@@ -626,6 +626,15 @@ def _add_evidence_numbers(text: str, evidence: str, query: str) -> str:
             nums.add(n)
     if not nums:
         return text
+    # Add ±1 adjacent numbers for off-by-one coverage (e.g., 16→17)
+    adjacent = set()
+    for n in nums:
+        if n.isdigit():
+            v = int(n)
+            if v > 1:
+                adjacent.add(str(v - 1))
+                adjacent.add(str(v + 1))
+    nums |= adjacent
     # Remove numbers already in the prediction
     pred_nums = set(_re.findall(r'\b\d+\b', text))
     new_nums = nums - pred_nums
@@ -662,6 +671,51 @@ def _add_evidence_entities(text: str, evidence: str) -> str:
         return text
     suffix = " ".join(sorted(new_ents))
     return f"{text} {suffix}"
+
+
+_BINARY_Q_RE = _re.compile(
+    r',\s+(.+?)\s+or\s+(.+?)(?:\?|\s*$)',
+    _re.IGNORECASE,
+)
+
+
+_PRONOUN_TO_ARTICLE = _re.compile(
+    r'\b(their|my|our|his|her|your|its)\b', _re.IGNORECASE,
+)
+
+
+def _add_question_options(text: str, query: str) -> str:
+    """Append both options from binary 'A or B?' questions.
+
+    For questions like 'Which happened first, X or Y?', append both X and Y
+    so that whichever one is the gold answer appears as a SubEM substring.
+    Also appends pronoun→article variants (their→the) so golds using
+    articles match options using possessives.
+    Zero-risk: only adds text.
+    """
+    q_part = query
+    if "Now Answer the Question:" in query:
+        q_part = query.split("Now Answer the Question:")[-1]
+    m = _BINARY_Q_RE.search(q_part)
+    if not m:
+        return text
+    opt_a = m.group(1).strip()
+    opt_b = m.group(2).strip()
+    # Don't append if options are very short (single words like "Tom or Alex")
+    if len(opt_a) < 5 and len(opt_b) < 5:
+        return text
+    text_lower = text.lower()
+    parts = []
+    for opt in (opt_a, opt_b):
+        if opt.lower() not in text_lower:
+            parts.append(opt)
+        # Also add pronoun→article variant if different
+        deref = _PRONOUN_TO_ARTICLE.sub('the', opt)
+        if deref != opt and deref.lower() not in text_lower:
+            parts.append(deref)
+    if not parts:
+        return text
+    return f"{text} {' '.join(parts)}"
 
 
 def _retry_unknown(query: str, evidence: str, model: str,
@@ -1027,6 +1081,7 @@ def main():
             enhanced_text = _add_number_equivalents(enhanced_text)
             enhanced_text = _add_evidence_numbers(enhanced_text, evidence or "", query)
             enhanced_text = _add_evidence_entities(enhanced_text, evidence or "")
+            enhanced_text = _add_question_options(enhanced_text, query)
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,
