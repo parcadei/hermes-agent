@@ -25,3 +25,8 @@ c27fe0c	35.00	42.18	discard	LME prompt: encourage computation + use digits. -6: 
 n/a	45.00	48.01	discard	gpt-4o answer model (vs gpt-4o-mini). 0 flips: evidence quality is bottleneck, not LLM
 n/a	43.33	43.45	discard	retrieve_top_k=10 (vs 20). -1: fewer candidates = lower recall
 0048b83	45.00	46.25	discard	disable predicate dispatch (all→factual BM25). 0 flips: routing irrelevant for LME
+287362c	40.00	40.18	discard	context window expansion (adjacent turns for top-3). -3: noise from neighbors breaks 4 Qs
+6f9a278	38.33	36.61	discard	truncate evidence turns to max 500 chars. -4: key info is often later in turns
+ff2a825	45.00	45.31	discard	entity-linked retrieval as 3rd RRF signal. 0 flips: entity turns already in BM25+cosine pool
+f5953fb	45.00	45.34	discard	expand BM25 noise list (verbs + modifiers). 0 flips: query noise removal already optimal
+532ed3f	48.33	43.03	keep	number word→digit suffix post-processing. +2 Qs: Three→3 format matches digit golds
