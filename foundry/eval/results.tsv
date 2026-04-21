@@ -33,3 +33,4 @@ f5953fb	45.00	45.34	discard	expand BM25 noise list (verbs + modifiers). 0 flips:
 5ccc08b	40.00	15.88	discard	pass clean question to LLM (no benchmark preamble). -5: model outputs 60 tokens, too verbose
 473aa12	50.00	44.53	keep	retry 'unknown' with best-effort prompt when evidence > 200 chars. +1 Q: 20% discount rescued
 3aa7d01	46.67	42.52	discard	attach Chat Time timestamps to evidence turns. -2: date tokens dilute BM25 + overflow char_budget
+b351078	50.00	40.57	discard	bidirectional number normalization (word↔digit suffix). 0 SubEM flips, F1 drops -4 (longer preds)
