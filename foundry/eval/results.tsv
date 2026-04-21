@@ -122,3 +122,20 @@ n/a	76.67	46.55	keep	exp112: prediction-based unit pairs (scan LLM answer for un
 n/a	57.33	42.29	keep	exp112 5-ctx: +2/0 flips (172/300). NEW 5-CTX BEST. qi=82 (15 days from 5+10), qi=254 (10 times from 3+7). Prediction unit pairs work.
 n/a	76.67	47.29	keep	exp113: broadened temporal trigger (personal best, what time, how fast). Neutral ctx0. Targets qi=151 (27 min 45 sec).
 n/a	76.67	45.29	neutral	exp114: retrieve_top_k=30 (was 20). Neutral ctx0 (46/60). More candidates for reranker.
+n/a	76.67	45.14	keep	exp116: individual evidence number+unit pairs (always append, not just pairwise). Neutral ctx0.
+n/a	76.67	44.60	neutral	exp117: custom LME system prompt (compute totals, include details). Neutral ctx0.
+n/a	73.33	42.71	discard	exp118: "use exact phrases from evidence" prompt. REGRESSION -2 ctx0 (44/60). Reverted.
+n/a	76.67	44.79	discard	exp119: entity-focused BM25 3-way RRF (long words ≥5 chars). Neutral ctx0. 5-ctx +3/-3 = net zero (172/300). Reverted.
+n/a	76.67	50.05	neutral	exp120: gpt-4o instead of gpt-4o-mini. Same SubEM, +5 F1, 10x cost. output_len=82 (vs 145).
+n/a	57.33	42.04	neutral	exp116+119 5-ctx combined: 172/300 same as exp112. +3/-3 flips. Entity BM25 adds noise, not signal. Reverted exp119.
+n/a	57.33	42.48	discard	exp121: Snowball stemmer in BM25 _tokenize. ctx0 REGRESSED 46→45. +2/-2 flips (qi=39 lost: 17 days→10 days). Reverted.
+n/a	75.00	45.86	discard	exp122: BM25 k1=1.2 b=0.5 (default: 1.5/0.75). ctx0 REGRESSED 46→45. Less TF saturation + less length norm = more noise. Reverted.
+n/a	75.00	46.04	discard	exp123: all-mpnet-base-v2 embeddings (109M vs 22M all-MiniLM-L6-v2). ctx0 REGRESSED 46→45. Larger model = worse for short turns. Reverted.
+n/a	76.67	47.39	keep	exp124: perspective shift fix — full-line "Your" → "my" (catches possessives). Neutral ctx0. Targets ctx2 qi=54.
+n/a	70.00	42.80	discard	exp125: reversed evidence order (best last, near question). CATASTROPHIC -4 ctx0 (42/60). LLM needs best evidence FIRST. Reverted.
+n/a	73.33	45.60	discard	exp126: retrieve_top_k=10 (was 20). REGRESSED -2 ctx0 (44/60). Too little evidence. 20 is the sweet spot.
+n/a	75.00	47.03	discard	exp127: mxbai-rerank-large-v1 (was base-v1). ctx0 REGRESSED 46→45. 2.3x slower. Base model better for this task.
+n/a	73.33	45.95	ablation	exp128-ablation: no cosine (BM25+reranker only). -2 ctx0. Cosine contributes +2 Qs. all-MiniLM-L6-v2 is sweet spot.
+n/a	75.00	45.86	discard	exp128: BAAI/bge-small-en-v1.5 embeddings (33M). ctx0 REGRESSED 46→45. all-MiniLM-L6-v2 (22M) confirmed best.
+n/a	76.67	46.77	neutral	exp129: RRF k=30 (was 60). Neutral ctx0. RRF constant not critical for this task. Reverted to 60.
+n/a	57.33	42.23	keep	exp116+124 5-ctx: 172/300 same as baseline. +2/-2 flips (API variance). Perspective shift fix correct but didn't trigger (API nondeterminism).

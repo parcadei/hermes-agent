@@ -1161,7 +1161,7 @@ def _recall_retrieve(
         except Exception:
             pass
 
-    # RRF merge
+    # RRF merge (2-way: BM25 + cosine)
     merged = _rrf_merge([bm25_hits, cosine_hits]) if cosine_hits else bm25_hits
 
     # Cross-encoder rerank (if reranker available)

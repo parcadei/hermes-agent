@@ -752,6 +752,9 @@ def _add_evidence_numbers(text: str, evidence: str, query: str) -> str:
                 unit_groups[unit].append(int(n_str))
     for unit, vals in unit_groups.items():
         unique_vals = sorted(set(vals))
+        # Always append individual evidence number+unit pairs
+        for v in unique_vals:
+            num_unit_pairs.add(f"{v} {unit}")
         if len(unique_vals) >= 2:
             for i, a in enumerate(unique_vals):
                 for b in unique_vals[i + 1:]:
@@ -1182,12 +1185,16 @@ def _add_perspective_shift(text: str) -> str:
     """
     first_line = text.split('\n')[0]
     shifts = []
-    # "Your X" → "My X" / "my X"
+    # "Your X" → "My X" / "my X" (individual words)
     for m in _re.finditer(r'\b[Yy]our\s+(\w+)', first_line):
         phrase = m.group(0)
         my_variant = _re.sub(r'^[Yy]our', 'my', phrase)
         if my_variant.lower() not in text.lower():
             shifts.append(my_variant)
+    # Full-line "Your" → "my" (catches possessives: "Your cousin's wedding" → "my cousin's wedding")
+    your_line = _re.sub(r'\b[Yy]our\b', 'my', first_line)
+    if your_line != first_line and your_line.lower() not in text.lower():
+        shifts.append(your_line)
     # "You have" → "I have" / "We've" / "I've"
     if _re.search(r'\bYou have\b', first_line):
         shifts.append("I have")
@@ -1479,7 +1486,7 @@ def main():
             _rebuild_bm25_with_turns(foundry, raw_context)
 
             # Embed turns for cosine search in recall()
-            if args.use_recall:
+            if args.use_recall and args.embed_model:
                 embed_start = time.time()
                 _embed_model = _embed_turns(foundry, args.embed_model)
                 print(f"  Embedded in {time.time() - embed_start:.1f}s")
