@@ -1110,6 +1110,40 @@ def _clean_bm25_query(query: str) -> str:
     return " ".join(content) if content else query
 
 
+# Verbs to strip from noun-only query (keep only nouns/adjectives)
+_VERB_WORDS = {
+    "go", "went", "gone", "get", "got", "gotten", "make", "made", "take",
+    "took", "taken", "give", "gave", "given", "come", "came", "see", "saw",
+    "seen", "know", "knew", "known", "think", "thought", "tell", "told",
+    "find", "found", "say", "said", "ask", "asked", "use", "used", "try",
+    "tried", "call", "called", "keep", "kept", "let", "put", "set", "run",
+    "ran", "need", "needed", "work", "worked", "play", "played", "start",
+    "started", "move", "moved", "live", "lived", "happen", "happened",
+    "recommend", "recommended", "attend", "attended", "visit", "visited",
+    "buy", "bought", "eat", "ate", "eaten", "drink", "drank", "spend",
+    "spent", "gain", "gained", "lose", "lost", "meet", "met", "join",
+    "joined", "watch", "watched", "read", "travel", "traveled", "travelled",
+    "prefer", "preferred", "suggest", "suggested", "mention", "mentioned",
+    "talk", "talked", "discuss", "discussed",
+}
+
+
+def _extract_nouns(query: str) -> str:
+    """Extract likely nouns from query for a second BM25 pass.
+
+    Strips question words, verbs, and function words, keeping only content
+    nouns/adjectives that are likely to appear in evidence text.
+    """
+    tokens = re.findall(r"[a-zA-Z0-9']+", query.lower())
+    nouns = [
+        t for t in tokens
+        if t not in _BM25_NOISE
+        and t not in _VERB_WORDS
+        and len(t) > 2
+    ]
+    return " ".join(nouns) if nouns else ""
+
+
 def _recall_retrieve(
     store: "FoundryStore",
     query: str,
@@ -1152,6 +1186,12 @@ def _recall_retrieve(
     candidate_k = top_k * 2 if use_cosine else top_k
     bm25_hits = store.bm25_chunks.query(bm25_query, top_k=candidate_k)
 
+    # Second BM25 pass with noun-only query (catches different vocabulary matches)
+    noun_query = _extract_nouns(query)
+    bm25_noun_hits: list[tuple[int, float]] = []
+    if noun_query and noun_query != bm25_query:
+        bm25_noun_hits = store.bm25_chunks.query(noun_query, top_k=candidate_k)
+
     # Cosine candidates (if embeddings available)
     cosine_hits: list[tuple[int, float]] = []
     if use_cosine:
@@ -1161,8 +1201,13 @@ def _recall_retrieve(
         except Exception:
             pass
 
-    # RRF merge
-    merged = _rrf_merge([bm25_hits, cosine_hits]) if cosine_hits else bm25_hits
+    # RRF merge (2-way or 3-way depending on available signals)
+    rankings = [bm25_hits]
+    if bm25_noun_hits:
+        rankings.append(bm25_noun_hits)
+    if cosine_hits:
+        rankings.append(cosine_hits)
+    merged = _rrf_merge(rankings) if len(rankings) > 1 else bm25_hits
 
     # Cross-encoder rerank (if reranker available)
     if reranker is not None and merged:
