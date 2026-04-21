@@ -524,7 +524,11 @@ def _add_evidence_context(text: str, evidence: str) -> str:
     # Extract words after the match in original evidence
     after_text = evidence[orig_end:]
     skip = {"the", "a", "an", "this", "that", "these", "those",
-            "is", "are", "was", "were", "it", "its", "and", "or", "of"}
+            "is", "are", "was", "were", "it", "its", "and", "or", "of",
+            "at", "to", "from", "for", "in", "on", "with", "by", "about",
+            "up", "out", "into", "over", "as", "but", "so", "if", "not",
+            "he", "she", "they", "we", "you", "me", "my", "your", "our",
+            "do", "did", "does", "had", "has", "have", "been", "being"}
     words_after = _re.findall(r'[a-zA-Z0-9]+', after_text)
     content = [w for w in words_after if w.lower() not in skip and len(w) > 1]
     if content:
