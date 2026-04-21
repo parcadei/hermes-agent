@@ -1031,7 +1031,15 @@ def recall(
         if norm_predicate == "list":
             header = ", ".join(str(e) for e in (result if isinstance(result, list) else entities))
         elif norm_predicate == "count":
-            header = f"{result} (entities: {', '.join(entities)})" if entities else str(result)
+            entity_list = ", ".join(entities) if entities else ""
+            if entity_list:
+                header = (
+                    f"MEMORY ANALYSIS: Found {result} distinct {norm_entity} items: "
+                    f"{entity_list}.\n"
+                    f"Use the evidence below to verify this count."
+                )
+            else:
+                header = str(result)
         else:
             header = f"{result} (from: {', '.join(entities)})" if entities else str(result)
         parts = [header]
