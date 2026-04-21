@@ -740,12 +740,16 @@ def _add_evidence_numbers(text: str, evidence: str, query: str) -> str:
                 computed.add(f"{avg:.1f}")
 
     # Unit-aware pairwise arithmetic: "5 days" + "10 days" → "15 days"
+    # Scan both evidence AND prediction for unit patterns (LLM often
+    # infers units from context that aren't explicit in evidence text)
     from collections import defaultdict as _defaultdict
     unit_groups: dict[str, list[int]] = _defaultdict(list)
-    for m in _re.finditer(r'\b(\d+)\s+(\w+)', evidence):
-        n_str, unit = m.group(1), m.group(2).lower()
-        if unit in _units and len(n_str) <= 5 and n_str != '0':
-            unit_groups[unit].append(int(n_str))
+    first_line = text.split('\n')[0] if '\n' in text else text
+    for source in (evidence, first_line):
+        for m in _re.finditer(r'\b(\d+)\s+(\w+)', source):
+            n_str, unit = m.group(1), m.group(2).lower()
+            if unit in _units and len(n_str) <= 5 and n_str != '0':
+                unit_groups[unit].append(int(n_str))
     for unit, vals in unit_groups.items():
         unique_vals = sorted(set(vals))
         if len(unique_vals) >= 2:
@@ -1013,6 +1017,8 @@ def _add_evidence_temporal(text: str, evidence: str, query: str) -> str:
         "how long", "how many days", "how many weeks", "how many months",
         "how many years", "how many hours", "how many minutes",
         "how much time", "how often", "when did", "ago",
+        "what time", "best time", "personal best", "what was the time",
+        "how fast", "how quickly", "duration",
     ))
     if not is_temporal:
         return text

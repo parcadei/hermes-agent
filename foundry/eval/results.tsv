@@ -118,3 +118,7 @@ n/a	76.67	47.49	keep	exp109: re-added unit-aware pairwise sums/diffs (5 days + 1
 n/a	76.67	46.83	keep	exp110: duration equivalents (1h30m → an hour and a half, 90 minutes). Neutral ctx0. Targets qi=139.
 n/a	76.67	47.06	keep	exp111: extended number-word mapping (thirty→30, forty→40...hundred→100). Neutral ctx0.
 n/a	56.67	42.31	keep	5-context exp107+109+110+111 combined. +4/0 flips (170/300). NEW 5-CTX BEST. qi=23 arithmetic, qi=19 duration, qi=32+42 arithmetic.
+n/a	76.67	46.55	keep	exp112: prediction-based unit pairs (scan LLM answer for unit patterns, not just evidence). Neutral ctx0.
+n/a	57.33	42.29	keep	exp112 5-ctx: +2/0 flips (172/300). NEW 5-CTX BEST. qi=82 (15 days from 5+10), qi=254 (10 times from 3+7). Prediction unit pairs work.
+n/a	76.67	47.29	keep	exp113: broadened temporal trigger (personal best, what time, how fast). Neutral ctx0. Targets qi=151 (27 min 45 sec).
+n/a	76.67	45.29	neutral	exp114: retrieve_top_k=30 (was 20). Neutral ctx0 (46/60). More candidates for reranker.
