@@ -1174,9 +1174,17 @@ def _recall_retrieve(
                 candidates.append({"text": text, "doc_id": int(doc_id), "score": score})
         if candidates:
             reranked = reranker.rerank(query, candidates, top_k=top_k)
-            for item in reranked:
+            # Context window: expand top-3 results with adjacent turns
+            for idx, item in enumerate(reranked):
                 if not _add(item["text"], item["doc_id"]):
                     break
+                if idx < 3:
+                    did = item["doc_id"]
+                    for neighbor in (did - 1, did + 1):
+                        if neighbor >= 0 and neighbor not in seen_ids:
+                            nb_text = _full_text(neighbor)
+                            if nb_text.strip() and len(nb_text) >= 20:
+                                _add(nb_text, neighbor)
             return "\n".join(evidence_parts)
 
     # No reranker — use merged ranking directly
