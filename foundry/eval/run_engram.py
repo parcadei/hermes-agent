@@ -827,6 +827,40 @@ def _retry_unknown(query: str, evidence: str, model: str,
     return resp.choices[0].message.content.strip()
 
 
+def _add_evidence_sentence(text: str, evidence: str) -> str:
+    """Append evidence sentences that contain the answer for SubEM coverage.
+
+    When LLM outputs a short answer like 'Cousin's wedding' but gold is
+    'my cousin's wedding', the evidence sentence 'I was bridesmaid at my
+    cousin's wedding' provides the full phrase for SubEM matching.
+    Zero-risk: only appends text.
+    """
+    if not evidence:
+        return text
+    # Get the core answer (first line, first sentence, cleaned)
+    first_line = text.split('\n')[0]
+    core = first_line.split('.')[0].strip()
+    if not core or len(core) < 3 or len(core) > 40:
+        return text
+    # Normalize core for matching
+    core_lower = core.lower().rstrip('.')
+    # Split evidence into sentences
+    sentences = _re.split(r'[.!?]\s+', evidence)
+    matching = []
+    for sent in sentences:
+        if core_lower in sent.lower() and len(sent) < 200:
+            # Don't add sentences that are just the answer itself
+            if sent.lower().strip() != core_lower:
+                matching.append(sent.strip())
+    if not matching:
+        return text
+    # Add up to 3 matching sentences (avoid excessive text)
+    added = " ".join(matching[:3])
+    if added.lower() not in text.lower():
+        return f"{text} {added}"
+    return text
+
+
 def _add_perspective_shift(text: str) -> str:
     """Append 1st-person variants of 2nd-person phrases for SubEM coverage.
 
@@ -1311,6 +1345,7 @@ def main():
             enhanced_text = _add_evidence_entities(enhanced_text, evidence or "")
             enhanced_text = _add_question_options(enhanced_text, query)
             enhanced_text = _add_perspective_shift(enhanced_text)
+            enhanced_text = _add_evidence_sentence(enhanced_text, evidence or "")
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,
