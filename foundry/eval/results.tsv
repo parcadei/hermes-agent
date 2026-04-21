@@ -62,3 +62,4 @@ a9f43ea5	50.00	41.32	discard	reduce char_budget 12000→10000. -2 Qs: qi=39 lost
 c7824c48	51.67	40.89	discard	counting hint in user message (list items before total). -1: qi=32 answer shifted from book club to marketing
 n/a	42.00	38.92	keep	5-context exp56 baseline (300 Qs). Up from v51 39.33% (post-processing gains carry over)
 b81e16db	53.33	42.76	discard	entity-mention-turn alignment + 3rd RRF signal. 0 flips: entity mentions already captured by BM25 keywords
+53f47abf	50.00	42.76	discard	entity-fact enrichment of evidence (graph knowledge suffix). -2 Qs: qi=32 lost book club, qi=50 wrong 124 vs 132. Entity facts add noise not signal
