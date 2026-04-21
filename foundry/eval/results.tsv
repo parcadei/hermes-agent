@@ -60,3 +60,5 @@ ee698768	51.67	41.49	discard	content-based evidence dedup (Jaccard >0.7). 0 flip
 fc4d189e	53.33	43.07	discard	entity-sourced BM25 evidence for aggregate questions. 0 flips: entity BM25 redundant with generic BM25, same turns retrieved
 a9f43ea5	50.00	41.32	discard	reduce char_budget 12000→10000. -2 Qs: qi=39 lost social media context, qi=40 wrong discount from truncated evidence
 c7824c48	51.67	40.89	discard	counting hint in user message (list items before total). -1: qi=32 answer shifted from book club to marketing
+n/a	42.00	38.92	keep	5-context exp56 baseline (300 Qs). Up from v51 39.33% (post-processing gains carry over)
+b81e16db	53.33	42.76	discard	entity-mention-turn alignment + 3rd RRF signal. 0 flips: entity mentions already captured by BM25 keywords
