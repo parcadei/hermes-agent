@@ -1027,12 +1027,6 @@ def recall(
         agg = aggregate(store, norm_entity, norm_predicate)
         result = agg.get("result")
         entities = agg.get("entities", [])
-        # If aggregate found nothing, fall through to factual BM25
-        if not entities and result in (0, None, "", []):
-            return _recall_retrieve(
-                store, query, top_k=top_k, char_budget=char_budget,
-                embed_fn=embed_fn, reranker=reranker,
-            )
         # Format structured answer + supporting BM25 evidence
         if norm_predicate == "list":
             header = ", ".join(str(e) for e in (result if isinstance(result, list) else entities))
