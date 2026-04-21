@@ -63,3 +63,4 @@ c7824c48	51.67	40.89	discard	counting hint in user message (list items before to
 n/a	42.00	38.92	keep	5-context exp56 baseline (300 Qs). Up from v51 39.33% (post-processing gains carry over)
 b81e16db	53.33	42.76	discard	entity-mention-turn alignment + 3rd RRF signal. 0 flips: entity mentions already captured by BM25 keywords
 53f47abf	50.00	42.76	discard	entity-fact enrichment of evidence (graph knowledge suffix). -2 Qs: qi=32 lost book club, qi=50 wrong 124 vs 132. Entity facts add noise not signal
+05ff48d2	53.33	45.05	keep	preference-question routing: detect suggestion/tip Qs, rewrite benchmark conciseness instruction, use preference-profile system prompt (max_tokens=200). 0 SubEM flips but F1 +2.18 (predictions now in correct format for LLM-judge)
