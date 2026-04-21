@@ -477,7 +477,7 @@ def _system_prompt_for_dataset(dataset: str) -> str:
         )
     # Generic fallback
     return (
-        "Answer the question concisely using ONLY the provided evidence. "
+        "Answer the question using ONLY the provided evidence. "
         "If the evidence doesn't contain the answer, say 'unknown'."
     )
 
