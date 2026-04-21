@@ -510,26 +510,17 @@ def _add_number_equivalents(text: str) -> str:
 def _retry_unknown(query: str, evidence: str, model: str,
                    max_tokens: int = 64) -> str:
     """Re-ask with best-effort prompt when model said 'unknown' despite evidence."""
-    # Use tighter prompt for numeric questions — forces a concise numeric answer
-    q_lower = query.lower()
-    if any(p in q_lower for p in ["how many", "how much", "how long", "what percentage"]):
-        system_msg = (
-            "Answer the question with ONLY a number or short value. "
-            "Never say 'unknown'. Provide your best estimate from the evidence."
-        )
-    else:
-        system_msg = (
-            "Answer the question using the provided evidence. "
-            "Always provide your best-effort answer — never say 'unknown'. "
-            "If you must estimate or infer, do so concisely."
-        )
     client = _get_client()
     resp = client.chat.completions.create(
         model=model,
         temperature=0,
         max_tokens=max_tokens,
         messages=[
-            {"role": "system", "content": system_msg},
+            {"role": "system", "content": (
+                "Answer the question using the provided evidence. "
+                "Always provide your best-effort answer — never say 'unknown'. "
+                "If you must estimate or infer, do so concisely."
+            )},
             {"role": "user", "content": (
                 f"Here is relevant context from memory:\n{evidence}\n\n"
                 f"Now complete the following task:\n{query}"
