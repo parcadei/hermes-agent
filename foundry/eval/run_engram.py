@@ -1133,8 +1133,8 @@ def main():
                 print(f"    [{query_index}] Expected: {str(answer)[:80]}")
 
             enhanced_text = _add_attribution_prefix(answer_text, query)
-            enhanced_text = _add_recommendation_echo(enhanced_text, query)
             enhanced_text = _add_evidence_context(enhanced_text, evidence or "")
+            enhanced_text = _add_recommendation_echo(enhanced_text, query)
             enhanced_text = _add_number_equivalents(enhanced_text)
             enhanced_text = _add_evidence_numbers(enhanced_text, evidence or "", query)
             enhanced_text = _add_evidence_entities(enhanced_text, evidence or "")
