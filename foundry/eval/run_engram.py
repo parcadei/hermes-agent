@@ -760,6 +760,7 @@ def main():
                 "output_len": len(answer_text),
                 "memory_construction_time": ingest_time / max(len(chunks), 1),
                 "query_time_len": query_time,
+                "evidence": (evidence or "")[:2000],
             }
 
             metrics, results = metrics_summarization(
