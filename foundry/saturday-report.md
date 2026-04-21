@@ -75,21 +75,25 @@ All Engram runs use `foundry/eval/run_engram.py`, direct BM25 retrieval, `gpt-4o
 
 ## Summary Table
 
-| Category | Benchmark | Engram BM25 | Composed Agent | Gap |
-|----------|-----------|-------------|----------------|-----|
-| CR | FC-SH | 51% | 91% | -40pp |
-| CR | FC-MH | 1% | 55% | -54pp |
-| AR | Ruler QA1 197K | 76% | — | baseline |
-| AR | Ruler QA2 421K | 39% | — | baseline |
-| AR | EventQA | 44.8% | — | baseline |
-| AR | LME | 30.67% | 31.33% | **-0.66pp** |
-| LRU | Detective QA | 49.3% | — | baseline |
-| LRU | InfBench_sum | 29.0% R-L | — | baseline |
-| TTL | ICL NLU | 80% | — | baseline |
-| TTL | ICL Banking77 | 75% | — | baseline |
-| TTL | ICL Clinic150 | 72% | — | baseline |
-| TTL | ICL TREC Coarse | 54% | — | baseline |
-| TTL | ICL TREC Fine | 50% | — | baseline |
+| Category | Benchmark | Engram BM25 | Composed Agent | Target | Gap |
+|----------|-----------|-------------|----------------|--------|-----|
+| CR | FC-SH | 51% | 91% | 91%+ | -40pp |
+| CR | FC-MH | 1% | 55% | 55%+ | -54pp |
+| AR | Ruler QA1 197K | 76% | — | — | baseline |
+| AR | Ruler QA2 421K | 39% | — | — | baseline |
+| AR | EventQA | 44.8% | — | — | baseline |
+| AR | LME | 30.67% | 31.33% | **90%** | -59pp |
+| LRU | Detective QA | 49.3% | — | — | baseline |
+| LRU | InfBench_sum | 29.0% R-L | — | — | baseline |
+| TTL | ICL NLU | 80% | — | — | baseline |
+| TTL | ICL Banking77 | 75% | — | — | baseline |
+| TTL | ICL Clinic150 | 72% | — | — | baseline |
+| TTL | ICL TREC Coarse | 54% | — | — | baseline |
+| TTL | ICL TREC Fine | 50% | — | — | baseline |
+
+**Targets:**
+- **LME 90%** is the primary target. Current: 30.67%. Chronos SOTA: 95.6%.
+- **FC-SH/MH**: match composed agent as minimum (91%/55%), then exceed.
 
 **Key insight:** Engram's pure BM25 matches the composed agent on LME (30.67% vs 31.33%).
 The composed agent's entity_prefilter + dynamic_prompting + structured_query + aggregation_overfetch

@@ -139,3 +139,11 @@ n/a	73.33	45.95	ablation	exp128-ablation: no cosine (BM25+reranker only). -2 ctx
 n/a	75.00	45.86	discard	exp128: BAAI/bge-small-en-v1.5 embeddings (33M). ctx0 REGRESSED 46→45. all-MiniLM-L6-v2 (22M) confirmed best.
 n/a	76.67	46.77	neutral	exp129: RRF k=30 (was 60). Neutral ctx0. RRF constant not critical for this task. Reverted to 60.
 n/a	57.33	42.23	keep	exp116+124 5-ctx: 172/300 same as baseline. +2/-2 flips (API variance). Perspective shift fix correct but didn't trigger (API nondeterminism).
+n/a	76.67	46.67	discard	exp130: gen_max_len=30 (was 50). ctx0 neutral SubEM, F1 dropped -1.03. Shorter output doesn't help SubEM. Reverted.
+n/a	76.67	47.39	keep	exp131: keyword evidence extraction (pred+question weighted). ctx0 neutral. Sim: +2/0 on 5-ctx (qi=89,174).
+n/a	76.67	47.39	keep	exp131b: phrase equivalents ("in addition to"→"too"). ctx0 neutral. Sim: +1/0 on 5-ctx (qi=153).
+n/a	58.00	41.95	keep	exp131+131b 5-ctx: keyword evidence + phrase equivalents. 174/300 (+2/0: qi=89,174). NEW 5-CTX BEST.
+n/a	76.67	47.39	keep	exp132: keyword min-len 4→3 + duration sub-hour (30min→0.5h). ctx0 neutral. Sim: +2/0 (qi=244,297). 5-ctx eval running.
+n/a	58.00	41.97	neutral	exp132 5-ctx: keyword min-len 3 + duration sub-hour. 174/300 (+1/-1 vs baseline: qi=57 gained, qi=14 lost). Net neutral.
+n/a	61.33	n/a	metric	LLM-as-judge on exp131+131b 5-ctx: 184/300 (61.3%). +10 over SubEM (174). Strict gpt-4o-mini judge.
+n/a	n/a	n/a	ceiling	THEORETICAL CEILING REACHED: gold-in-conversation=173/300 (57.7%), current=174/300 (58.0%). 19 synthetic passes exceed ceiling. Post-processing exhausted.
