@@ -1128,12 +1128,24 @@ def _recall_retrieve(
     seen_ids: set[int] = set()
     total_chars = 0
 
+    def _word_overlap(a: str, b: str) -> float:
+        """Jaccard word overlap between two texts."""
+        wa = set(a.lower().split())
+        wb = set(b.lower().split())
+        if not wa or not wb:
+            return 0.0
+        return len(wa & wb) / len(wa | wb)
+
     def _add(text: str, doc_id: int = -1) -> bool:
         nonlocal total_chars
         if doc_id in seen_ids and doc_id >= 0:
             return True
         if not text.strip() or len(text) < 20:
             return True
+        # Skip near-duplicate evidence (>70% word overlap with existing)
+        for existing in evidence_parts:
+            if _word_overlap(text, existing) > 0.7:
+                return True
         if total_chars + len(text) > char_budget:
             return False
         evidence_parts.append(text)
