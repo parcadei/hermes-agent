@@ -1022,29 +1022,14 @@ def recall(
     norm_predicate = predicate.strip().lower()
     norm_entity = entity.strip().lower().replace(" ", "_")
 
-    # ── Route: count / sum / list → aggregate via type hierarchy ──
+    # ── Route: count / sum / list → skip aggregate, use BM25-only ──
+    # Aggregate entity counts are often wrong (extraction quality).
+    # BM25 evidence gives the LLM raw conversation text to reason from.
     if norm_predicate in {"count", "sum", "list"} and norm_entity:
-        agg = aggregate(store, norm_entity, norm_predicate)
-        result = agg.get("result")
-        entities = agg.get("entities", [])
-        # Format structured answer + supporting BM25 evidence
-        if norm_predicate == "list":
-            header = ", ".join(str(e) for e in (result if isinstance(result, list) else entities))
-        elif norm_predicate == "count":
-            header = f"{result} (entities: {', '.join(entities)})" if entities else str(result)
-        else:
-            header = f"{result} (from: {', '.join(entities)})" if entities else str(result)
-        parts = [header]
-        # Always attach BM25 evidence so LLM can verify/correct counts
-        remaining = char_budget - len(header)
-        if remaining > 200:
-            evidence = _recall_retrieve(
-                store, query, top_k=top_k, char_budget=remaining,
-                embed_fn=embed_fn, reranker=reranker,
-            )
-            if evidence:
-                parts.append(evidence)
-        return "\n".join(parts)
+        return _recall_retrieve(
+            store, query, top_k=top_k, char_budget=char_budget,
+            embed_fn=embed_fn, reranker=reranker,
+        )
 
     # ── Route: when / temporal → Allen engine + BM25 evidence ─────
     if norm_predicate == "when" or time:
