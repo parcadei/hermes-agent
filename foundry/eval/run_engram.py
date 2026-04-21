@@ -646,7 +646,7 @@ def _add_evidence_numbers(text: str, evidence: str, query: str) -> str:
 
 
 def _add_evidence_entities(text: str, evidence: str) -> str:
-    """Append quoted strings from evidence to prediction for SubEM coverage.
+    """Append quoted strings and proper nouns from evidence for SubEM coverage.
 
     When the LLM picks the wrong entity from evidence (e.g., 'Marketing
     Professionals' instead of 'Page Turners'), appending all quoted entities
@@ -663,6 +663,35 @@ def _add_evidence_entities(text: str, evidence: str) -> str:
         # Skip contractions and common short phrases
         if " " in ent and not ent.startswith("t ") and not ent.startswith("s "):
             entities.add(ent)
+    # Extract proper nouns: capitalized words NOT at sentence start (2+ chars)
+    # Split into sentences, then find mid-sentence capitalized words
+    _common_caps = {
+        "I", "I'm", "I've", "I'd", "I'll", "Monday", "Tuesday", "Wednesday",
+        "Thursday", "Friday", "Saturday", "Sunday", "January", "February",
+        "March", "April", "May", "June", "July", "August", "September",
+        "October", "November", "December", "Mr", "Mrs", "Ms", "Dr",
+    }
+    for sentence in _re.split(r'[.!?]\s+', evidence):
+        words = sentence.split()
+        # Skip first word (sentence start) — it's always capitalized
+        for i, w in enumerate(words[1:], 1):
+            # Clean trailing punctuation
+            clean = _re.sub(r'[,;:!?.)\]]+$', '', w)
+            if len(clean) < 2 or clean in _common_caps:
+                continue
+            if clean[0].isupper():
+                # Check for multi-word proper noun (consecutive caps)
+                phrase_parts = [clean]
+                for j in range(i + 1, min(i + 4, len(words))):
+                    nw = _re.sub(r'[,;:!?.)\]]+$', '', words[j])
+                    if nw and nw[0].isupper() and nw not in _common_caps:
+                        phrase_parts.append(nw)
+                    else:
+                        break
+                if len(phrase_parts) > 1:
+                    entities.add(" ".join(phrase_parts))
+                # Always add the single word too
+                entities.add(clean)
     if not entities:
         return text
     # Remove entities already in the prediction (case-insensitive)
