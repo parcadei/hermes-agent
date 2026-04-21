@@ -24,3 +24,4 @@ c27fe0c	35.00	42.18	discard	LME prompt: encourage computation + use digits. -6: 
 919d9ca	45.00	45.54	discard	always include BM25 evidence with aggregate. 0 flips: extra evidence is noise
 n/a	45.00	48.01	discard	gpt-4o answer model (vs gpt-4o-mini). 0 flips: evidence quality is bottleneck, not LLM
 n/a	43.33	43.45	discard	retrieve_top_k=10 (vs 20). -1: fewer candidates = lower recall
+0048b83	45.00	46.25	discard	disable predicate dispatch (all→factual BM25). 0 flips: routing irrelevant for LME

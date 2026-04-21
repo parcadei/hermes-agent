@@ -1023,7 +1023,7 @@ def recall(
     norm_entity = entity.strip().lower().replace(" ", "_")
 
     # ── Route: count / sum / list → aggregate via type hierarchy ──
-    if False and norm_predicate in {"count", "sum", "list"} and norm_entity:
+    if norm_predicate in {"count", "sum", "list"} and norm_entity:
         agg = aggregate(store, norm_entity, norm_predicate)
         result = agg.get("result")
         entities = agg.get("entities", [])
@@ -1048,7 +1048,7 @@ def recall(
         return "\n".join(parts)
 
     # ── Route: when / temporal → Allen engine + BM25 evidence ─────
-    if False and (norm_predicate == "when" or time):
+    if norm_predicate == "when" or time:
         parts: list[str] = []
         remaining = char_budget
         # Allen temporal search
