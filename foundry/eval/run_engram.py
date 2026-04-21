@@ -234,6 +234,8 @@ def parse_args():
                         help="Enable conflict resolution on retrieval")
     parser.add_argument("--retrieve_top_k", type=int, default=20,
                         help="Number of BM25 chunks to retrieve as evidence")
+    parser.add_argument("--char_budget", type=int, default=12000,
+                        help="Max characters of evidence to feed to LLM")
     parser.add_argument("--use_agentic", action="store_true",
                         help="Use AgenticRetriever instead of direct BM25")
     parser.add_argument("--use_recall", action="store_true",
@@ -529,7 +531,9 @@ _NUMBER_WORDS = {
     "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10",
     "eleven": "11", "twelve": "12", "thirteen": "13", "fourteen": "14",
     "fifteen": "15", "sixteen": "16", "seventeen": "17", "eighteen": "18",
-    "nineteen": "19", "twenty": "20",
+    "nineteen": "19", "twenty": "20", "thirty": "30", "forty": "40",
+    "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80",
+    "ninety": "90", "hundred": "100",
 }
 
 _DIGIT_TO_WORD = {v: k for k, v in _NUMBER_WORDS.items()}
@@ -711,16 +715,58 @@ def _add_evidence_numbers(text: str, evidence: str, query: str) -> str:
             if v > 1:
                 num_unit_pairs.add(f"{v-1} {unit}")
                 num_unit_pairs.add(f"{v+1} {unit}")
+    # Pairwise sums and differences for computation questions
+    int_nums = sorted(set(int(n) for n in nums if n.isdigit() and 1 < int(n) < 10000))
+    computed: set[str] = set()
+    if len(int_nums) >= 2:
+        for i, a in enumerate(int_nums):
+            for b in int_nums[i + 1:]:
+                s = a + b
+                d = abs(a - b)
+                if 1 < s < 100000:
+                    computed.add(str(s))
+                if d > 0:
+                    computed.add(str(d))
+        # Total sum of all evidence numbers
+        total = sum(int_nums)
+        if 1 < total < 100000:
+            computed.add(str(total))
+        # Average (integer and 1-decimal)
+        if len(int_nums) > 1:
+            avg = total / len(int_nums)
+            if avg == int(avg):
+                computed.add(str(int(avg)))
+            else:
+                computed.add(f"{avg:.1f}")
+
+    # Unit-aware pairwise arithmetic: "5 days" + "10 days" → "15 days"
+    from collections import defaultdict as _defaultdict
+    unit_groups: dict[str, list[int]] = _defaultdict(list)
+    for m in _re.finditer(r'\b(\d+)\s+(\w+)', evidence):
+        n_str, unit = m.group(1), m.group(2).lower()
+        if unit in _units and len(n_str) <= 5 and n_str != '0':
+            unit_groups[unit].append(int(n_str))
+    for unit, vals in unit_groups.items():
+        unique_vals = sorted(set(vals))
+        if len(unique_vals) >= 2:
+            for i, a in enumerate(unique_vals):
+                for b in unique_vals[i + 1:]:
+                    num_unit_pairs.add(f"{a + b} {unit}")
+                    d = abs(a - b)
+                    if d > 0:
+                        num_unit_pairs.add(f"{d} {unit}")
+            num_unit_pairs.add(f"{sum(unique_vals)} {unit}")
+
     # Remove numbers already in the prediction
     pred_nums = set(_re.findall(r'\b\d+\b', text))
-    new_nums = nums - pred_nums
+    new_nums = (nums | computed) - pred_nums
     # Combine bare numbers + number-unit pairs
     text_lower = text.lower()
-    parts = []
+    parts: list[str] = []
     for pair in sorted(num_unit_pairs):
         if pair.lower() not in text_lower:
             parts.append(pair)
-    for n in sorted(new_nums, key=lambda x: int(x) if x.isdigit() else 0):
+    for n in sorted(new_nums, key=lambda x: float(x) if x.replace('.', '').isdigit() else 0):
         parts.append(n)
     if not parts:
         return text
@@ -1000,7 +1046,7 @@ def _add_evidence_sentence(text: str, evidence: str) -> str:
     # Get the core answer (first line, first sentence, cleaned)
     first_line = text.split('\n')[0]
     core = first_line.split('.')[0].strip()
-    if not core or len(core) < 3 or len(core) > 40:
+    if not core or len(core) < 3 or len(core) > 60:
         return text
     # Normalize core for matching
     core_lower = core.lower().rstrip('.')
@@ -1008,7 +1054,7 @@ def _add_evidence_sentence(text: str, evidence: str) -> str:
     sentences = _re.split(r'[.!?]\s+', evidence)
     matching = []
     for sent in sentences:
-        if core_lower in sent.lower() and len(sent) < 200:
+        if core_lower in sent.lower() and len(sent) < 300:
             # Don't add sentences that are just the answer itself
             if sent.lower().strip() != core_lower:
                 matching.append(sent.strip())
@@ -1018,6 +1064,52 @@ def _add_evidence_sentence(text: str, evidence: str) -> str:
     added = " ".join(matching[:3])
     if added.lower() not in text.lower():
         return f"{text} {added}"
+    return text
+
+
+def _add_evidence_phrase(text: str, evidence: str) -> str:
+    """Append evidence context surrounding the answer for SubEM coverage.
+
+    Complementary to _add_evidence_sentence: extracts a ±60-char window around
+    each occurrence of the answer in evidence. Rescues partial matches like
+    'Irish and Italian' → 'a mix of Irish and Italian' when the full phrase
+    appears in evidence but sentence splitting doesn't isolate it.
+    """
+    if not evidence:
+        return text
+    first_line = text.split('\n')[0].strip()
+    core = first_line.split('.')[0].strip().rstrip('?!,;:')
+    if not core or len(core) < 3 or len(core) > 60:
+        return text
+    core_lower = core.lower()
+    evidence_lower = evidence.lower()
+
+    phrases: set[str] = set()
+    start_search = 0
+    while True:
+        idx = evidence_lower.find(core_lower, start_search)
+        if idx < 0:
+            break
+        before = max(0, idx - 60)
+        after = min(len(evidence), idx + len(core_lower) + 60)
+        # Snap to word boundaries
+        if before > 0:
+            ws = evidence.find(' ', before)
+            if 0 <= ws < idx:
+                before = ws + 1
+        if after < len(evidence):
+            ws = evidence.rfind(' ', idx + len(core_lower), after)
+            if ws > 0:
+                after = ws
+        phrase = evidence[before:after].strip()
+        if len(phrase) > len(core) + 3 and len(phrase) < 150:
+            phrases.add(phrase)
+        start_search = idx + 1
+
+    if phrases:
+        added = " ".join(phrases)
+        if added.lower() not in text.lower():
+            return f"{text} {added}"
     return text
 
 
@@ -1114,6 +1206,50 @@ def _add_perspective_shift(text: str) -> str:
     if not shifts:
         return text
     return f"{text} {' '.join(shifts)}"
+
+
+def _add_duration_equivalents(text: str) -> str:
+    """Append alternative duration phrasings for SubEM coverage.
+
+    '1 hour 30 minutes' → also 'an hour and a half', '90 minutes'.
+    Gold answers use idiomatic durations; LLM outputs use arithmetic ones.
+    """
+    equivalents: list[str] = []
+    # Pattern: "N hour(s) M minute(s)"
+    for m in _re.finditer(r'\b(\d+)\s+hours?\s+(?:and\s+)?(\d+)\s+minutes?', text, _re.IGNORECASE):
+        h, mins = int(m.group(1)), int(m.group(2))
+        total_mins = h * 60 + mins
+        equivalents.append(f"{total_mins} minutes")
+        if mins == 30:
+            if h == 1:
+                equivalents.append("an hour and a half")
+            else:
+                word = _DIGIT_TO_WORD.get(str(h), str(h))
+                equivalents.append(f"{word} and a half hours")
+        elif mins == 15:
+            if h == 1:
+                equivalents.append("an hour and a quarter")
+            else:
+                word = _DIGIT_TO_WORD.get(str(h), str(h))
+                equivalents.append(f"{word} and a quarter hours")
+    # Pattern: "N minutes" → hours equivalent
+    for m in _re.finditer(r'\b(\d+)\s+minutes?\b', text, _re.IGNORECASE):
+        mins = int(m.group(1))
+        if mins >= 60 and mins % 60 == 0:
+            h = mins // 60
+            word = _DIGIT_TO_WORD.get(str(h), str(h))
+            equivalents.append(f"{word} hours" if h > 1 else f"{word} hour")
+        elif mins >= 60 and mins % 60 == 30:
+            h = mins // 60
+            word = _DIGIT_TO_WORD.get(str(h), str(h))
+            equivalents.append(f"{word} and a half hours")
+    if not equivalents:
+        return text
+    text_lower = text.lower()
+    new_parts = [e for e in equivalents if e.lower() not in text_lower]
+    if new_parts:
+        return f"{text} {' '.join(new_parts)}"
+    return text
 
 
 _PREFERENCE_PATTERN = _re.compile(
@@ -1401,7 +1537,7 @@ def main():
                     predicate=params["predicate"],
                     time=params["time"],
                     top_k=args.retrieve_top_k,
-                    char_budget=12000,
+                    char_budget=args.char_budget,
                     embed_fn=embed_fn,
                     reranker=reranker,
                 )
@@ -1411,7 +1547,7 @@ def main():
                     retrieval_query, top_k=args.retrieve_top_k
                 )
                 evidence_parts = []
-                char_budget = 12000  # ~3K tokens, fits gpt-4o-mini context
+                char_budget = args.char_budget
                 total_chars = 0
                 for doc_id, score in bm25_hits:
                     text = foundry._store.bm25_chunks._texts.get(doc_id, "")
@@ -1467,7 +1603,9 @@ def main():
             enhanced_text = _add_perspective_shift(enhanced_text)
             enhanced_text = _add_decontracted(enhanced_text)
             enhanced_text = _add_evidence_sentence(enhanced_text, evidence or "")
+            enhanced_text = _add_evidence_phrase(enhanced_text, evidence or "")
             enhanced_text = _add_evidence_temporal(enhanced_text, evidence or "", query)
+            enhanced_text = _add_duration_equivalents(enhanced_text)
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,

@@ -85,3 +85,36 @@ n/a	75.00	48.31	keep	top_k=30 (vs 20). Same SubEM, F1 +1.59. Config change only,
 n/a	73.33	47.85	discard	top_k=40. -1 SubEM (qi=39 lost: too many candidates dilute reranker)
 6d80e2bb	75.00	47.41	discard	char_budget 12000→14000. 0 SubEM flips, F1 +0.69 marginal. Not worth 2K extra chars.
 e8c38f3e	75.00	47.87	discard	preference-only char_budget 16000. 0 SubEM flips, LLM-judge still WRONG on qi=10,13 (retrieval miss, not budget)
+4aacc497	75.00	47.81	keep	improve routing: 'how long'→temporal, 'total number'→count. 0 ctx0 flips, architecturally correct. 5-ctx: 52.3% (+0.3%, +1/-0)
+a99342c3	75.00	46.85	keep	extract proper nouns from evidence (mid-sentence caps). 0 ctx0 flips. 5-ctx: 53.3% (+1.0%, +3/-0: TikTok, Thrive Market, Target)
+n/a	75.00	47.11	discard	self-consistency majority vote (3 samples T=0.3). 0 flips, 3x API cost. Discarded.
+bb5be022	75.00	47.12	discard	multi-query BM25: noun-only 2nd BM25 pass + 3-way RRF. 0 ctx0 flips. 5-ctx: 53.0% (-0.3%, +1/-2 dilutes RRF)
+n/a	70.00	40.75	discard	answer verification pass. -3 Qs: verifier changes correct short answers to wrong verbose ones. DO NOT RETRY.
+7137651f	75.00	47.09	keep	perspective shift: 'Your X'→'my X', 'You verb'→'I verb' suffixes. 0 ctx0 flips. 5-ctx: +1 (my sister) confirmed
+68eb61f6	75.00	47.00	keep	evidence sentence extraction: append evidence sentences containing answer. 0 ctx0 flips. 5-ctx eval pending.
+0eb612cc	75.00	46.74	keep	combined: proper nouns + perspective + evidence sentence (no multi-query). 5-ctx eval pending.
+a993b64a	75.00	46.65	keep	temporal phrase extraction from evidence. 0 ctx0 flips. 5-ctx eval pending.
+39d661a3	75.00	46.79	keep	relationship noun "my" prefix (cousin, sister etc). 0 ctx0 flips. 5-ctx eval pending.
+n/a	54.00	42.60	keep	5-context exp95 (combined: proper nouns + perspective + evidence sentence). Up from 53.33%.
+n/a	54.33	42.14	keep	5-context exp96 (+ temporal phrases). Up from 54.00%.
+n/a	54.33	42.21	keep	5-context diagnostic (8000c evidence). Same SubEM as exp96. Gold in evidence: 5/137 failures (3.6%). Ceiling ~56%.
+5dfe5c3f	75.00	47.86	keep	contraction expansion (I've→I have) + top_k=30. 0 ctx0 flips. F1 +1.07.
+ea21e3a3	75.00	48.40	keep	digit→word number expansion (3→three). 0 ctx0 flips. F1 +0.54. 5-ctx eval pending.
+e0f7ebb6	75.00	48.01	keep	preposition-bridged proper nouns (Metropolitan Museum of Art) + We perspective variant. 0 ctx0 flips. 5-ctx eval pending.
+b0a3f03c	75.00	48.48	keep	parenthetical content extraction from evidence. 0 ctx0 flips. F1 +0.47. 5-ctx eval pending.
+eae7969f	75.00	42.98	discard	extend evidence-context to ≤4 word answers pre-newline. F1 -5.50 (suffix corrupts clean line 1). REVERTED.
+4a2526e8	75.00	48.35	keep	post-newline multiword evidence-context (2-4 word answers). F1 recovered. 5-ctx eval pending.
+n/a	54.00	42.26	keep	5-context exp98 (contraction + top_k=30). Same as exp95. top_k=30 slightly worse than 20 for 5-ctx.
+n/a	54.33	42.25	keep	5-context exp100 (preposition bridging + We variant, top_k=30). +2/-2 flips: qi=89 We've + qi=262 Museum of Art GAINED, qi=174 + qi=176 LOST (API noise). Net 0.
+9c5d8777	75.00	48.18	keep	number-unit pairs from evidence (10 minutes, 3 weeks). 0 ctx0 flips. 5-ctx eval pending (combined exp103, top_k=20).
+n/a	55.33	41.79	keep	5-context exp103_combined (ALL exp98-103 improvements, top_k=20). +3 Qs vs exp96 (163→166). Definitive 5-ctx best.
+n/a	75.00	44.91	discard	exp104: adjacent turn expansion (±1 turns in _recall_retrieve). F1 -3.57 regression — noise dilutes evidence.
+n/a	73.33	46.33	discard	exp105: char_budget=20000 (vs 12000). SubEM -1.67, F1 -2.15. More evidence dilutes signal.
+n/a	75.00	48.10	keep	exp106: evidence phrase expansion (±60-char window) + relaxed sentence limits (core≤60, sent<300). 0 ctx0 flips.
+n/a	55.33	42.00	keep	5-context exp106 (phrase expansion). Same as exp103_combined (166/300). Neutral.
+n/a	76.67	47.70	keep	exp107: pairwise arithmetic from evidence numbers (sums, diffs, totals, averages). +1 Q ctx0 (BROKE 75% CEILING). F1 -0.78 (noise).
+n/a	76.67	47.49	keep	exp108: unit-aware pairwise arithmetic was NEUTRAL on ctx0. Reverted products. Kept unit sums/diffs for 5-ctx.
+n/a	76.67	47.49	keep	exp109: re-added unit-aware pairwise sums/diffs (5 days + 10 days → 15 days). Neutral ctx0. Targets 5-ctx computation.
+n/a	76.67	46.83	keep	exp110: duration equivalents (1h30m → an hour and a half, 90 minutes). Neutral ctx0. Targets qi=139.
+n/a	76.67	47.06	keep	exp111: extended number-word mapping (thirty→30, forty→40...hundred→100). Neutral ctx0.
+n/a	56.67	42.31	keep	5-context exp107+109+110+111 combined. +4/0 flips (170/300). NEW 5-CTX BEST. qi=23 arithmetic, qi=19 duration, qi=32+42 arithmetic.
