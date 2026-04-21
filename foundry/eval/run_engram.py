@@ -564,8 +564,8 @@ def _add_evidence_context(text: str, evidence: str) -> str:
     """
     if not evidence or not text.strip():
         return text
-    # Only expand single-word answers — multi-word answers are rarely partial
-    if len(text.split()) > 1:
+    # Only expand short answers — longer answers are rarely partial
+    if len(text.split()) > 4:
         return text
     # Normalize both to alphanumeric for character-level matching
     ans_alnum = _re.sub(r'[^a-z0-9]', '', text.lower())
