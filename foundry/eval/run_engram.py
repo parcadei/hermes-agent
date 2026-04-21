@@ -793,16 +793,13 @@ def main():
                 sub_ds, max_tokens=gen_max_len,
             )
 
-            # Always concatenate a second opinion with best-effort prompt.
-            # SubEM is substring check: concatenation can only ADD text,
-            # never break already-passing answers. May help near-misses
-            # where the second opinion includes more context/phrasing.
-            if evidence and len(evidence) > 200:
-                second = _retry_unknown(
+            # Retry: if model says "unknown" but we have substantive evidence,
+            # re-ask with a best-effort prompt (zero-risk: only triggers on failures)
+            if (answer_text.lower().strip().rstrip('.') == "unknown"
+                    and evidence and len(evidence) > 200):
+                answer_text = _retry_unknown(
                     query, evidence, args.agent_model, gen_max_len,
                 )
-                if second.lower().strip() != answer_text.lower().strip():
-                    answer_text = f"{answer_text} {second}"
 
             query_time = time.time() - query_start
 
