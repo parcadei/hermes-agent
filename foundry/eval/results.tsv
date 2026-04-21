@@ -59,3 +59,4 @@ ee698768	51.67	41.49	discard	content-based evidence dedup (Jaccard >0.7). 0 flip
 18e7c368	48.33	33.46	discard	counting-specialized prompt for aggregate questions. -3 Qs: bare number outputs break post-processing (evidence-context suffix, number normalization)
 fc4d189e	53.33	43.07	discard	entity-sourced BM25 evidence for aggregate questions. 0 flips: entity BM25 redundant with generic BM25, same turns retrieved
 a9f43ea5	50.00	41.32	discard	reduce char_budget 12000→10000. -2 Qs: qi=39 lost social media context, qi=40 wrong discount from truncated evidence
+c7824c48	51.67	40.89	discard	counting hint in user message (list items before total). -1: qi=32 answer shifted from book club to marketing

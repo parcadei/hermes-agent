@@ -1110,6 +1110,42 @@ def _clean_bm25_query(query: str) -> str:
     return " ".join(content) if content else query
 
 
+def _entity_mention_hits(
+    store: "FoundryStore",
+    query: str,
+    *,
+    top_k: int = 40,
+) -> list[int]:
+    """Find BM25 turn indices where query-relevant entities are mentioned.
+
+    Extracts content words from query, matches them against entity names
+    and aliases in the entity graph, then returns aligned mention_turns.
+    This provides a graph-based retrieval signal: turns that discuss
+    entities related to the query, even if they don't share BM25 keywords.
+    """
+    query_words = set(query.lower().split())
+    matched_turns: dict[int, int] = {}  # turn_id -> match_count
+
+    for entity in store.entity_graph.all_entities():
+        # Check if any query word matches entity name or aliases
+        names = {entity.canonical} | entity.aliases
+        matched = False
+        for name in names:
+            name_words = set(name.replace("_", " ").lower().split())
+            if name_words & query_words and len(name_words - _BM25_NOISE) > 0:
+                matched = True
+                break
+        if not matched:
+            continue
+        # Collect aligned mention_turns
+        for turn_id in entity.mention_turns:
+            matched_turns[turn_id] = matched_turns.get(turn_id, 0) + 1
+
+    # Sort by match count (more entity matches = more relevant)
+    ranked = sorted(matched_turns.items(), key=lambda x: -x[1])
+    return [tid for tid, _count in ranked[:top_k]]
+
+
 def _recall_retrieve(
     store: "FoundryStore",
     query: str,
@@ -1161,8 +1197,19 @@ def _recall_retrieve(
         except Exception:
             pass
 
-    # RRF merge
-    merged = _rrf_merge([bm25_hits, cosine_hits]) if cosine_hits else bm25_hits
+    # Entity-mention hits: find turns where query-relevant entities appear
+    entity_hits: list[tuple[int, float]] = []
+    if store.entity_graph and bm25_query:
+        entity_turn_ids = _entity_mention_hits(store, bm25_query, top_k=candidate_k)
+        entity_hits = [(tid, 1.0) for tid in entity_turn_ids if tid in bm25_texts]
+
+    # RRF merge (2 or 3 signals)
+    signals = [bm25_hits]
+    if cosine_hits:
+        signals.append(cosine_hits)
+    if entity_hits:
+        signals.append(entity_hits)
+    merged = _rrf_merge(signals) if len(signals) > 1 else bm25_hits
 
     # Cross-encoder rerank (if reranker available)
     if reranker is not None and merged:

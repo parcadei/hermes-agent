@@ -154,6 +154,29 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
         store.chunks.store(turn_chunk)
 
     store.bm25_chunks = new_bm25
+
+    # Realign entity mention_turns to new BM25 turn indices.
+    # Original mention_turns reference 512-token chunk indices; the new BM25
+    # uses individual conversation turns.  Scan each turn for entity names
+    # and update mention_turns so entity-graph signals align with BM25.
+    entity_names = {}  # normalized_name -> EntityNode
+    for ent in store.entity_graph.all_entities():
+        entity_names[ent.canonical] = ent
+        for alias in ent.aliases:
+            entity_names[alias] = ent
+    if entity_names:
+        # Clear old mention_turns (they referred to 512-token chunks)
+        for ent in store.entity_graph.all_entities():
+            ent.mention_turns = set()
+        # Rebuild mention_turns from actual turn text
+        for idx, (turn_text, _role) in enumerate(all_turns):
+            turn_lower = turn_text.lower()
+            for name, ent in entity_names.items():
+                if name and len(name) > 2 and name in turn_lower:
+                    ent.mention_turns.add(idx)
+        aligned = sum(1 for e in store.entity_graph.all_entities() if e.mention_turns)
+        print(f"  Aligned {aligned}/{len(store.entity_graph)} entity mention_turns to BM25 indices")
+
     print(f"  Rebuilt BM25: {len(context_chunks)} session chunks → {len(all_turns)} individual turns")
 
 
