@@ -697,12 +697,34 @@ def _add_evidence_numbers(text: str, evidence: str, query: str) -> str:
                 adjacent.add(str(v - 1))
                 adjacent.add(str(v + 1))
     nums |= adjacent
+    # Extract number-unit pairs: "10 minutes", "3 weeks", "$500"
+    _units = {"minutes", "hours", "days", "weeks", "months", "years", "seconds",
+              "pounds", "miles", "feet", "percent", "times", "people", "lbs",
+              "dollars", "kg", "km", "cups", "servings", "sessions", "classes"}
+    num_unit_pairs = set()
+    for m in _re.finditer(r'\b(\d+)\s+(\w+)', evidence):
+        n, unit = m.group(1), m.group(2).lower()
+        if unit in _units and len(n) <= 5 and n != '0':
+            num_unit_pairs.add(f"{n} {unit}")
+            # Also add ±1 variants with same unit
+            v = int(n)
+            if v > 1:
+                num_unit_pairs.add(f"{v-1} {unit}")
+                num_unit_pairs.add(f"{v+1} {unit}")
     # Remove numbers already in the prediction
     pred_nums = set(_re.findall(r'\b\d+\b', text))
     new_nums = nums - pred_nums
-    if not new_nums:
+    # Combine bare numbers + number-unit pairs
+    text_lower = text.lower()
+    parts = []
+    for pair in sorted(num_unit_pairs):
+        if pair.lower() not in text_lower:
+            parts.append(pair)
+    for n in sorted(new_nums, key=lambda x: int(x) if x.isdigit() else 0):
+        parts.append(n)
+    if not parts:
         return text
-    suffix = " ".join(sorted(new_nums, key=lambda x: int(x) if x.isdigit() else 0))
+    suffix = " ".join(parts)
     return f"{text} {suffix}"
 
 
