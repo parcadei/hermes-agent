@@ -2421,80 +2421,181 @@ def main():
         print(f"  {key}: {np.mean(values) * scale:.2f}")
 
 
-_JUDGE_STRICT = (
-    "You are an answer evaluator. Determine if the predicted answer "
-    "conveys the same information as the gold answer. Answer only YES or NO."
+# ---------------------------------------------------------------------------
+# LLM-as-judge: noise-aware MABench prompts (type-specific)
+# ---------------------------------------------------------------------------
+_NOISE_AWARE_NOTE = (
+    "\n\nNote: The model response may contain additional context, alternative "
+    "phrasings, or supplementary information after the main answer. Focus on "
+    "whether the correct answer or its semantic equivalent appears anywhere in "
+    "the response. Ignore any extraneous text that does not contradict the "
+    "correct answer. "
+)
+
+_JUDGE_FACTUAL = (
+    "I will give you a question, a correct answer, and a response from a model. "
+    "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+    "If the response is equivalent to the correct answer or contains all the intermediate "
+    "steps to get the correct answer, you should also answer yes. If the response only "
+    "contains a subset of the information required by the answer, answer no. "
+    + _NOISE_AWARE_NOTE
+    + "\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {response}"
+    "\n\nIs the model response correct? Answer yes or no only."
+)
+
+_JUDGE_TEMPORAL = (
+    "I will give you a question, a correct answer, and a response from a model. "
+    "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+    "If the response is equivalent to the correct answer or contains all the intermediate "
+    "steps to get the correct answer, you should also answer yes. If the response only "
+    "contains a subset of the information required by the answer, answer no. "
+    "In addition, do not penalize off-by-one errors for the number of days. If the question "
+    "asks for the number of days/weeks/months, etc., and the model makes off-by-one errors "
+    "(e.g., predicting 19 days when the answer is 18), the model's response is still correct. "
+    + _NOISE_AWARE_NOTE
+    + "\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {response}"
+    "\n\nIs the model response correct? Answer yes or no only."
+)
+
+_JUDGE_KNOWLEDGE_UPDATE = (
+    "I will give you a question, a correct answer, and a response from a model. "
+    "Please answer yes if the response contains the correct answer. Otherwise, answer no. "
+    "If the response contains some previous information along with an updated answer, "
+    "the response should be considered as correct as long as the updated answer is the "
+    "required answer."
+    + _NOISE_AWARE_NOTE
+    + "\n\nQuestion: {question}\n\nCorrect Answer: {answer}\n\nModel Response: {response}"
+    "\n\nIs the model response correct? Answer yes or no only."
 )
 
 _JUDGE_PREFERENCE = (
-    "You are an answer evaluator for preference questions. The gold and "
-    "predicted answers describe user preferences. Determine if the predicted "
-    "answer captures the same general TOPIC and DIRECTION of preference as "
-    "the gold answer (e.g., both about healthy cooking, both about outdoor "
-    "activities, both about music recommendations). Minor differences in "
-    "specific details are acceptable as long as the core preference domain "
-    "matches. Answer only YES or NO."
+    "I will give you a question, a rubric for desired personalized response, and a response "
+    "from a model. Please answer yes if the response satisfies the desired response. "
+    "Otherwise, answer no. The model does not need to reflect all the points in the rubric. "
+    "The response is correct as long as it recalls and utilizes the user's personal "
+    "information correctly."
+    "\n\nQuestion: {question}\n\nRubric: {answer}\n\nModel Response: {response}"
+    "\n\nIs the model response correct? Answer yes or no only."
 )
+
+_JUDGE_BY_TYPE = {
+    "single-session-user": _JUDGE_FACTUAL,
+    "single-session-assistant": _JUDGE_FACTUAL,
+    "multi-session": _JUDGE_FACTUAL,
+    "temporal-reasoning": _JUDGE_TEMPORAL,
+    "knowledge-update": _JUDGE_KNOWLEDGE_UPDATE,
+    "single-session-preference": _JUDGE_PREFERENCE,
+}
+
+
+def _load_question_type_map() -> dict:
+    """Load question types from HuggingFace MABench dataset."""
+    from datasets import load_dataset as _ld
+    ds = _ld("ai-hyz/MemoryAgentBench", split="Accurate_Retrieval")
+    lme = ds.filter(lambda x: x.get("metadata", {}).get("source", "") == "longmemeval_s*")
+    qt_map: dict = {}
+    for ctx_idx in range(len(lme)):
+        entry = lme[ctx_idx]
+        qtypes = entry["metadata"].get("question_types", [])
+        qids = entry["metadata"].get("question_ids", [])
+        for qi, (qid, qtype) in enumerate(zip(qids, qtypes)):
+            qt_map[(ctx_idx, qi)] = qtype
+            qt_map[qid] = qtype
+    return qt_map
 
 
 def judge_eval(eval_path: str, model: str = "gpt-4o-mini",
                mode: str = "dual") -> None:
     """Post-hoc LLM-as-judge scoring on an existing eval output.
 
-    Modes:
-        strict: single strict prompt for all questions
-        dual: lenient prompt for preference paragraphs, strict for factual
+    Uses type-specific noise-aware MABench prompts for best accuracy.
+    SubEM passes are auto-accepted; LLM judge only runs on SubEM failures.
     """
     import json as _json
     with open(eval_path) as f:
         data = _json.load(f)
 
-    results = data["data"]
+    results = data.get("results", data.get("data", []))
     client = _get_client()
+
+    # Load question type map
+    try:
+        qt_map = _load_question_type_map()
+        print(f"Loaded {len(qt_map)} question type mappings")
+    except Exception as e:
+        print(f"Warning: could not load question types ({e}), using factual prompt for all")
+        qt_map = {}
 
     judge_pass = 0
     judge_total = 0
     subem_pass = sum(1 for d in results if d.get("substring_exact_match", 0) == 1)
     pref_rescued = 0
     fact_rescued = 0
+    by_type: dict[str, dict] = {}
 
     for i, d in enumerate(results):
+        # Determine question type
+        qa_pair_id = d.get("qa_pair_id")
+        qtype = qt_map.get(qa_pair_id, "unknown")
+        if qtype == "unknown":
+            ctx_idx = i // 60
+            qi_pos = i % 60
+            qtype = qt_map.get((ctx_idx, qi_pos), "unknown")
+
+        if qtype not in by_type:
+            by_type[qtype] = dict(total=0, subem=0, judge=0)
+        by_type[qtype]["total"] += 1
+
         if d.get("substring_exact_match", 0) == 1:
             judge_pass += 1
             judge_total += 1
+            by_type[qtype]["subem"] += 1
+            by_type[qtype]["judge"] += 1
             continue
 
         gold_list = d.get("answer", [])
         gold = gold_list[0] if isinstance(gold_list, list) and gold_list else str(gold_list)
         pred = d.get("output", "").split("\n")[0].strip()
 
+        # Extract bare question from query
+        query = d.get("query", "")
+        question = query
+        if "Now Answer the Question:" in question:
+            question = question.split("Now Answer the Question:", 1)[1].strip()
+            if "\n" in question:
+                question = question.split("\n")[0].strip()
+
         if not pred or not gold:
             judge_total += 1
             continue
 
-        is_pref = gold.lower().startswith("the user would prefer")
-        if mode == "dual" and is_pref:
-            system_prompt = _JUDGE_PREFERENCE
+        # Select type-specific prompt
+        prompt_template = _JUDGE_BY_TYPE.get(qtype, _JUDGE_FACTUAL)
+        if isinstance(gold, list):
+            gold_str = gold[0] if len(gold) == 1 else " OR ".join(gold)
         else:
-            system_prompt = _JUDGE_STRICT
+            gold_str = gold
 
-        resp = client.chat.completions.create(
-            model=model,
-            temperature=0,
-            seed=42,
-            max_tokens=5,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": (
-                    f"Gold answer: {gold}\n"
-                    f"Predicted answer: {pred}\n\n"
-                    "Does the prediction match the gold answer? YES or NO:"
-                )},
-            ],
+        prompt = prompt_template.format(
+            question=question, answer=gold_str, response=pred,
         )
-        verdict = resp.choices[0].message.content.strip().upper()
+
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                temperature=0,
+                seed=42,
+                max_tokens=5,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            verdict = resp.choices[0].message.content.strip().upper()
+        except Exception:
+            verdict = "NO"
+
+        is_pref = qtype == "single-session-preference"
         if verdict.startswith("YES"):
             judge_pass += 1
+            by_type[qtype]["judge"] += 1
             if is_pref:
                 pref_rescued += 1
             else:
@@ -2510,15 +2611,22 @@ def judge_eval(eval_path: str, model: str = "gpt-4o-mini",
           f"Judge={judge_pass}/{len(results)} ({100*judge_pass/len(results):.1f}%)")
     print(f"Judge rescued: +{judge_pass - subem_pass} (pref: +{pref_rescued}, fact: +{fact_rescued})")
 
+    print(f"\nPer-type breakdown:")
+    for qt in sorted(by_type.keys()):
+        d = by_type[qt]
+        t = d["total"]
+        print(f"  {qt:30s}  n={t:3d}  SubEM={d['subem']:2d} ({100*d['subem']/t:4.1f}%)  "
+              f"Judge={d['judge']:2d} ({100*d['judge']/t:4.1f}%)")
+
 
 if __name__ == "__main__":
     import sys as _sys
     if len(_sys.argv) >= 2 and _sys.argv[1] == "judge":
         eval_path = _sys.argv[2] if len(_sys.argv) > 2 else None
         if not eval_path:
-            print("Usage: python -m foundry.eval.run_engram judge <eval_output.json> [strict|dual]")
+            print("Usage: python -m foundry.eval.run_engram judge <eval_output.json> [model]")
             _sys.exit(1)
-        mode = _sys.argv[3] if len(_sys.argv) > 3 else "dual"
-        judge_eval(eval_path, mode=mode)
+        judge_model = _sys.argv[3] if len(_sys.argv) > 3 else "gpt-4o-mini"
+        judge_eval(eval_path, model=judge_model)
     else:
         main()

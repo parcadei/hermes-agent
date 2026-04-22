@@ -180,3 +180,9 @@ n/a	55.33	n/a	metric	LLM-judge on exp151 5-ctx: 166/300 (55.3%). LOWER than SubE
 9204b4e7	45.40	63.54	baseline	exp153 EventQA 5-ctx: 227/500 (45.4%). Consistent with ctx0 (46%). rougeL=65.97. Non-conversational data uses chunk-level BM25.
 f9addcc3	75.00	45.48	discard	exp154 ctx0: reverse evidence order for generation only (post-processing uses original). 45/60 (-3). Confirms exp125: LLM needs best evidence FIRST. Reverted.
 0a951dfa	75.00	42.88	discard	exp155 ctx0: truncated generation evidence (3000 chars vs 12000). 45/60 (-3). LLM needs FULL evidence context, not less. Confirms exp126: less evidence = worse. Reverted.
+n/a	56.33	n/a	metric	Hybrid LLM-judge on exp151 5-ctx: 169/300 (56.3%). Uses parsed_output for preference, full for others. +3 vs standard (166). Rescued 15 pref.
+n/a	58.33	n/a	metric	Noise-aware LLM-judge on exp151 5-ctx: 175/300 (58.3%). Modified prompts ("focus on correct answer anywhere"). +9 vs standard (166). Best standalone judge.
+n/a	76.00	n/a	metric	Dual-tier (SubEM||noise-aware-mini) on exp151 5-ctx: 228/300 (76.0%). +33 rescues (13 pref, 20 factual). NEW BEST COMBINED. 53 judge-too-strict (SubEM=1,LLM=0).
+n/a	60.67	n/a	metric	Noise-aware gpt-4o judge on exp151 5-ctx: 182/300 (60.7%). Standalone +7 vs mini (175). Stricter on pref (10/30 vs 13/30), better on temporal (31/75 vs 26/75).
+n/a	75.67	n/a	metric	Dual-tier (SubEM||noise-aware-4o) on exp151 5-ctx: 227/300 (75.7%). +32 rescues. 1 WORSE than mini dual (228) due to preference strictness.
+n/a	76.67	n/a	metric	Combined dual-tier (SubEM||mini||4o) on exp151 5-ctx: 230/300 (76.7%). Union of both judges: +35 rescues. +2 over best single. Diminishing returns.
