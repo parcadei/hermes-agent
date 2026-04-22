@@ -82,8 +82,8 @@ dotenv.load_dotenv(_NLCDM_PYTHON / ".env")
 import hashlib
 
 from foundry.core import Foundry, FoundryConfig
-from foundry.ingestion import FacetEntity
-from foundry.storage import RawChunk, VectorIndex
+from foundry.ingestion import FacetEntity, extract_temporal
+from foundry.storage import RawChunk, TemporalIndex, VectorIndex
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +153,27 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
             role=role,
         )
         store.chunks.store(turn_chunk)
+
+    # Extract temporal events from turns and populate the Allen engine.
+    # Previously the temporal index was never populated during eval, so
+    # recall(predicate="when") had no events to reason over.
+    if store.temporal is None:
+        store.temporal = TemporalIndex()
+    temporal_count = 0
+    for idx, (turn_text, role) in enumerate(all_turns):
+        session_dt = None
+        # Try parsing the [timestamp] prefix as session time anchor
+        if turn_text.startswith("[") and "]" in turn_text:
+            ts_str = turn_text[1:turn_text.index("]")]
+            from foundry.ingestion import _parse_datetime
+            session_dt = _parse_datetime(ts_str)
+        chunk = RawChunk(chunk_idx=idx, turn_idx=idx, text=turn_text, role=role)
+        events = extract_temporal(chunk, session_time=session_dt)
+        for event in events:
+            store.temporal.ingest(event)
+            temporal_count += 1
+    if temporal_count:
+        print(f"  Extracted {temporal_count} temporal events from {len(all_turns)} turns")
 
     # Realign entity mention_turns to new BM25 turn indices.
     # Original mention_turns reference 512-token chunk indices; the new BM25
