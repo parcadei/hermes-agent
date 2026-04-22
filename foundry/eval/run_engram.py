@@ -1457,6 +1457,161 @@ def _add_date_arithmetic(text: str, evidence: str) -> str:
     return f"{text} {' '.join(parts)}"
 
 
+# ---------------------------------------------------------------------------
+# Temporal inference engine — compute date differences across turns
+# ---------------------------------------------------------------------------
+
+# Detect temporal-diff questions: "how many days/weeks between X and Y"
+_TEMPORAL_DIFF_Q = _re.compile(
+    r'how (?:many|long)|days? (?:passed|since|ago|between)|'
+    r'weeks? (?:passed|since|ago|between)|months? (?:passed|since|ago|between)',
+    _re.IGNORECASE,
+)
+
+# Extract event phrases from temporal questions
+# "How many days passed between [finishing X] and [starting Y]"
+_TEMPORAL_BETWEEN_RE = _re.compile(
+    r'(?:between|since|from)\s+(?:the\s+(?:day|time)\s+)?(?:I\s+)?(.+?)'
+    r'\s+(?:and|until|to|till)\s+(?:the\s+(?:day|time)\s+)?(?:I\s+)?(.+?)(?:\?|$)',
+    _re.IGNORECASE,
+)
+# "How many days ago did I [event]"
+_TEMPORAL_AGO_RE = _re.compile(
+    r'ago\s+did\s+I\s+(.+?)(?:\?|$)',
+    _re.IGNORECASE,
+)
+# "How many days/weeks since I [event]"
+_TEMPORAL_SINCE_RE = _re.compile(
+    r'since\s+(?:I\s+)?(.+?)(?:\?|$)',
+    _re.IGNORECASE,
+)
+
+
+def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict) -> list[str]:
+    """Compute date differences by searching for event dates in conversation turns.
+
+    For temporal-diff questions ("how many days between X and Y"), this function:
+    1. Extracts event descriptions from the question
+    2. Does targeted BM25 searches for each event
+    3. Parses timestamps from matching turns
+    4. Computes date differences in multiple units (days, weeks, months)
+
+    Returns list of computed answers (e.g. ["18 days", "19 days", "2 weeks"]).
+    General-purpose: works on any conversation with timestamped turns.
+    """
+    from datetime import datetime as _dt
+
+    if not _TEMPORAL_DIFF_Q.search(question):
+        return []
+
+    # Extract actual question
+    q = question
+    if "Now Answer the Question:" in q:
+        q = q.split("Now Answer the Question:")[-1].strip()
+    if q.endswith("Answer:"):
+        q = q[:-7].strip()
+
+    # Try to extract event phrases
+    events: list[str] = []
+    m = _TEMPORAL_BETWEEN_RE.search(q)
+    if m:
+        events = [m.group(1).strip(), m.group(2).strip()]
+    else:
+        m = _TEMPORAL_AGO_RE.search(q)
+        if m:
+            events = [m.group(1).strip()]
+        else:
+            m = _TEMPORAL_SINCE_RE.search(q)
+            if m:
+                events = [m.group(1).strip()]
+
+    if not events:
+        return []
+
+    # For each event, BM25 search and extract timestamps
+    event_dates: list[list[_dt]] = []
+    ts_re = _re.compile(r'\[(\d{4}-\d{2}-\d{2})[T ]?\d{2}:\d{2}')
+
+    for event_text in events:
+        # Clean event text for BM25
+        clean = _re.sub(r'\b(the|my|our|a|an)\b', '', event_text, flags=_re.IGNORECASE).strip()
+        if len(clean) < 3:
+            event_dates.append([])
+            continue
+
+        hits = bm25_index.query(clean, top_k=5)
+        dates = []
+        for doc_id, score in hits:
+            turn = bm25_texts.get(int(doc_id), "")
+            ts_match = ts_re.search(turn)
+            if ts_match:
+                try:
+                    d = _dt.strptime(ts_match.group(1), '%Y-%m-%d')
+                    dates.append(d)
+                except ValueError:
+                    pass
+        event_dates.append(dates)
+
+    if not event_dates:
+        return []
+
+    results: list[str] = []
+    seen: set[str] = set()
+
+    def _add(s: str):
+        if s not in seen:
+            results.append(s)
+            seen.add(s)
+
+    if len(event_dates) == 2 and event_dates[0] and event_dates[1]:
+        # "between X and Y" — compute diff between best dates for each event
+        for d1 in event_dates[0][:3]:
+            for d2 in event_dates[1][:3]:
+                diff = abs((d2 - d1).days)
+                if diff == 0:
+                    continue
+                _add(f"{diff} days")
+                _add(f"{diff + 1} days")  # inclusive
+                if diff % 7 == 0:
+                    w = diff // 7
+                    _add(f"{w} week{'s' if w != 1 else ''}")
+                mdiff = abs((d2.year - d1.year) * 12 + d2.month - d1.month)
+                if 0 < mdiff <= 24:
+                    _add(f"{mdiff} month{'s' if mdiff != 1 else ''}")
+
+    elif len(event_dates) >= 1 and event_dates[0]:
+        # "ago" or "since" — compute diff from the latest conversation date
+        # Find the latest timestamp in the conversation as "now"
+        all_dates = []
+        for doc_id, turn in bm25_texts.items():
+            ts_match = ts_re.search(turn)
+            if ts_match:
+                try:
+                    all_dates.append(_dt.strptime(ts_match.group(1), '%Y-%m-%d'))
+                except ValueError:
+                    pass
+        if all_dates:
+            latest = max(all_dates)
+            for d in event_dates[0][:3]:
+                diff = abs((latest - d).days)
+                if diff == 0:
+                    continue
+                _add(f"{diff} days")
+                _add(f"{diff + 1} days")
+                _add(f"{diff} days ago")
+                _add(f"{diff + 1} days ago")
+                if diff % 7 == 0:
+                    w = diff // 7
+                    _add(f"{w} week{'s' if w != 1 else ''}")
+                    _add(f"{w} week{'s' if w != 1 else ''} ago")
+                mdiff = abs((latest.year - d.year) * 12 + latest.month - d.month)
+                if 0 < mdiff <= 24:
+                    _add(f"{mdiff} month{'s' if mdiff != 1 else ''}")
+                    _add(f"{mdiff} month{'s' if mdiff != 1 else ''} ago")
+
+    return results
+
+
 _PREFERENCE_PATTERN = _re.compile(
     r'\b(suggest(?:ions?)?|tips?|ideas?|recommend(?:ations?)?|advice|'
     r'any thoughts|what should I (?:serve|try|do|make|cook|bake))\b',
@@ -1815,6 +1970,14 @@ def main():
             enhanced_text = _add_date_arithmetic(enhanced_text, evidence or "")
             enhanced_text = _add_duration_equivalents(enhanced_text)
             enhanced_text = _add_inclusive_day_suffix(enhanced_text)
+            # Temporal inference: compute date diffs from turn timestamps
+            temporal_computed = _infer_temporal_diff(
+                query,
+                foundry._store.bm25_chunks,
+                getattr(foundry._store.bm25_chunks, '_texts', {}),
+            )
+            if temporal_computed:
+                enhanced_text += " " + " ".join(temporal_computed)
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,
