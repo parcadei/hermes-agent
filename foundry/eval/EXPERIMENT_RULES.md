@@ -52,10 +52,10 @@ LOOP FOREVER:
 
 NEVER STOP. The human may be sleeping. Run experiments indefinitely.
 
-## Current Frontier (exp136)
+## Current Frontier (exp146b)
 
-- ctx0: 78.33% (47/60)
-- 5-ctx: 60.00% (180/300)
+- ctx0: 80.00% (48/60)
+- 5-ctx: 63.67% (191/300)
 - Config: --use_recall --retrieve_top_k 20 --faceted_cache msl_cache_qwen25_cs512.json
 
 ## Target Gaps (from failure analysis)
