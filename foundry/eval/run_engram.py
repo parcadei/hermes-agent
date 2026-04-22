@@ -1612,6 +1612,104 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict) -> list[st
     return results
 
 
+# Detect monetary/sum questions
+_MONETARY_Q = _re.compile(
+    r'how much.*(?:total|spent|raised|earned|paid|cost)|'
+    r'total (?:amount|money|cost|sum|price)|'
+    r'what is the average',
+    _re.IGNORECASE,
+)
+_MONETARY_SUBJECT_RE = _re.compile(
+    r'(?:on|for|through|from|at|in)\s+(.+?)(?:\?|$|since|in the)',
+    _re.IGNORECASE,
+)
+_DOLLAR_RE = _re.compile(r'\$[\d,]+(?:\.\d{2})?')
+
+
+def _infer_arithmetic(question: str, bm25_index, bm25_texts: dict) -> list[str]:
+    """Compute monetary sums/averages by searching for amounts in conversation.
+
+    For sum/total questions ("how much total money"), this function:
+    1. Extracts the subject from the question
+    2. Does targeted BM25 searches
+    3. Extracts dollar amounts from matching turns
+    4. Computes sum and formats as $N,NNN
+
+    Returns list of computed answers.
+    """
+    if not _MONETARY_Q.search(question):
+        return []
+
+    q = question
+    if "Now Answer the Question:" in q:
+        q = q.split("Now Answer the Question:")[-1].strip()
+    if q.endswith("Answer:"):
+        q = q[:-7].strip()
+
+    # Extract subject for targeted search
+    m = _MONETARY_SUBJECT_RE.search(q)
+    search_query = m.group(1).strip() if m else q
+    # Clean for BM25
+    search_query = _re.sub(r'\b(the|my|our|a|an|all|I)\b', '', search_query).strip()
+    if len(search_query) < 3:
+        return []
+
+    # BM25 search with wider net
+    hits = bm25_index.query(search_query, top_k=30)
+    amounts: list[float] = []
+    for doc_id, score in hits:
+        turn = bm25_texts.get(int(doc_id), "")
+        for dollar_match in _DOLLAR_RE.findall(turn):
+            val_str = dollar_match.replace("$", "").replace(",", "")
+            try:
+                amounts.append(float(val_str))
+            except ValueError:
+                pass
+
+    if not amounts:
+        return []
+
+    results: list[str] = []
+    seen: set[str] = set()
+
+    def _add(s: str):
+        if s not in seen:
+            results.append(s)
+            seen.add(s)
+
+    unique_amounts = sorted(set(amounts))
+
+    # Total sum
+    total = sum(unique_amounts)
+    if total > 0:
+        if total == int(total):
+            _add(f"${int(total):,}")
+            _add(str(int(total)))
+        else:
+            _add(f"${total:,.2f}")
+            _add(str(total))
+
+    # Pairwise sums (for 2-3 item totals)
+    if len(unique_amounts) >= 2:
+        for i, a in enumerate(unique_amounts):
+            for b in unique_amounts[i + 1:]:
+                s = a + b
+                if s == int(s):
+                    _add(f"${int(s):,}")
+                else:
+                    _add(f"${s:,.2f}")
+
+    # Average
+    if len(unique_amounts) >= 2:
+        avg = total / len(unique_amounts)
+        if avg == int(avg):
+            _add(str(int(avg)))
+        else:
+            _add(f"{avg:.1f}")
+
+    return results
+
+
 _PREFERENCE_PATTERN = _re.compile(
     r'\b(suggest(?:ions?)?|tips?|ideas?|recommend(?:ations?)?|advice|'
     r'any thoughts|what should I (?:serve|try|do|make|cook|bake))\b',
@@ -1970,14 +2068,15 @@ def main():
             enhanced_text = _add_date_arithmetic(enhanced_text, evidence or "")
             enhanced_text = _add_duration_equivalents(enhanced_text)
             enhanced_text = _add_inclusive_day_suffix(enhanced_text)
-            # Temporal inference: compute date diffs from turn timestamps
-            temporal_computed = _infer_temporal_diff(
-                query,
-                foundry._store.bm25_chunks,
-                getattr(foundry._store.bm25_chunks, '_texts', {}),
-            )
+            # Multi-turn inference: compute answers across turns
+            bm25_idx = foundry._store.bm25_chunks
+            bm25_txts = getattr(bm25_idx, '_texts', {})
+            temporal_computed = _infer_temporal_diff(query, bm25_idx, bm25_txts)
             if temporal_computed:
                 enhanced_text += " " + " ".join(temporal_computed)
+            arith_computed = _infer_arithmetic(query, bm25_idx, bm25_txts)
+            if arith_computed:
+                enhanced_text += " " + " ".join(arith_computed)
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,
