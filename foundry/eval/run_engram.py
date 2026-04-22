@@ -2203,16 +2203,22 @@ def main():
                         )
                         # Build entities from cache
                         cached_entities = cached_entry.get("entities", [])
-                        entities = [
-                            FacetEntity(
+                        entities = []
+                        for e in cached_entities:
+                            if not e.get("name", "").strip():
+                                continue
+                            facets = dict(e.get("facets", e.get("properties", {})))
+                            # v9 entities have entity_type instead of facets;
+                            # map it to "what" so type hierarchy gets indexed
+                            et = e.get("entity_type", "")
+                            if et and "what" not in facets:
+                                facets["what"] = et
+                            entities.append(FacetEntity(
                                 name=e["name"],
-                                facets=e.get("facets", e.get("properties", {})),
+                                facets=facets,
                                 turn_idx=raw_chunk.turn_idx,
-                                source_text=chunk_text[:200],
-                            )
-                            for e in cached_entities
-                            if e.get("name", "").strip()
-                        ]
+                                source_text=chunk_text,
+                            ))
                         # Build triples from cache relations (v9 format)
                         cached_relations = cached_entry.get("relations", [])
                         triples = [
@@ -2228,7 +2234,7 @@ def main():
                                 sentiment=r.get("sentiment", ""),
                                 source_turn=r.get("source_turn", -1),
                                 role=r.get("role", ""),
-                                source_text=chunk_text[:200],
+                                source_text=chunk_text,
                                 turn_idx=raw_chunk.turn_idx,
                                 chunk_idx=raw_chunk.chunk_idx,
                             )

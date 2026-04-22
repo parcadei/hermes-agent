@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 from typing import Any, Optional
 
@@ -55,12 +55,37 @@ _MONTH_YEAR_RE = _re.compile(
     r'^(' + '|'.join(_MONTH_NAMES) + r')\.?\s+(\d{4})$', _re.IGNORECASE)
 _MONTH_DAY_YEAR_RE = _re.compile(
     r'^(' + '|'.join(_MONTH_NAMES) + r')\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$', _re.IGNORECASE)
+_MONTH_DAY_RE = _re.compile(
+    r'^(' + '|'.join(_MONTH_NAMES) + r')\.?\s+(\d{1,2})(?:st|nd|rd|th)?$', _re.IGNORECASE)
+_MONTH_ONLY_RE = _re.compile(
+    r'^(' + '|'.join(_MONTH_NAMES) + r')\.?$', _re.IGNORECASE)
+_DAY_OF_MONTH_RE = _re.compile(
+    r'^(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(' + '|'.join(_MONTH_NAMES) + r')$', _re.IGNORECASE)
 _YEAR_ONLY_RE = _re.compile(r'^(\d{4})$')
+_CHAT_DATE_RE = _re.compile(r'Chat Time:\s*(\d{4})/(\d{2})/(\d{2})')
+_WHEN_PREFIX_RE = _re.compile(
+    r'^(?:on|born on|in|during|since|from)\s+', _re.IGNORECASE)
 
 
-def _parse_v9_when(when_text: str) -> tuple[datetime | None, datetime | None]:
+def _extract_reference_date(chunk_text: str) -> datetime | None:
+    """Extract the most recent Chat Time date from chunk text."""
+    matches = _CHAT_DATE_RE.findall(chunk_text)
+    if matches:
+        y, m, d = matches[-1]
+        try:
+            return datetime(int(y), int(m), int(d))
+        except ValueError:
+            pass
+    return None
+
+
+def _parse_v9_when(when_text: str, reference_date: datetime | None = None) -> tuple[datetime | None, datetime | None]:
     """Parse a v9 'when' expression into (start_dt, end_dt). Returns (None, None) on failure."""
     text = when_text.strip()
+    if not text:
+        return None, None
+    # Strip common prefixes: "on February 10th" → "February 10th"
+    text = _WHEN_PREFIX_RE.sub('', text).strip()
     if not text:
         return None, None
     # ISO
@@ -69,6 +94,14 @@ def _parse_v9_when(when_text: str) -> tuple[datetime | None, datetime | None]:
         return dt, dt
     except ValueError:
         pass
+    # Relative dates (need reference_date)
+    lower = text.lower()
+    if reference_date:
+        if lower == 'today':
+            return reference_date, reference_date
+        if lower == 'yesterday':
+            dt = reference_date - timedelta(days=1)
+            return dt, dt
     # Month Year: "March 2024"
     m = _MONTH_YEAR_RE.match(text)
     if m:
@@ -83,6 +116,37 @@ def _parse_v9_when(when_text: str) -> tuple[datetime | None, datetime | None]:
             return dt, dt
         except ValueError:
             pass
+    # Month Day without year: "March 3rd", "February 10th" (use reference_date's year)
+    m = _MONTH_DAY_RE.match(text)
+    if m:
+        month = _MONTH_NAMES[m.group(1).lower().rstrip('.')]
+        day = int(m.group(2))
+        year = reference_date.year if reference_date else None
+        if year:
+            try:
+                dt = datetime(year, month, day)
+                return dt, dt
+            except ValueError:
+                pass
+    # Day of Month: "15th of March", "3rd March" (use reference_date's year)
+    m = _DAY_OF_MONTH_RE.match(text)
+    if m:
+        day = int(m.group(1))
+        month = _MONTH_NAMES[m.group(2).lower().rstrip('.')]
+        year = reference_date.year if reference_date else None
+        if year:
+            try:
+                dt = datetime(year, month, day)
+                return dt, dt
+            except ValueError:
+                pass
+    # Month only: "May", "February" (use reference_date's year)
+    m = _MONTH_ONLY_RE.match(text)
+    if m:
+        month = _MONTH_NAMES[m.group(1).lower().rstrip('.')]
+        year = reference_date.year if reference_date else None
+        if year:
+            return datetime(year, month, 1), datetime(year, month, 1)
     # Plain year
     m = _YEAR_ONLY_RE.match(text)
     if m:
@@ -93,8 +157,8 @@ def _parse_v9_when(when_text: str) -> tuple[datetime | None, datetime | None]:
     for sep in (' to ', ' through ', ' until '):
         if sep in text.lower():
             parts = text.lower().split(sep, 1)
-            s, _ = _parse_v9_when(parts[0].removeprefix('from ').strip())
-            e, _ = _parse_v9_when(parts[1].strip())
+            s, _ = _parse_v9_when(parts[0].removeprefix('from ').strip(), reference_date)
+            e, _ = _parse_v9_when(parts[1].strip(), reference_date)
             if s and e:
                 return s, e
     return None, None
@@ -719,23 +783,42 @@ class Foundry:
                 if previous is not None:
                     facts_superseded += 1
 
-            if stored.predicate in {"has", "favorite_restaurant"}:
+            if stored.predicate in {"has", "bought", "got", "ordered", "owns", "favorite_restaurant"}:
                 target_name = resolver.resolve_or_create(stored.object)
                 node.add_link(stored.predicate, target_name)
                 target = self._store.entity_graph.ensure_entity(target_name)
                 target.mention_turns.add(chunk.turn_idx)
                 target.mention_chunks.add(chunk.chunk_idx)
-                if stored.predicate == "has":
+                if stored.predicate in {"has", "bought", "got", "ordered", "owns"}:
                     target.related.add(canonical_subject)
                     node.related.add(target_name)
                     if target_name not in chunk_entities:
                         chunk_entities.append(target_name)
+                # Propagate v9 quantity to target entity as a "quantity" fact
+                # so aggregate engine can sum counts (e.g. "how many fish?")
+                qty_str = getattr(triple, 'quantity', '0')
+                if qty_str and qty_str != '0':
+                    qty_fact = Fact(
+                        id=f"{target_name}:quantity:{chunk.chunk_idx}",
+                        subject=target_name,
+                        predicate="quantity",
+                        object=qty_str,
+                        object_type=PropertyType.STRING,
+                        turn_idx=chunk.turn_idx,
+                        chunk_idx=chunk.chunk_idx,
+                        source_text=triple.source_text[:200] if triple.source_text else "",
+                    )
+                    qty_bucket = target.facts.setdefault("quantity", [])
+                    if all(existing.id != qty_fact.id for existing in qty_bucket):
+                        qty_bucket.append(qty_fact)
+                        qty_bucket.sort(key=lambda item: (item.turn_idx, item.chunk_idx, item.id))
 
         # Create TemporalEvents from triples with v9 'when' data
+        ref_date = _extract_reference_date(chunk.text)
         for triple in extracted_triples:
             if not triple.when:
                 continue
-            start_dt, end_dt = _parse_v9_when(triple.when)
+            start_dt, end_dt = _parse_v9_when(triple.when, ref_date)
             if start_dt and end_dt:
                 try:
                     te = TemporalEvent(
