@@ -171,3 +171,4 @@ d5871929	59.67	42.29	neutral	exp145c 5-ctx: temporal inference with timestamps. 
 n/a	78.33	n/a	neutral	exp148 ctx0: inclusive-day "ago" variant + period-terminated. 47/60 (-1 API noise qi=7). 0 gains from ago format. Skipping 5-ctx.
 n/a	72.33	n/a	metric	Dual LLM-as-judge on exp146b 5-ctx: 217/300 (72.3%). +26 rescues (22 pref, 4 fact). Up from 202/300 (67.3%) on exp136.
 n/a	67.00	n/a	metric	Strict LLM-as-judge on exp146b 5-ctx: 201/300 (67.0%). +10 rescues (6 pref, 4 fact). Up from 184/300 (61.3%) on exp136.
+579d0b24	63.00	42.15	discard	exp149 5-ctx: temporal verb boost + wider BM25 (top_k=30). 189/300 (-2 vs 191 baseline). ctx2 lost 2: qi15 temporal computed wrong turn, qi33 evidence suffix miss. Broader verbs HURT precision. Reverted.

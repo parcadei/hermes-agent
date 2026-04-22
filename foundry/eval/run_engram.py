@@ -1556,10 +1556,7 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
     # Event occurrence markers — prefer turns where user reports doing something
     _occur_re = _re.compile(
         r'\b(today|just|yesterday|this morning|this afternoon|this evening|'
-        r'right now|earlier today|last night|'
-        r'I (?:went|attended|visited|bought|purchased|got|had|completed|finished|'
-        r'started|signed|moved|traveled|flew|took|joined|tried|made|did|saw|'
-        r'watched|read|cooked|baked|ran|played|hiked|volunteered|presented))\b',
+        r'right now|earlier today|last night)\b',
         _re.IGNORECASE,
     )
 
@@ -1571,7 +1568,7 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
             continue
 
         # BM25 search
-        bm25_hits = bm25_index.query(clean, top_k=30)
+        bm25_hits = bm25_index.query(clean, top_k=20)
         # Build RRF rank map from BM25 (rank 1 = best)
         bm25_rank: dict[int, int] = {}
         for rank, (doc_id, _sc) in enumerate(bm25_hits, 1):
@@ -1582,7 +1579,7 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
         if embed_fn is not None and vector_index is not None:
             try:
                 q_emb = embed_fn(clean)
-                cos_hits = vector_index.query(q_emb, top_k=30)
+                cos_hits = vector_index.query(q_emb, top_k=20)
                 for rank, (doc_id, _sc) in enumerate(cos_hits, 1):
                     cosine_rank[int(doc_id)] = rank
             except Exception:
