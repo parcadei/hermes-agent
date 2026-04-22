@@ -159,17 +159,30 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
     # recall(predicate="when") had no events to reason over.
     if store.temporal is None:
         store.temporal = TemporalIndex()
+    from foundry.ingestion import _parse_datetime
+    from foundry.storage import TemporalEvent as _TE
     temporal_count = 0
     for idx, (turn_text, role) in enumerate(all_turns):
         session_dt = None
         # Try parsing the [timestamp] prefix as session time anchor
         if turn_text.startswith("[") and "]" in turn_text:
             ts_str = turn_text[1:turn_text.index("]")]
-            from foundry.ingestion import _parse_datetime
             session_dt = _parse_datetime(ts_str)
         chunk = RawChunk(chunk_idx=idx, turn_idx=idx, text=turn_text, role=role)
         events = extract_temporal(chunk, session_time=session_dt)
         for event in events:
+            # Enrich session_time events with turn content so temporal BM25
+            # can match on semantics, not just "session_time" label.
+            if event.event == "session_time" and session_dt:
+                # Strip timestamp prefix, take first 150 chars of content
+                content = turn_text
+                if "]" in content:
+                    content = content[content.index("]") + 1:].strip()
+                label = content[:150].strip()
+                event = _TE(
+                    event=label, start_dt=event.start_dt, end_dt=event.end_dt,
+                    source=event.source, turn_id=idx,
+                )
             store.temporal.ingest(event)
             temporal_count += 1
     if temporal_count:
