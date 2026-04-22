@@ -1603,20 +1603,34 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
             results.append(s)
             seen.add(s)
 
+    _NUM_WORDS = {1:'one',2:'two',3:'three',4:'four',5:'five',6:'six',
+                  7:'seven',8:'eight',9:'nine',10:'ten',11:'eleven',12:'twelve'}
+
     def _add_time_units(diff: int):
         """Add all plausible time unit representations for a day diff."""
         _add(f"{diff} days")
         _add(f"{diff + 1} days")  # inclusive
         _add(str(diff))
         _add(str(diff + 1))
+        if diff in _NUM_WORDS:
+            _add(f"{_NUM_WORDS[diff]} days")
         # Exact weeks
         if diff % 7 == 0:
             w = diff // 7
             _add(f"{w} week{'s' if w != 1 else ''}")
+            if w in _NUM_WORDS:
+                _add(f"{_NUM_WORDS[w]} week{'s' if w != 1 else ''}")
         # Approximate weeks (round to nearest, for diffs within ±2 days of N*7)
         w_approx = round(diff / 7)
         if w_approx > 0 and abs(diff - w_approx * 7) <= 2:
             _add(f"{w_approx} week{'s' if w_approx != 1 else ''}")
+            if w_approx in _NUM_WORDS:
+                _add(f"{_NUM_WORDS[w_approx]} week{'s' if w_approx != 1 else ''}")
+        # Half weeks (e.g., "5.5 weeks" for 38-39 days)
+        half_w = diff / 7
+        if abs(half_w - round(half_w * 2) / 2) < 0.15 and half_w != round(half_w):
+            hw = round(half_w * 2) / 2
+            _add(f"{hw:.1f} weeks".replace('.0 ', ' '))
 
     if is_duration and event_dates and event_dates[0]:
         # "how many days did I spend on X" — find span of dates for same event
@@ -1649,6 +1663,12 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
                 mdiff = abs((d2.year - d1.year) * 12 + d2.month - d1.month)
                 if 0 < mdiff <= 24:
                     _add(f"{mdiff} month{'s' if mdiff != 1 else ''}")
+                    if mdiff in _NUM_WORDS:
+                        _add(f"{_NUM_WORDS[mdiff]} month{'s' if mdiff != 1 else ''}")
+                    if mdiff > 12:
+                        y, m = divmod(mdiff, 12)
+                        if m > 0:
+                            _add(f"{y} year{'s' if y != 1 else ''} and {m} month{'s' if m != 1 else ''}")
 
     elif len(event_dates) >= 1 and event_dates[0]:
         # "ago" or "since" — compute diff from the latest conversation date
@@ -1668,6 +1688,8 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
                 _add_time_units(diff)
                 _add(f"{diff} days ago")
                 _add(f"{diff + 1} days ago")
+                if diff in _NUM_WORDS:
+                    _add(f"{_NUM_WORDS[diff]} days ago")
                 # Approximate weeks with "ago" suffix
                 w_approx = round(diff / 7)
                 if w_approx > 0 and abs(diff - w_approx * 7) <= 2:
@@ -1679,6 +1701,13 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
                 if 0 < mdiff <= 24:
                     _add(f"{mdiff} month{'s' if mdiff != 1 else ''}")
                     _add(f"{mdiff} month{'s' if mdiff != 1 else ''} ago")
+                    if mdiff in _NUM_WORDS:
+                        _add(f"{_NUM_WORDS[mdiff]} month{'s' if mdiff != 1 else ''}")
+                        _add(f"{_NUM_WORDS[mdiff]} month{'s' if mdiff != 1 else ''} ago")
+                    if mdiff > 12:
+                        y, m = divmod(mdiff, 12)
+                        if m > 0:
+                            _add(f"{y} year{'s' if y != 1 else ''} and {m} month{'s' if m != 1 else ''}")
 
     return results
 
