@@ -1501,13 +1501,12 @@ _TEMPORAL_DURATION_RE = _re.compile(
 
 
 def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
-                         turn_timestamps: dict[int, str] | None = None,
-                         embed_fn=None, vector_index=None) -> list[str]:
+                         turn_timestamps: dict[int, str] | None = None) -> list[str]:
     """Compute date differences by searching for event dates in conversation turns.
 
     For temporal-diff questions ("how many days between X and Y"), this function:
     1. Extracts event descriptions from the question
-    2. Does targeted BM25 + cosine hybrid searches for each event
+    2. Does targeted BM25 searches for each event
     3. Looks up timestamps from turn_timestamps dict (stored separately from BM25 text)
     4. Computes date differences in multiple units (days, weeks, months)
 
@@ -1567,54 +1566,28 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
             event_dates.append([])
             continue
 
-        # BM25 search
-        bm25_hits = bm25_index.query(clean, top_k=20)
-        # Build RRF rank map from BM25 (rank 1 = best)
-        bm25_rank: dict[int, int] = {}
-        for rank, (doc_id, _sc) in enumerate(bm25_hits, 1):
-            bm25_rank[int(doc_id)] = rank
-
-        # Cosine search (if embeddings available)
-        cosine_rank: dict[int, int] = {}
-        if embed_fn is not None and vector_index is not None:
-            try:
-                q_emb = embed_fn(clean)
-                cos_hits = vector_index.query(q_emb, top_k=20)
-                for rank, (doc_id, _sc) in enumerate(cos_hits, 1):
-                    cosine_rank[int(doc_id)] = rank
-            except Exception:
-                pass
-
-        # RRF fusion (k=60) — combine BM25 + cosine ranks
-        all_doc_ids = set(bm25_rank) | set(cosine_rank)
-        rrf_k = 60
-        rrf_scores: dict[int, float] = {}
-        for did in all_doc_ids:
-            score = 0.0
-            if did in bm25_rank:
-                score += 1.0 / (rrf_k + bm25_rank[did])
-            if did in cosine_rank:
-                score += 1.0 / (rrf_k + cosine_rank[did])
-            rrf_scores[did] = score
-
-        # Score each hit: RRF score + user/occurrence priority boost
-        scored_dates: list[tuple[float, _dt]] = []
-        for doc_id_int, rrf_sc in rrf_scores.items():
+        hits = bm25_index.query(clean, top_k=15)
+        # Score each hit: user turns with occurrence markers > user turns > assistant
+        scored_dates: list[tuple[int, _dt]] = []
+        for doc_id, score in hits:
+            doc_id_int = int(doc_id)
+            # Look up timestamp from separate dict (not embedded in turn text)
             ts_str = turn_timestamps.get(doc_id_int, "")
             if not ts_str:
                 continue
+            # Parse ISO date from "YYYY-MM-DD HH:MM"
             try:
                 d = _dt.strptime(ts_str[:10], '%Y-%m-%d')
             except ValueError:
                 continue
+            # Priority: user+occurrence > user > assistant
             turn = bm25_texts.get(doc_id_int, "")
             is_user = turn.lstrip().startswith('(user)')
             has_occur = bool(_occur_re.search(turn))
-            # Priority boost: user+occurrence +0.02, user +0.01
-            priority_boost = (0.02 if is_user and has_occur else 0.01 if is_user else 0.0)
-            scored_dates.append((rrf_sc + priority_boost, d))
+            priority = (2 if is_user and has_occur else 1 if is_user else 0)
+            scored_dates.append((priority, d))
 
-        # Sort by combined score descending, take best dates
+        # Sort by priority descending, take best dates
         scored_dates.sort(key=lambda x: -x[0])
         dates = [d for _, d in scored_dates[:5]]
         event_dates.append(dates)
@@ -2332,14 +2305,7 @@ def main():
             bm25_idx = foundry._store.bm25_chunks
             bm25_txts = getattr(bm25_idx, '_texts', {})
             turn_ts = getattr(foundry._store, '_turn_timestamps', {})
-            _vec_idx = getattr(foundry._store, 'vectors', None)
-            _temporal_embed = None
-            if '_embed_model' in dir() and _vec_idx is not None:
-                _temporal_embed = lambda text: _embed_model.encode(text, normalize_embeddings=True)
-            temporal_computed = _infer_temporal_diff(
-                query, bm25_idx, bm25_txts, turn_ts,
-                embed_fn=_temporal_embed, vector_index=_vec_idx,
-            )
+            temporal_computed = _infer_temporal_diff(query, bm25_idx, bm25_txts, turn_ts)
             if temporal_computed:
                 enhanced_text += " " + " ".join(temporal_computed)
             arith_computed = _infer_arithmetic(query, bm25_idx, bm25_txts)
