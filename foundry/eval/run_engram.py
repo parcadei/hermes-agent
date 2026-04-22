@@ -1317,6 +1317,24 @@ def _add_perspective_shift(text: str) -> str:
     return f"{text} {' '.join(shifts)}"
 
 
+def _add_evidence_perspective(text: str) -> str:
+    """Append 'my' variants for 'your' phrases in evidence-appended text.
+
+    Evidence sentences use 'your' (assistant→user) but gold answers use 'my'
+    (user's perspective).  Complements _add_perspective_shift which only
+    processes the first line.  Zero-risk: only appends text.
+    """
+    shifts: set[str] = set()
+    for m in _re.finditer(r'(?:\w+\s+)?\byour\s+\w+', text, _re.IGNORECASE):
+        phrase = m.group(0)
+        my_var = _re.sub(r'\b[Yy]our\b', 'my', phrase)
+        if my_var.lower() not in text.lower():
+            shifts.add(my_var)
+    if not shifts:
+        return text
+    return f"{text} {' '.join(sorted(shifts))}"
+
+
 def _add_duration_equivalents(text: str) -> str:
     """Append alternative duration phrasings for SubEM coverage.
 
@@ -2298,6 +2316,7 @@ def main():
             enhanced_text = _add_evidence_sentence(enhanced_text, evidence or "")
             enhanced_text = _add_keyword_evidence(enhanced_text, evidence or "", query)
             enhanced_text = _add_evidence_phrase(enhanced_text, evidence or "")
+            enhanced_text = _add_evidence_perspective(enhanced_text)
             enhanced_text = _add_evidence_temporal(enhanced_text, evidence or "")
             enhanced_text = _add_date_arithmetic(enhanced_text, evidence or "")
             enhanced_text = _add_duration_equivalents(enhanced_text)

@@ -173,3 +173,4 @@ n/a	72.33	n/a	metric	Dual LLM-as-judge on exp146b 5-ctx: 217/300 (72.3%). +26 re
 n/a	67.00	n/a	metric	Strict LLM-as-judge on exp146b 5-ctx: 201/300 (67.0%). +10 rescues (6 pref, 4 fact). Up from 184/300 (61.3%) on exp136.
 579d0b24	63.00	42.15	discard	exp149 5-ctx: temporal verb boost + wider BM25 (top_k=30). 189/300 (-2 vs 191 baseline). ctx2 lost 2: qi15 temporal computed wrong turn, qi33 evidence suffix miss. Broader verbs HURT precision. Reverted.
 f7de01b8	62.67	42.37	discard	exp150 5-ctx: hybrid BM25+cosine RRF temporal event search (top_k=20 each). 188/300 (-3 vs 191). Gained ctx0 qi38 but lost 3: cosine dilutes BM25 precision for named-entity temporal events. Reverted.
+b6349d59	65.00	41.68	keep	exp151 5-ctx: widen _add_evidence_numbers gate from first line to first two lines. 195/300 (+4 vs 191). ctx1+2, ctx4+2. Fixes interaction where _add_number_equivalents puts digit on line 2 but evidence_numbers gate only checked line 1.
