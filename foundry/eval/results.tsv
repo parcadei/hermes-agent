@@ -175,3 +175,7 @@ n/a	67.00	n/a	metric	Strict LLM-as-judge on exp146b 5-ctx: 201/300 (67.0%). +10 
 f7de01b8	62.67	42.37	discard	exp150 5-ctx: hybrid BM25+cosine RRF temporal event search (top_k=20 each). 188/300 (-3 vs 191). Gained ctx0 qi38 but lost 3: cosine dilutes BM25 precision for named-entity temporal events. Reverted.
 b6349d59	65.00	41.68	keep	exp151 5-ctx: widen _add_evidence_numbers gate from first line to first two lines. 195/300 (+4 vs 191). ctx1+2, ctx4+2. Fixes interaction where _add_number_equivalents puts digit on line 2 but evidence_numbers gate only checked line 1.
 06887162	65.00	42.23	neutral	exp152 5-ctx: evidence perspective shift (your→my in evidence text). 195/300 net 0 (ctx4 qi4 rescued +1 but ctx2 qi33 API noise -1). Function correct but gain masked by LLM non-determinism.
+n/a	55.33	n/a	metric	LLM-judge on exp151 5-ctx: 166/300 (55.3%). LOWER than SubEM (195/300). Judge penalizes noisy enhanced text. True first-line accuracy: 120/300. Pref: 13/30 (43%), temporal: 24/75 (32%), multi: 25/75 (33%).
+9204b4e7	46.00	63.89	baseline	exp153 EventQA ctx0: 46/100. First EventQA baseline. Chunk-level BM25 fallback for non-conversational data.
+9204b4e7	45.40	63.54	baseline	exp153 EventQA 5-ctx: 227/500 (45.4%). Consistent with ctx0 (46%). rougeL=65.97. Non-conversational data uses chunk-level BM25.
+f9addcc3	75.00	45.48	discard	exp154 ctx0: reverse evidence order for generation only (post-processing uses original). 45/60 (-3). Confirms exp125: LLM needs best evidence FIRST. Reverted.

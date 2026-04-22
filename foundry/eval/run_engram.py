@@ -2282,17 +2282,11 @@ def main():
 
             # Generate answer from evidence
             # Use full query for LLM (includes options/instructions),
-            # retrieval_query was only for BM25 search
-            #
-            # Reverse evidence order for generation: "lost in the middle"
-            # phenomenon — LLMs attend more to context-end.  Putting the
-            # most relevant passage last (closest to the question) helps
-            # the LLM use it.  Post-processing uses original order.
-            gen_evidence = evidence or ""
-            if gen_evidence:
-                paragraphs = gen_evidence.split('\n')
-                if len(paragraphs) > 1:
-                    gen_evidence = '\n'.join(reversed(paragraphs))
+            # retrieval_query was only for BM25 search.
+            # Truncate evidence for generation to top ~5 passages (3000 chars)
+            # to reduce noise — LLM focuses on most relevant content.
+            # Post-processing uses full evidence for pattern matching.
+            gen_evidence = (evidence or "")[:3000]
             answer_text = generate_answer(
                 query, gen_evidence, args.agent_model,
                 sub_ds, max_tokens=gen_max_len,
