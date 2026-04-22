@@ -30,7 +30,7 @@ _WHITESPACE_RE = re.compile(r"\s+", re.UNICODE)
 _NON_WORD_RE = re.compile(r"[^\w\s-]+", re.UNICODE)
 _DETERMINER_RE = re.compile(r"^\s*(?:a|an|the)\s+", re.IGNORECASE)
 _POSSESSIVE_RE = re.compile(r"\b([\w-]+)['’]s\b", re.UNICODE)
-_EXPLICIT_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b")
+_EXPLICIT_DATE_RE = re.compile(r"\b\d{4}[-/]\d{2}[-/]\d{2}\b")
 _MONTH_DAY_RE = re.compile(
     r"\b("
     r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
