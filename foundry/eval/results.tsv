@@ -153,3 +153,7 @@ n/a	78.33	47.32	keep	exp135: inclusive-day suffix (N days → N+1 including last
 n/a	59.67	42.24	keep	exp135 5-ctx: inclusive-day suffix + "the" stopword. 179/300 (+5/0: 4 temporal-diff + 1 rollercoaster count). NEW 5-CTX BEST.
 n/a	60.00	42.52	keep	exp136: de-gate English keyword triggers (language-agnostic post-processing). 180/300 (+1/0 vs exp135: ctx1 qi=26 temporal rescue). NEW 5-CTX BEST.
 n/a	67.30	n/a	metric	Dual LLM-as-judge on exp131+131b 5-ctx: 202/300 (67.3%). +28 semantic rescues. Strict: 184/300 (61.3%).
+3ae22ff7	76.67	47.00	keep	autoresearch baseline: HERMES_ROOT env var + experiment rules. ctx0 verified.
+fdb62d6f	59.00	42.06	discard	exp137: populate Allen temporal index during eval. 177/300 (-3 vs 180). ctx0 78.33% (+1 qi=30) but ctx3 -1 ctx4 -2.
+dadd3a36	n/a	n/a	neutral	exp138: broaden date regex YYYY/MM/DD. Same 46 events (dates in body are YYYY-MM-DD). Correct but no impact.
+e8ca6695	78.33	n/a	neutral	exp139: enrich temporal event labels with turn content for BM25. ctx0 same (47/60). Temporal enrichment doesn't help — session timestamps only.

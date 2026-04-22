@@ -1714,11 +1714,17 @@ def main():
                         parse_args._reranker = CrossEncoderReranker(args.rerank_model, top_k=10)
                     reranker = parse_args._reranker
                 params = decompose_recall_params(retrieval_query)
+                # Force temporal questions to factual path: the temporal
+                # index has only session timestamps (no semantic events),
+                # so predicate="when" produces worse evidence than BM25.
+                effective_predicate = params["predicate"]
+                if effective_predicate == "when":
+                    effective_predicate = ""
                 evidence = recall(
                     foundry._store,
                     retrieval_query,
                     entity=params["entity"],
-                    predicate=params["predicate"],
+                    predicate=effective_predicate,
                     time=params["time"],
                     top_k=args.retrieve_top_k,
                     char_budget=args.char_budget,
