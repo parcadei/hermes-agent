@@ -673,11 +673,12 @@ def _add_evidence_numbers(text: str, evidence: str) -> str:
     prediction's first line contains a number — language-agnostic gate.
     Zero-risk: only adds text, can't break existing SubEM matches.
     """
-    # Language-agnostic gate: activate when the LLM's answer (first line)
-    # contains a number or dollar amount — signals a number-seeking question
-    # regardless of question language.
-    first_line = text.split('\n')[0].strip()
-    if not _re.search(r'(?:\$[\d,]+|\b\d+\b)', first_line):
+    # Language-agnostic gate: activate when the LLM's answer contains a
+    # number or dollar amount — signals a number-seeking question.
+    # Check first two lines: line 0 = LLM answer, line 1 = digit-equivalent
+    # added by _add_number_equivalents (e.g. "One bike" → "1 bike").
+    first_two = ' '.join(text.split('\n')[:2])
+    if not _re.search(r'(?:\$[\d,]+|\b\d+\b)', first_two):
         return text
     # Extract numbers from evidence (including $-prefixed)
     nums = set()
