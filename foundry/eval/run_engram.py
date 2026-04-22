@@ -2282,13 +2282,9 @@ def main():
 
             # Generate answer from evidence
             # Use full query for LLM (includes options/instructions),
-            # retrieval_query was only for BM25 search.
-            # Truncate evidence for generation to top ~5 passages (3000 chars)
-            # to reduce noise — LLM focuses on most relevant content.
-            # Post-processing uses full evidence for pattern matching.
-            gen_evidence = (evidence or "")[:3000]
+            # retrieval_query was only for BM25 search
             answer_text = generate_answer(
-                query, gen_evidence, args.agent_model,
+                query, evidence or "", args.agent_model,
                 sub_ds, max_tokens=gen_max_len,
             )
 
@@ -2297,7 +2293,7 @@ def main():
             if (answer_text.lower().strip().rstrip('.') == "unknown"
                     and evidence and len(evidence) > 200):
                 answer_text = _retry_unknown(
-                    query, gen_evidence, args.agent_model, gen_max_len,
+                    query, evidence, args.agent_model, gen_max_len,
                 )
 
 

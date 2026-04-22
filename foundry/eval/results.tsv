@@ -179,3 +179,4 @@ n/a	55.33	n/a	metric	LLM-judge on exp151 5-ctx: 166/300 (55.3%). LOWER than SubE
 9204b4e7	46.00	63.89	baseline	exp153 EventQA ctx0: 46/100. First EventQA baseline. Chunk-level BM25 fallback for non-conversational data.
 9204b4e7	45.40	63.54	baseline	exp153 EventQA 5-ctx: 227/500 (45.4%). Consistent with ctx0 (46%). rougeL=65.97. Non-conversational data uses chunk-level BM25.
 f9addcc3	75.00	45.48	discard	exp154 ctx0: reverse evidence order for generation only (post-processing uses original). 45/60 (-3). Confirms exp125: LLM needs best evidence FIRST. Reverted.
+0a951dfa	75.00	42.88	discard	exp155 ctx0: truncated generation evidence (3000 chars vs 12000). 45/60 (-3). LLM needs FULL evidence context, not less. Confirms exp126: less evidence = worse. Reverted.
