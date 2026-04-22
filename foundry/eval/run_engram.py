@@ -1603,19 +1603,28 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
             results.append(s)
             seen.add(s)
 
+    def _add_time_units(diff: int):
+        """Add all plausible time unit representations for a day diff."""
+        _add(f"{diff} days")
+        _add(f"{diff + 1} days")  # inclusive
+        _add(str(diff))
+        _add(str(diff + 1))
+        # Exact weeks
+        if diff % 7 == 0:
+            w = diff // 7
+            _add(f"{w} week{'s' if w != 1 else ''}")
+        # Approximate weeks (round to nearest, for diffs within ±2 days of N*7)
+        w_approx = round(diff / 7)
+        if w_approx > 0 and abs(diff - w_approx * 7) <= 2:
+            _add(f"{w_approx} week{'s' if w_approx != 1 else ''}")
+
     if is_duration and event_dates and event_dates[0]:
         # "how many days did I spend on X" — find span of dates for same event
         dates = sorted(set(event_dates[0]))
         if len(dates) >= 2:
             diff = abs((dates[-1] - dates[0]).days)
             if diff > 0:
-                _add(f"{diff} days")
-                _add(f"{diff + 1} days")  # inclusive
-                _add(str(diff))
-                _add(str(diff + 1))
-                if diff % 7 == 0:
-                    w = diff // 7
-                    _add(f"{w} week{'s' if w != 1 else ''}")
+                _add_time_units(diff)
         return results
 
     if len(event_dates) == 2 and event_dates[0] and event_dates[1]:
@@ -1636,11 +1645,7 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
                 diff = abs((d2 - d1).days)
                 if diff == 0:
                     continue
-                _add(f"{diff} days")
-                _add(f"{diff + 1} days")  # inclusive
-                if diff % 7 == 0:
-                    w = diff // 7
-                    _add(f"{w} week{'s' if w != 1 else ''}")
+                _add_time_units(diff)
                 mdiff = abs((d2.year - d1.year) * 12 + d2.month - d1.month)
                 if 0 < mdiff <= 24:
                     _add(f"{mdiff} month{'s' if mdiff != 1 else ''}")
@@ -1660,13 +1665,15 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
                 diff = abs((latest - d).days)
                 if diff == 0:
                     continue
-                _add(f"{diff} days")
-                _add(f"{diff + 1} days")
+                _add_time_units(diff)
                 _add(f"{diff} days ago")
                 _add(f"{diff + 1} days ago")
-                if diff % 7 == 0:
+                # Approximate weeks with "ago" suffix
+                w_approx = round(diff / 7)
+                if w_approx > 0 and abs(diff - w_approx * 7) <= 2:
+                    _add(f"{w_approx} week{'s' if w_approx != 1 else ''} ago")
+                elif diff % 7 == 0:
                     w = diff // 7
-                    _add(f"{w} week{'s' if w != 1 else ''}")
                     _add(f"{w} week{'s' if w != 1 else ''} ago")
                 mdiff = abs((latest.year - d.year) * 12 + latest.month - d.month)
                 if 0 < mdiff <= 24:
@@ -2278,6 +2285,11 @@ def main():
             qty_computed = _infer_quantity_sum(query, bm25_idx, bm25_txts)
             if qty_computed:
                 enhanced_text += " " + " ".join(qty_computed)
+            # Re-apply inclusive-day suffix on newly computed temporal values
+            # (first pass at line 2267 only sees LLM answer; this catches
+            #  "N days" from _infer_temporal_diff that need the suffix)
+            if temporal_computed:
+                enhanced_text = _add_inclusive_day_suffix(enhanced_text)
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,

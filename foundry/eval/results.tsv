@@ -164,3 +164,4 @@ n/a	58.33	n/a	discard	exp143: multi-turn temporal inference (date diff). 175/300
 n/a	76.67	n/a	neutral	exp144: quantity inference + duration pattern + temporal regex fixes. ctx0 46/60. Engine can't fire — no timestamps.
 n/a	71.67	46.06	discard	exp145: fix timestamp propagation (parse_chunk on raw string). 43/60 ctx0. Timestamps IN BM25 text diluted IDF (-4 regressions).
 n/a	76.67	47.14	keep	exp145c: timestamps stored separately (not in BM25). ctx0 46/60 (+1 temporal qi=7, -1 nondeterminism). Temporal inference WORKS.
+d5871929	59.67	42.29	neutral	exp145c 5-ctx: temporal inference with timestamps. 179/300 (-1 vs 180 baseline). +1 temporal rescue (ctx1 qi=4 "6 months" from date diff). LLM nondeterminism -1 (ctx3). Net neutral.
