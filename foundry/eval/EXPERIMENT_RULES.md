@@ -79,19 +79,28 @@ LOOP FOREVER:
 
 NEVER STOP. The human may be sleeping. Run experiments indefinitely.
 
-## Current Frontier (exp151)
+## Current Frontier (exp151/exp159)
 
-- ctx0: 80.00% (48/60)
-- 5-ctx: 65.00% (195/300)
+- ctx0: 81.7% (49/60) — exp150_hybrid_temporal
+- 5-ctx: 65.00% (195/300) — exp151_gate_widen
 - Config: --use_recall --retrieve_top_k 20 --faceted_cache msl_cache_qwen25_cs512.json
 
-## Target Gaps (from failure analysis)
+## Target Gaps (from exp151 failure analysis, 105/300 failures)
 
-- 27 temporal failures (9 have dates in evidence but system doesn't compute)
-- 4 numeric computable (aggregate engine exists but extraction feeds wrong entities)
-- 5 list computable (same extraction problem)
-- 53 long gold inference (multi-turn synthesis, needs better evidence selection)
-- 35 short factual (gold not in evidence, retrieval miss)
+### By gold length
+- 53 long gold (>80 chars): preference/inference — SubEM metric failure, needs LLM-as-judge
+- 43 short gold (<80 chars): retrieval miss — gold fact not in evidence
+- 9 "not enough info": need information sufficiency detection
+
+### By failure type (short gold)
+- Temporal arithmetic (~10): "How many days ago", "How long" — v9 when + Allen engine
+- Wrong retrieval (~15): retrieved wrong fact — better entity types from v9
+- Aggregation (~8): count/sum errors — v9 quantities + type hierarchy
+- Temporal ordering (~5): "Who first", "What order" — Allen engine
+- Near-miss formatting (~5): prediction close but not exact SubEM match
+
+### Key insight
+104/105 failures have gold NOT in evidence. The retrieval is the bottleneck.
 
 ## Eval Command (RunPod)
 

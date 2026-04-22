@@ -62,6 +62,16 @@ _MONTH_ONLY_RE = _re.compile(
 _DAY_OF_MONTH_RE = _re.compile(
     r'^(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?(' + '|'.join(_MONTH_NAMES) + r')$', _re.IGNORECASE)
 _YEAR_ONLY_RE = _re.compile(r'^(\d{4})$')
+_DECADE_RE = _re.compile(r'^(\d{4})s$')
+_YEAR_RANGE_RE = _re.compile(r'^(\d{4})\s*[-–]\s*(\d{4})$')
+_MONTH_DAY_RANGE_YEAR_RE = _re.compile(
+    r'^(' + '|'.join(_MONTH_NAMES) + r')\.?\s+(\d{1,2})(?:st|nd|rd|th)?\s*[-–]\s*(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$',
+    _re.IGNORECASE)
+_MONTH_DAY_RANGE_RE = _re.compile(
+    r'^(' + '|'.join(_MONTH_NAMES) + r')\.?\s+(\d{1,2})(?:st|nd|rd|th)?\s*[-–]\s*(\d{1,2})(?:st|nd|rd|th)?$',
+    _re.IGNORECASE)
+_MID_MONTH_RE = _re.compile(
+    r'^(?:mid|early|late)\s*[-–]?\s*(' + '|'.join(_MONTH_NAMES) + r')$', _re.IGNORECASE)
 _CHAT_DATE_RE = _re.compile(r'Chat Time:\s*(\d{4})/(\d{2})/(\d{2})')
 _WHEN_PREFIX_RE = _re.compile(
     r'^(?:on|born on|in|during|since|from)\s+', _re.IGNORECASE)
@@ -147,14 +157,61 @@ def _parse_v9_when(when_text: str, reference_date: datetime | None = None) -> tu
         year = reference_date.year if reference_date else None
         if year:
             return datetime(year, month, 1), datetime(year, month, 1)
+    # mid/early/late Month: "mid-January", "late March" (use reference_date's year)
+    m = _MID_MONTH_RE.match(text)
+    if m:
+        month = _MONTH_NAMES[m.group(1).lower().rstrip('.')]
+        year = reference_date.year if reference_date else None
+        if year:
+            return datetime(year, month, 1), datetime(year, month, 1)
+    # Month Day-Day, Year: "April 17-18, 2023", "May 15-16, 2023"
+    m = _MONTH_DAY_RANGE_YEAR_RE.match(text)
+    if m:
+        month = _MONTH_NAMES[m.group(1).lower().rstrip('.')]
+        try:
+            s = datetime(int(m.group(4)), month, int(m.group(2)))
+            e = datetime(int(m.group(4)), month, int(m.group(3)))
+            return s, e
+        except ValueError:
+            pass
+    # Month Day-Day (no year): "July 10-12", "July 26-28"
+    m = _MONTH_DAY_RANGE_RE.match(text)
+    if m:
+        month = _MONTH_NAMES[m.group(1).lower().rstrip('.')]
+        year = reference_date.year if reference_date else None
+        if year:
+            try:
+                s = datetime(year, month, int(m.group(2)))
+                e = datetime(year, month, int(m.group(3)))
+                return s, e
+            except ValueError:
+                pass
     # Plain year
     m = _YEAR_ONLY_RE.match(text)
     if m:
         y = int(m.group(1))
         if 1900 <= y <= 2100:
             return datetime(y, 1, 1), datetime(y, 12, 31)
-    # Interval: "from X to Y"
-    for sep in (' to ', ' through ', ' until '):
+    # Decade: "1970s" → 1970-1979
+    m = _DECADE_RE.match(text)
+    if m:
+        y = int(m.group(1))
+        if 1900 <= y <= 2100:
+            return datetime(y, 1, 1), datetime(y + 9, 12, 31)
+    # Year range: "1944-1948"
+    m = _YEAR_RANGE_RE.match(text)
+    if m:
+        y1, y2 = int(m.group(1)), int(m.group(2))
+        if 1900 <= y1 <= 2100 and 1900 <= y2 <= 2100:
+            return datetime(y1, 1, 1), datetime(y2, 12, 31)
+    # Decade range: "1970s-1980s"
+    dm = _re.match(r'^(\d{4})s\s*[-–]\s*(\d{4})s$', text)
+    if dm:
+        y1, y2 = int(dm.group(1)), int(dm.group(2))
+        if 1900 <= y1 <= 2100 and 1900 <= y2 <= 2100:
+            return datetime(y1, 1, 1), datetime(y2 + 9, 12, 31)
+    # Interval: "from X to Y", "X and Y" (for time spans)
+    for sep in (' to ', ' through ', ' until ', ' and '):
         if sep in text.lower():
             parts = text.lower().split(sep, 1)
             s, _ = _parse_v9_when(parts[0].removeprefix('from ').strip(), reference_date)
