@@ -27,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -46,7 +47,8 @@ import yaml
 _THIS_DIR = Path(__file__).resolve().parent
 _FOUNDRY_ROOT = _THIS_DIR.parent
 _WORKTREE_ROOT = _FOUNDRY_ROOT.parent
-_HERMES_ROOT = _WORKTREE_ROOT.parent.parent.parent  # engram-build -> worktrees -> .claude -> hermes-agent
+# HERMES_ROOT env var overrides path traversal (needed on RunPod where layout differs)
+_HERMES_ROOT = Path(os.environ["HERMES_ROOT"]) if "HERMES_ROOT" in os.environ else _WORKTREE_ROOT.parent.parent.parent
 _MABENCH = _HERMES_ROOT / "MemoryAgentBench"
 _NLCDM_PYTHON = _HERMES_ROOT / "proofs" / "hermes-NLCDM" / "python"
 
