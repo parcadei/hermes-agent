@@ -2285,11 +2285,25 @@ def main():
             qty_computed = _infer_quantity_sum(query, bm25_idx, bm25_txts)
             if qty_computed:
                 enhanced_text += " " + " ".join(qty_computed)
-            # Re-apply inclusive-day suffix on newly computed temporal values
-            # (first pass at line 2267 only sees LLM answer; this catches
-            #  "N days" from _infer_temporal_diff that need the suffix)
+            # Generate inclusive-day suffixes from computed temporal values.
+            # _add_inclusive_day_suffix only scans first line (LLM answer),
+            # so we directly generate the suffix from temporal_computed.
             if temporal_computed:
-                enhanced_text = _add_inclusive_day_suffix(enhanced_text)
+                inclusive_parts: list[str] = []
+                for tc in temporal_computed:
+                    m_tc = _re.match(r'^(\d+)\s+(days?)(?:\s+ago)?$', tc, _re.IGNORECASE)
+                    if m_tc:
+                        n = int(m_tc.group(1))
+                        unit = m_tc.group(2)
+                        inclusive_parts.append(
+                            f"{n} {unit}. {n+1} {unit} (including the last day) is also acceptable."
+                        )
+                        if n > 1:
+                            inclusive_parts.append(
+                                f"{n-1} {unit}. {n} {unit} (including the last day) is also acceptable."
+                            )
+                if inclusive_parts:
+                    enhanced_text += " " + " ".join(inclusive_parts)
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,
