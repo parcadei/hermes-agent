@@ -36,11 +36,28 @@ All else equal, simpler code wins. Complexity budget:
 - 0% SubEM change from deleting dead code -> keep
 - 2%+ SubEM gain from clean 20-line change -> keep
 
+## Rule 5: Work Upstream, Not Downstream
+
+Post-processing is a last-ditch crutch. The leverage hierarchy is:
+
+1. **Extraction / Ingestion** — what gets stored determines everything downstream.
+   Better entity extraction, better chunking, better temporal parsing, better
+   relation extraction. This is where real improvements come from.
+2. **Retrieval** — given what's stored, find the right evidence.
+   BM25 tuning, embedding models, reranking, entity-aware search.
+3. **Generation** — given the right evidence, produce the right answer.
+   Prompt engineering, model selection, reasoning strategies.
+4. **Post-processing** — format-match the answer to the gold.
+   EXHAUSTED. 20+ functions, 0 additional rescues possible. Do not invest here.
+
+When proposing experiments, always ask: "Am I improving what gets stored,
+or am I papering over bad storage with downstream hacks?"
+
 ## The Loop
 
 LOOP FOREVER:
 1. Read current results.tsv and identify the frontier
-2. Propose an experiment targeting: extraction, temporal computation, or inference
+2. Propose an experiment targeting: extraction, ingestion, or retrieval
 3. Modify code (foundry/*.py or foundry/eval/run_engram.py)
 4. git commit with descriptive message
 5. Sync to RunPod: rsync foundry/ to /workspace/repo/foundry/
@@ -52,10 +69,10 @@ LOOP FOREVER:
 
 NEVER STOP. The human may be sleeping. Run experiments indefinitely.
 
-## Current Frontier (exp146b)
+## Current Frontier (exp151)
 
 - ctx0: 80.00% (48/60)
-- 5-ctx: 63.67% (191/300)
+- 5-ctx: 65.00% (195/300)
 - Config: --use_recall --retrieve_top_k 20 --faceted_cache msl_cache_qwen25_cs512.json
 
 ## Target Gaps (from failure analysis)
