@@ -284,6 +284,9 @@ def parse_args():
                         help="Extra tag for output filename")
     parser.add_argument("--max_contexts", type=int, default=None,
                         help="Limit number of contexts to evaluate (for debugging)")
+    parser.add_argument("--cot", action="store_true",
+                        help="Use chain-of-thought generation: LLM reasons step-by-step, "
+                             "then final answer is extracted.")
 
     return parser.parse_args()
 
@@ -2012,8 +2015,29 @@ def _rewrite_preference_query(query: str) -> str:
     )
 
 
+_COT_SYSTEM_PROMPT = (
+    "Answer the question using ONLY the provided evidence. "
+    "Think step by step: identify the relevant facts in the evidence, "
+    "reason about them, then give your final answer.\n"
+    "Format your response as:\n"
+    "Reasoning: <your step-by-step reasoning>\n"
+    "Answer: <your concise final answer>"
+)
+
+
+def _extract_cot_answer(response: str) -> str:
+    """Extract the final answer from a chain-of-thought response."""
+    # Look for "Answer:" line
+    m = _re.search(r'(?:^|\n)\s*(?:Final\s+)?Answer\s*:\s*(.+)', response, _re.IGNORECASE)
+    if m:
+        return m.group(1).strip()
+    # Fallback: last non-empty line
+    lines = [ln.strip() for ln in response.strip().split('\n') if ln.strip()]
+    return lines[-1] if lines else response.strip()
+
+
 def generate_answer(query: str, evidence: str, model: str, dataset: str,
-                    max_tokens: int = 64) -> str:
+                    max_tokens: int = 64, cot: bool = False) -> str:
     """Use LLM to produce an answer from retrieved evidence."""
     if not evidence:
         return ""
@@ -2023,6 +2047,10 @@ def generate_answer(query: str, evidence: str, model: str, dataset: str,
         system_prompt = _PREFERENCE_SYSTEM_PROMPT
         effective_max_tokens = 200
         effective_query = _rewrite_preference_query(query)
+    elif cot:
+        system_prompt = _COT_SYSTEM_PROMPT
+        effective_max_tokens = 256
+        effective_query = query
     else:
         system_prompt = _system_prompt_for_dataset(dataset)
         effective_max_tokens = max_tokens
@@ -2041,7 +2069,10 @@ def generate_answer(query: str, evidence: str, model: str, dataset: str,
             )},
         ],
     )
-    return resp.choices[0].message.content.strip()
+    raw = resp.choices[0].message.content.strip()
+    if cot and not is_pref:
+        return _extract_cot_answer(raw)
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -2286,6 +2317,7 @@ def main():
             answer_text = generate_answer(
                 query, evidence or "", args.agent_model,
                 sub_ds, max_tokens=gen_max_len,
+                cot=getattr(args, 'cot', False),
             )
 
             # Retry: if model says "unknown" but we have substantive evidence,
