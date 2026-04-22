@@ -82,8 +82,8 @@ dotenv.load_dotenv(_NLCDM_PYTHON / ".env")
 import hashlib
 
 from foundry.core import Foundry, FoundryConfig
-from foundry.ingestion import FacetEntity, extract_temporal
-from foundry.storage import RawChunk, TemporalIndex, VectorIndex
+from foundry.ingestion import FacetEntity
+from foundry.storage import RawChunk, VectorIndex
 
 
 # ---------------------------------------------------------------------------
@@ -153,40 +153,6 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
             role=role,
         )
         store.chunks.store(turn_chunk)
-
-    # Extract temporal events from turns and populate the Allen engine.
-    # Previously the temporal index was never populated during eval, so
-    # recall(predicate="when") had no events to reason over.
-    if store.temporal is None:
-        store.temporal = TemporalIndex()
-    from foundry.ingestion import _parse_datetime
-    from foundry.storage import TemporalEvent as _TE
-    temporal_count = 0
-    for idx, (turn_text, role) in enumerate(all_turns):
-        session_dt = None
-        # Try parsing the [timestamp] prefix as session time anchor
-        if turn_text.startswith("[") and "]" in turn_text:
-            ts_str = turn_text[1:turn_text.index("]")]
-            session_dt = _parse_datetime(ts_str)
-        chunk = RawChunk(chunk_idx=idx, turn_idx=idx, text=turn_text, role=role)
-        events = extract_temporal(chunk, session_time=session_dt)
-        for event in events:
-            # Enrich session_time events with turn content so temporal BM25
-            # can match on semantics, not just "session_time" label.
-            if event.event == "session_time" and session_dt:
-                # Strip timestamp prefix, take first 150 chars of content
-                content = turn_text
-                if "]" in content:
-                    content = content[content.index("]") + 1:].strip()
-                label = content[:150].strip()
-                event = _TE(
-                    event=label, start_dt=event.start_dt, end_dt=event.end_dt,
-                    source=event.source, turn_id=idx,
-                )
-            store.temporal.ingest(event)
-            temporal_count += 1
-    if temporal_count:
-        print(f"  Extracted {temporal_count} temporal events from {len(all_turns)} turns")
 
     # Realign entity mention_turns to new BM25 turn indices.
     # Original mention_turns reference 512-token chunk indices; the new BM25
@@ -272,6 +238,8 @@ def parse_args():
                         help="Number of BM25 chunks to retrieve as evidence")
     parser.add_argument("--char_budget", type=int, default=12000,
                         help="Max characters of evidence to feed to LLM")
+    parser.add_argument("--gen_max_len", type=int, default=None,
+                        help="Override generation_max_length from dataset config")
     parser.add_argument("--use_agentic", action="store_true",
                         help="Use AgenticRetriever instead of direct BM25")
     parser.add_argument("--use_recall", action="store_true",
@@ -1577,7 +1545,7 @@ def main():
 
     dataset_config["chunk_size"] = args.chunk_size
     sub_ds = dataset_config["sub_dataset"]
-    gen_max_len = dataset_config.get("generation_max_length", 50)
+    gen_max_len = args.gen_max_len or dataset_config.get("generation_max_length", 50)
 
     agent_config = {"agent_name": "rag", "agent_chunk_size": None}
 
