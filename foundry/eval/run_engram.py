@@ -321,7 +321,9 @@ _WHEN_RE = _re.compile(
     r"(?:when\s+did\b)"
     r"|(?:which\b.*?\bhappened\s+first\b)"
     r"|(?:what\s+(?:is|was)\s+the\s+(?:order|sequence|chronological)\b)"
-    r"|(?:how\s+long\s+(?:did|have|has|was|were|do|does)\b)",
+    r"|(?:how\s+long\s+(?:did|have|has|was|were|do|does)\b)"
+    r"|(?:how\s+many\s+(?:days?|weeks?|months?|years?)\s+ago\b)"
+    r"|(?:how\s+many\s+(?:days?|weeks?|months?|years?)\s+(?:did|had|have|has)\b.*?\b(?:since|pass|elaps|before|after)\b)",
     _re.IGNORECASE,
 )
 _TIME_PHRASE_RE = _re.compile(
