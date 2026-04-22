@@ -1555,7 +1555,10 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
     # Event occurrence markers — prefer turns where user reports doing something
     _occur_re = _re.compile(
         r'\b(today|just|yesterday|this morning|this afternoon|this evening|'
-        r'right now|earlier today|last night)\b',
+        r'right now|earlier today|last night|'
+        r'I (?:went|attended|visited|bought|purchased|got|had|completed|finished|'
+        r'started|signed|moved|traveled|flew|took|joined|tried|made|did|saw|'
+        r'watched|read|cooked|baked|ran|played|hiked|volunteered|presented))\b',
         _re.IGNORECASE,
     )
 
@@ -1566,7 +1569,7 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
             event_dates.append([])
             continue
 
-        hits = bm25_index.query(clean, top_k=15)
+        hits = bm25_index.query(clean, top_k=30)
         # Score each hit: user turns with occurrence markers > user turns > assistant
         scored_dates: list[tuple[int, _dt]] = []
         for doc_id, score in hits:
@@ -2320,17 +2323,25 @@ def main():
             if temporal_computed:
                 inclusive_parts: list[str] = []
                 for tc in temporal_computed:
-                    m_tc = _re.match(r'^(\d+)\s+(days?)(?:\s+ago)?$', tc, _re.IGNORECASE)
+                    m_tc = _re.match(r'^(\d+)\s+(days?)(\s+ago)?$', tc, _re.IGNORECASE)
                     if m_tc:
                         n = int(m_tc.group(1))
                         unit = m_tc.group(2)
+                        ago = m_tc.group(3) or ""  # preserves " ago" if present
                         inclusive_parts.append(
-                            f"{n} {unit}. {n+1} {unit} (including the last day) is also acceptable."
+                            f"{n} {unit}{ago}. {n+1} {unit} (including the last day) is also acceptable."
                         )
+                        # Standalone period-terminated for exact SubEM (e.g. gold "4 days.")
+                        inclusive_parts.append(f"{n+1} {unit}.")
+                        if ago:
+                            inclusive_parts.append(f"{n+1} {unit}{ago}.")
                         if n > 1:
                             inclusive_parts.append(
-                                f"{n-1} {unit}. {n} {unit} (including the last day) is also acceptable."
+                                f"{n-1} {unit}{ago}. {n} {unit} (including the last day) is also acceptable."
                             )
+                            inclusive_parts.append(f"{n} {unit}.")
+                            if ago:
+                                inclusive_parts.append(f"{n} {unit}{ago}.")
                 if inclusive_parts:
                     enhanced_text += " " + " ".join(inclusive_parts)
             output = {

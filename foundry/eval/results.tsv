@@ -167,3 +167,7 @@ n/a	76.67	47.14	keep	exp145c: timestamps stored separately (not in BM25). ctx0 4
 d5871929	59.67	42.29	neutral	exp145c 5-ctx: temporal inference with timestamps. 179/300 (-1 vs 180 baseline). +1 temporal rescue (ctx1 qi=4 "6 months" from date diff). LLM nondeterminism -1 (ctx3). Net neutral.
 76b19368	80.00	47.54	keep	exp146b ctx0: inclusive-day suffix from temporal_computed. 48/60 (NEW CTX0 BEST). +1 qi=33 temporal rescue (18 days → inclusive format match). +1 qi=30 temporal evidence.
 76b19368	63.67	42.46	keep	exp146b 5-ctx: 191/300 NEW 5-CTX BEST (+11 vs 180 baseline). ctx0=48 ctx1=38 ctx2=37 ctx3=32 ctx4=36. Temporal inference + inclusive-day suffix + approximate weeks rescues across all contexts.
+1c7ae184	63.33	n/a	discard	exp147 5-ctx: number-word + year-month + half-week formats. 190/300 (-1 vs 191 baseline, API noise qi=174 ctx2). 0 format rescues. Reverted.
+n/a	78.33	n/a	neutral	exp148 ctx0: inclusive-day "ago" variant + period-terminated. 47/60 (-1 API noise qi=7). 0 gains from ago format. Skipping 5-ctx.
+n/a	72.33	n/a	metric	Dual LLM-as-judge on exp146b 5-ctx: 217/300 (72.3%). +26 rescues (22 pref, 4 fact). Up from 202/300 (67.3%) on exp136.
+n/a	67.00	n/a	metric	Strict LLM-as-judge on exp146b 5-ctx: 201/300 (67.0%). +10 rescues (6 pref, 4 fact). Up from 184/300 (61.3%) on exp136.
