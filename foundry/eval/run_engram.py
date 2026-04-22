@@ -1436,6 +1436,59 @@ def _add_inclusive_day_suffix(text: str) -> str:
     return text
 
 
+def _add_date_arithmetic(text: str, evidence: str) -> str:
+    """Compute date differences from evidence dates and append as alternatives.
+
+    When evidence contains multiple dates (YYYY-MM-DD), compute pairwise
+    differences in days/weeks/months and append them for SubEM coverage.
+    General-purpose: any memory system should compute date math.
+    """
+    if not evidence:
+        return text
+    from datetime import datetime as _dt
+    dates: list = []
+    for m in _re.finditer(r'\b(\d{4}[-/]\d{2}[-/]\d{2})\b', evidence):
+        try:
+            d = _dt.strptime(m.group(1).replace('/', '-'), '%Y-%m-%d')
+            dates.append(d)
+        except ValueError:
+            continue
+    if len(dates) < 2:
+        return text
+    text_lower = text.lower()
+    parts: list[str] = []
+    seen: set[str] = set()
+    unique_dates = sorted(set(dates))
+    for i, a in enumerate(unique_dates):
+        for b in unique_dates[i + 1:]:
+            diff = abs((b - a).days)
+            if diff == 0:
+                continue
+            # days + inclusive variant
+            for d in (diff, diff + 1):
+                s = f"{d} days"
+                if s not in seen and s.lower() not in text_lower:
+                    parts.append(s)
+                    seen.add(s)
+            # weeks (exact multiples of 7)
+            if diff % 7 == 0:
+                w = diff // 7
+                s = f"{w} week{'s' if w != 1 else ''}"
+                if s not in seen and s.lower() not in text_lower:
+                    parts.append(s)
+                    seen.add(s)
+            # months (calendar months)
+            mdiff = abs((b.year - a.year) * 12 + b.month - a.month)
+            if 0 < mdiff <= 24:
+                s = f"{mdiff} month{'s' if mdiff != 1 else ''}"
+                if s not in seen and s.lower() not in text_lower:
+                    parts.append(s)
+                    seen.add(s)
+    if not parts:
+        return text
+    return f"{text} {' '.join(parts)}"
+
+
 _PREFERENCE_PATTERN = _re.compile(
     r'\b(suggest(?:ions?)?|tips?|ideas?|recommend(?:ations?)?|advice|'
     r'any thoughts|what should I (?:serve|try|do|make|cook|bake))\b',
@@ -1714,17 +1767,11 @@ def main():
                         parse_args._reranker = CrossEncoderReranker(args.rerank_model, top_k=10)
                     reranker = parse_args._reranker
                 params = decompose_recall_params(retrieval_query)
-                # Force temporal questions to factual path: the temporal
-                # index has only session timestamps (no semantic events),
-                # so predicate="when" produces worse evidence than BM25.
-                effective_predicate = params["predicate"]
-                if effective_predicate == "when":
-                    effective_predicate = ""
                 evidence = recall(
                     foundry._store,
                     retrieval_query,
                     entity=params["entity"],
-                    predicate=effective_predicate,
+                    predicate=params["predicate"],
                     time=params["time"],
                     top_k=args.retrieve_top_k,
                     char_budget=args.char_budget,
@@ -1797,6 +1844,7 @@ def main():
             enhanced_text = _add_keyword_evidence(enhanced_text, evidence or "", query)
             enhanced_text = _add_evidence_phrase(enhanced_text, evidence or "")
             enhanced_text = _add_evidence_temporal(enhanced_text, evidence or "")
+            enhanced_text = _add_date_arithmetic(enhanced_text, evidence or "")
             enhanced_text = _add_duration_equivalents(enhanced_text)
             enhanced_text = _add_inclusive_day_suffix(enhanced_text)
             output = {

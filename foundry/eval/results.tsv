@@ -157,3 +157,4 @@ n/a	67.30	n/a	metric	Dual LLM-as-judge on exp131+131b 5-ctx: 202/300 (67.3%). +2
 fdb62d6f	59.00	42.06	discard	exp137: populate Allen temporal index during eval. 177/300 (-3 vs 180). ctx0 78.33% (+1 qi=30) but ctx3 -1 ctx4 -2.
 dadd3a36	n/a	n/a	neutral	exp138: broaden date regex YYYY/MM/DD. Same 46 events (dates in body are YYYY-MM-DD). Correct but no impact.
 e8ca6695	78.33	n/a	neutral	exp139: enrich temporal event labels with turn content for BM25. ctx0 same (47/60). Temporal enrichment doesn't help — session timestamps only.
+ed3b31cc	75.00	46.85	discard	exp140: force temporal questions to factual BM25 path. ctx0 REGRESSED 47→45. Temporal routing helps 2 Qs. Keep temporal engine.
