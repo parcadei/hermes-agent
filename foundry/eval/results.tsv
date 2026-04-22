@@ -159,3 +159,4 @@ dadd3a36	n/a	n/a	neutral	exp138: broaden date regex YYYY/MM/DD. Same 46 events (
 e8ca6695	78.33	n/a	neutral	exp139: enrich temporal event labels with turn content for BM25. ctx0 same (47/60). Temporal enrichment doesn't help — session timestamps only.
 ed3b31cc	75.00	46.85	discard	exp140: force temporal questions to factual BM25 path. ctx0 REGRESSED 47→45. Temporal routing helps 2 Qs. Keep temporal engine.
 a206005d	76.67	46.48	neutral	exp141: date arithmetic (YYYY-MM-DD pair diffs). 0 triggers — LME uses natural language dates. Correct but no impact.
+3bc7d998	78.33	47.16	keep	exp142: revert temporal index (was -3 on 5-ctx) + gen_max_len CLI override. ctx0 back to 78.33% baseline. gen_max_len=75 +1 but API noise (qi=7 nondeterministic).
