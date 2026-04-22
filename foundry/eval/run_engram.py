@@ -141,6 +141,13 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
         print("  Skipping turn-level BM25: no turns extracted from context")
         return
 
+    # Guard: if parsing found far fewer turns than chunks, the data isn't
+    # conversational (e.g. EventQA, Ruler).  Keep the original chunk-level BM25.
+    n_chunks = len(getattr(foundry._store.bm25_chunks, '_texts', {}))
+    if n_chunks > 0 and len(all_turns) < n_chunks * 0.1:
+        print(f"  Skipping turn-level BM25: only {len(all_turns)} turns from {n_chunks} chunks (non-conversational)")
+        return
+
     print(f"  Turn-level BM25: {len(all_turns)} turns, {len(turn_timestamps)} with timestamps")
 
     # Rebuild BM25 and chunk store with individual turns
