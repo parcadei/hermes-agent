@@ -1527,7 +1527,8 @@ _TEMPORAL_DURATION_RE = _re.compile(
 
 
 def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
-                         turn_timestamps: dict[int, str] | None = None) -> list[str]:
+                         turn_timestamps: dict[int, str] | None = None,
+                         evidence_doc_ids: set[int] | None = None) -> list[str]:
     """Compute date differences by searching for event dates in conversation turns.
 
     For temporal-diff questions ("how many days between X and Y"), this function:
@@ -1535,6 +1536,10 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
     2. Does targeted BM25 searches for each event
     3. Looks up timestamps from turn_timestamps dict (stored separately from BM25 text)
     4. Computes date differences in multiple units (days, weeks, months)
+
+    If evidence_doc_ids is provided, turns from the main retrieval evidence get
+    a priority boost (+3) so the temporal engine prefers turns the retrieval
+    pipeline already validated as relevant.
 
     Returns list of computed answers (e.g. ["18 days", "19 days", "2 weeks"]).
     General-purpose: works on any conversation with timestamped turns.
@@ -1606,11 +1611,15 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
                 d = _dt.strptime(ts_str[:10], '%Y-%m-%d')
             except ValueError:
                 continue
-            # Priority: user+occurrence > user > assistant
+            # Priority: evidence+user+occurrence > user+occurrence > user > assistant
+            # Turns from main retrieval evidence get +3 boost
             turn = bm25_texts.get(doc_id_int, "")
             is_user = turn.lstrip().startswith('(user)')
             has_occur = bool(_occur_re.search(turn))
+            in_evidence = evidence_doc_ids and doc_id_int in evidence_doc_ids
             priority = (2 if is_user and has_occur else 1 if is_user else 0)
+            if in_evidence:
+                priority += 3
             scored_dates.append((priority, d))
 
         # Sort by priority descending, take best dates
@@ -2332,7 +2341,16 @@ def main():
             bm25_idx = foundry._store.bm25_chunks
             bm25_txts = getattr(bm25_idx, '_texts', {})
             turn_ts = getattr(foundry._store, '_turn_timestamps', {})
-            temporal_computed = _infer_temporal_diff(query, bm25_idx, bm25_txts, turn_ts)
+            # Extract doc_ids from evidence for temporal inference boosting
+            ev_doc_ids: set[int] = set()
+            if evidence:
+                for did, txt in bm25_txts.items():
+                    if txt and txt[:80] in evidence:
+                        ev_doc_ids.add(did)
+            temporal_computed = _infer_temporal_diff(
+                query, bm25_idx, bm25_txts, turn_ts,
+                evidence_doc_ids=ev_doc_ids if ev_doc_ids else None,
+            )
             if temporal_computed:
                 enhanced_text += " " + " ".join(temporal_computed)
             arith_computed = _infer_arithmetic(query, bm25_idx, bm25_txts)
