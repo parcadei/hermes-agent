@@ -1618,8 +1618,9 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
             priority = (2 if is_user and has_occur else 1 if is_user else 0)
             scored_dates.append((priority, d))
 
-        # Sort by priority descending, take best dates
-        scored_dates.sort(key=lambda x: -x[0])
+        # Sort by priority descending, then date descending (most recent first
+        # within same priority — "ago" questions want the most recent event)
+        scored_dates.sort(key=lambda x: (-x[0], -x[1].toordinal()))
         dates = [d for _, d in scored_dates[:5]]
         event_dates.append(dates)
 
