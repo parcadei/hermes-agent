@@ -189,3 +189,4 @@ n/a	76.67	n/a	metric	Combined dual-tier (SubEM||mini||4o) on exp151 5-ctx: 230/3
 n/a	78.33	49.67	discard	exp156 ctx0: gpt-4o generation (was gpt-4o-mini). 47/60 (-1). F1 +2.13 but SubEM -1. Longer output (80 tok vs 62) = worse SubEM match. Confirmed: gpt-4o not worth it.
 00da1250	80.00	47.70	discard	exp157 ctx0: evidence-constrained temporal (boost +3 for evidence doc_ids). 47/60 (-1 qi=7 API noise). 0 gains. Reverted.
 f6387201	76.67	44.04	discard	exp158 ctx0: chain-of-thought generation (--cot, max_tokens=256, "Reasoning:...Answer:" format). 46/60 (-2). 0 gains, 2 losses (paraphrasing, over-reasoning). CoT HURTS.
+n/a	80.00	47.27	neutral	exp159 ctx0: wire cache relations as ExtractedTriple into ingest_chunk(). 48/60 = matches baseline. Old cache has 0 temporal/role data. v9 cache generating.

@@ -82,7 +82,7 @@ dotenv.load_dotenv(_NLCDM_PYTHON / ".env")
 import hashlib
 
 from foundry.core import Foundry, FoundryConfig
-from foundry.ingestion import FacetEntity
+from foundry.ingestion import ExtractedTriple, FacetEntity
 from foundry.storage import RawChunk, VectorIndex
 
 
@@ -2101,14 +2101,19 @@ def main():
             corrected_map[c["qi"]] = c["corrected_answer"]
         print(f"Loaded {len(corrected_map)} corrected answers from {args.corrected_answers}")
 
-    # Load faceted cache (pre-computed Qwen2.5-7B extractions)
-    faceted_cache: dict[str, list[dict]] = {}
+    # Load faceted cache (pre-computed extractions: entities + relations)
+    faceted_cache: dict[str, dict] = {}
     if args.faceted_cache:
         with open(args.faceted_cache) as f:
             raw_cache = json.load(f)
         for h, entry in raw_cache.items():
-            faceted_cache[h] = entry.get("entities", [])
-        print(f"Loaded faceted cache: {len(faceted_cache)} chunks from {args.faceted_cache}")
+            faceted_cache[h] = entry  # Keep full entry with entities AND relations
+        n_with_rels = sum(1 for v in faceted_cache.values() if v.get("relations"))
+        n_with_when = sum(
+            1 for v in faceted_cache.values()
+            if any(r.get("when") for r in v.get("relations", []))
+        )
+        print(f"Loaded faceted cache: {len(faceted_cache)} chunks, {n_with_rels} with relations, {n_with_when} with temporal from {args.faceted_cache}")
 
     # Build Foundry
     config = FoundryConfig(
@@ -2186,8 +2191,8 @@ def main():
             for chunk_text in chunks:
                 if faceted_cache:
                     h = hashlib.md5(chunk_text.encode()).hexdigest()
-                    cached_ents = faceted_cache.get(h)
-                    if cached_ents:
+                    cached_entry = faceted_cache.get(h)
+                    if cached_entry:
                         cache_hits += 1
                         next_idx = len(foundry._store.chunks)
                         raw_chunk = RawChunk(
@@ -2196,17 +2201,40 @@ def main():
                             turn_idx=next_idx,
                             role="user",
                         )
+                        # Build entities from cache
+                        cached_entities = cached_entry.get("entities", [])
                         entities = [
                             FacetEntity(
                                 name=e["name"],
-                                facets=e.get("facets", {}),
+                                facets=e.get("facets", e.get("properties", {})),
                                 turn_idx=raw_chunk.turn_idx,
                                 source_text=chunk_text[:200],
                             )
-                            for e in cached_ents
+                            for e in cached_entities
                             if e.get("name", "").strip()
                         ]
-                        foundry.ingest_chunk(raw_chunk, entities=entities)
+                        # Build triples from cache relations (v9 format)
+                        cached_relations = cached_entry.get("relations", [])
+                        triples = [
+                            ExtractedTriple(
+                                subject=r["subject"],
+                                predicate=r["predicate"],
+                                object=r["object"],
+                                when=r.get("when", ""),
+                                when_type=r.get("when_type", ""),
+                                quantity=r.get("quantity", "0"),
+                                unit=r.get("unit", ""),
+                                confidence=r.get("confidence", ""),
+                                sentiment=r.get("sentiment", ""),
+                                source_turn=r.get("source_turn", -1),
+                                role=r.get("role", ""),
+                                source_text=chunk_text[:200],
+                                turn_idx=raw_chunk.turn_idx,
+                                chunk_idx=raw_chunk.chunk_idx,
+                            )
+                            for r in cached_relations
+                        ] if cached_relations else None
+                        foundry.ingest_chunk(raw_chunk, entities=entities, triples=triples)
                         continue
                 foundry.ingest(chunk_text)
             ingest_time = time.time() - ingest_start

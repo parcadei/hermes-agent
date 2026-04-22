@@ -40,8 +40,64 @@ from foundry.retrieval import (
     RetrievalTrace,
     search_temporal as retrieval_search_temporal,
 )
-from foundry.storage import EntityGraph, EntityNode, Fact, FoundryStore, RawChunk, _normalize_name, _normalize_predicate
+from foundry.storage import EntityGraph, EntityNode, Fact, FoundryStore, RawChunk, TemporalEvent, _normalize_name, _normalize_predicate
 from foundry.writeback import SupersessionEngine
+
+import re as _re
+
+_MONTH_NAMES = {
+    'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+    'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12,
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7,
+    'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+}
+_MONTH_YEAR_RE = _re.compile(
+    r'^(' + '|'.join(_MONTH_NAMES) + r')\.?\s+(\d{4})$', _re.IGNORECASE)
+_MONTH_DAY_YEAR_RE = _re.compile(
+    r'^(' + '|'.join(_MONTH_NAMES) + r')\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})$', _re.IGNORECASE)
+_YEAR_ONLY_RE = _re.compile(r'^(\d{4})$')
+
+
+def _parse_v9_when(when_text: str) -> tuple[datetime | None, datetime | None]:
+    """Parse a v9 'when' expression into (start_dt, end_dt). Returns (None, None) on failure."""
+    text = when_text.strip()
+    if not text:
+        return None, None
+    # ISO
+    try:
+        dt = datetime.fromisoformat(text.replace('Z', '+00:00'))
+        return dt, dt
+    except ValueError:
+        pass
+    # Month Year: "March 2024"
+    m = _MONTH_YEAR_RE.match(text)
+    if m:
+        month = _MONTH_NAMES[m.group(1).lower().rstrip('.')]
+        return datetime(int(m.group(2)), month, 1), datetime(int(m.group(2)), month, 1)
+    # Month Day, Year: "March 15, 2024"
+    m = _MONTH_DAY_YEAR_RE.match(text)
+    if m:
+        month = _MONTH_NAMES[m.group(1).lower().rstrip('.')]
+        try:
+            dt = datetime(int(m.group(3)), month, int(m.group(2)))
+            return dt, dt
+        except ValueError:
+            pass
+    # Plain year
+    m = _YEAR_ONLY_RE.match(text)
+    if m:
+        y = int(m.group(1))
+        if 1900 <= y <= 2100:
+            return datetime(y, 1, 1), datetime(y, 12, 31)
+    # Interval: "from X to Y"
+    for sep in (' to ', ' through ', ' until '):
+        if sep in text.lower():
+            parts = text.lower().split(sep, 1)
+            s, _ = _parse_v9_when(parts[0].removeprefix('from ').strip())
+            e, _ = _parse_v9_when(parts[1].strip())
+            if s and e:
+                return s, e
+    return None, None
 
 
 _SUPERSeding_PREDICATES = {
@@ -674,6 +730,28 @@ class Foundry:
                     node.related.add(target_name)
                     if target_name not in chunk_entities:
                         chunk_entities.append(target_name)
+
+        # Create TemporalEvents from triples with v9 'when' data
+        for triple in extracted_triples:
+            if not triple.when:
+                continue
+            start_dt, end_dt = _parse_v9_when(triple.when)
+            if start_dt and end_dt:
+                try:
+                    te = TemporalEvent(
+                        event=f"{triple.subject} {triple.predicate} {triple.object}",
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        source=chunk.text,
+                        turn_id=chunk.turn_idx,
+                        subject=triple.subject,
+                        verb=triple.predicate,
+                        object=triple.object,
+                    )
+                    self._store.temporal.ingest(te)
+                    report.temporal_events += 1
+                except (ValueError, TypeError):
+                    pass
 
         tracker.mark("triples", triple_started)
 

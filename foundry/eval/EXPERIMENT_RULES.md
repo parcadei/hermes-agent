@@ -53,6 +53,16 @@ Post-processing is a last-ditch crutch. The leverage hierarchy is:
 When proposing experiments, always ask: "Am I improving what gets stored,
 or am I papering over bad storage with downstream hacks?"
 
+## Rule 6: One GPU Job at a Time
+
+RunPod has ONE GPU. Never run two GPU-intensive jobs concurrently:
+- Do NOT start an eval while precompute/extraction is running
+- Do NOT start precompute while an eval is running
+- Wait for the current job to finish before starting the next
+
+Concurrent GPU jobs cause KV cache contention, timeouts, and 10x slowdowns.
+The few minutes saved by parallelism are lost to debugging hangs.
+
 ## The Loop
 
 LOOP FOREVER:
