@@ -160,3 +160,7 @@ e8ca6695	78.33	n/a	neutral	exp139: enrich temporal event labels with turn conten
 ed3b31cc	75.00	46.85	discard	exp140: force temporal questions to factual BM25 path. ctx0 REGRESSED 47→45. Temporal routing helps 2 Qs. Keep temporal engine.
 a206005d	76.67	46.48	neutral	exp141: date arithmetic (YYYY-MM-DD pair diffs). 0 triggers — LME uses natural language dates. Correct but no impact.
 3bc7d998	78.33	47.16	keep	exp142: revert temporal index (was -3 on 5-ctx) + gen_max_len CLI override. ctx0 back to 78.33% baseline. gen_max_len=75 +1 but API noise (qi=7 nondeterministic).
+n/a	58.33	n/a	discard	exp143: multi-turn temporal inference (date diff). 175/300 5-ctx. 0/18 temporal rescued — BM25 turns had NO TIMESTAMPS (parse_chunk bug).
+n/a	76.67	n/a	neutral	exp144: quantity inference + duration pattern + temporal regex fixes. ctx0 46/60. Engine can't fire — no timestamps.
+n/a	71.67	46.06	discard	exp145: fix timestamp propagation (parse_chunk on raw string). 43/60 ctx0. Timestamps IN BM25 text diluted IDF (-4 regressions).
+n/a	76.67	47.14	keep	exp145c: timestamps stored separately (not in BM25). ctx0 46/60 (+1 temporal qi=7, -1 nondeterminism). Temporal inference WORKS.

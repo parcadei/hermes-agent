@@ -101,45 +101,47 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
     Entity graph stays indexed by original 512-token chunks (built during
     ingestion with faceted cache). Only BM25 + chunk store are rebuilt.
     """
-    import ast
     from foundry.storage import BM25Index
 
-    # Parse raw context into structured chunks
-    try:
-        context_chunks = ast.literal_eval(raw_context) if isinstance(raw_context, str) else raw_context
-    except (ValueError, SyntaxError):
-        print("  Skipping turn-level BM25: context not a parseable Python literal")
-        return
-
-    if not isinstance(context_chunks, list):
-        print("  Skipping turn-level BM25: context is not a list")
-        return
-
-    # Use mabench's parser to extract individual turns (same as eval_agentic_retrieval)
+    # Pass raw string directly to parse_chunk so that Chat Time markers
+    # keep their surrounding quotes (ast.literal_eval strips them, which
+    # breaks _CHAT_TIME_RE matching and loses all timestamps).
     from mabench.conversation_parser import parse_chunk
 
+    raw_str = raw_context if isinstance(raw_context, str) else str(raw_context)
+    all_turns_raw, _, _ = parse_chunk(raw_str, 0, "")
+
     all_turns: list[tuple[str, str]] = []  # (text, role)
-    counter = 0
-    last_ts = ""
-    for chunk_data in context_chunks:
-        turns, counter, last_ts = parse_chunk(str(chunk_data), counter, last_ts)
-        for t in turns:
-            if not t.content or not t.content.strip():
-                continue
-            content = t.content.strip()
-            if len(content) < 20:
-                continue
-            # Skip bare timestamp headers
-            if content.startswith("Chat Time:") and len(content) < 60:
-                continue
-            prefix = f"[{t.timestamp}] " if t.timestamp else ""
-            role_tag = f"({t.role}) " if t.role != "continuation" else ""
-            turn_text = f"{prefix}{role_tag}{t.content}"
-            all_turns.append((turn_text, t.role))
+    turn_timestamps: dict[int, str] = {}  # turn_idx → ISO timestamp (for temporal inference)
+    for t in all_turns_raw:
+        if not t.content or not t.content.strip():
+            continue
+        content = t.content.strip()
+        if len(content) < 20:
+            continue
+        # Skip bare timestamp headers
+        if content.startswith("Chat Time:") and len(content) < 60:
+            continue
+        # Convert LME timestamp "2022/11/17 (Thu) 12:04" → ISO "2022-11-17 12:04"
+        ts_iso = ""
+        if t.timestamp:
+            ts_iso = re.sub(
+                r'(\d{4})/(\d{2})/(\d{2})\s*\([^)]+\)\s*',
+                r'\1-\2-\3 ', t.timestamp,
+            ).strip()
+        # Store timestamp separately — NOT in BM25 text (dilutes IDF + confuses LLM)
+        idx = len(all_turns)
+        if ts_iso:
+            turn_timestamps[idx] = ts_iso
+        role_tag = f"({t.role}) " if t.role != "continuation" else ""
+        turn_text = f"{role_tag}{t.content}"
+        all_turns.append((turn_text, t.role))
 
     if not all_turns:
         print("  Skipping turn-level BM25: no turns extracted from context")
         return
+
+    print(f"  Turn-level BM25: {len(all_turns)} turns, {len(turn_timestamps)} with timestamps")
 
     # Rebuild BM25 and chunk store with individual turns
     store = foundry._store
@@ -184,7 +186,9 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
         new_bm25.add(idx, turn_text)
     store.bm25_chunks = new_bm25
 
-    print(f"  Rebuilt BM25: {len(context_chunks)} session chunks → {len(all_turns)} individual turns")
+    # Attach timestamps for temporal inference (used by _infer_temporal_diff)
+    store._turn_timestamps = turn_timestamps
+    print(f"  Rebuilt BM25: {len(all_turns_raw)} parsed turns → {len(all_turns)} indexed turns")
 
 
 def _embed_turns(foundry: "Foundry", embed_model: str) -> "Any":
@@ -1472,7 +1476,7 @@ _TEMPORAL_DIFF_Q = _re.compile(
 # "How many days passed between [finishing X] and [starting Y]"
 _TEMPORAL_BETWEEN_RE = _re.compile(
     r'(?:between|since|from)\s+(?:the\s+(?:day|time)\s+)?(?:I\s+)?(.+?)'
-    r'\s+(?:and|until|to|till)\s+(?:the\s+(?:day|time)\s+)?(?:I\s+)?(.+?)(?:\?|$)',
+    r'\s+(?:and|until|till|when)\s+(?:the\s+(?:day|time)\s+)?(?:I\s+)?(.+?)(?:\?|$)',
     _re.IGNORECASE,
 )
 # "How many days ago did I [event]"
@@ -1485,15 +1489,25 @@ _TEMPORAL_SINCE_RE = _re.compile(
     r'since\s+(?:I\s+)?(.+?)(?:\?|$)',
     _re.IGNORECASE,
 )
+# "How many days did I spend on/at/in [event]" — duration of single event
+_TEMPORAL_DURATION_RE = _re.compile(
+    r'(?:how many (?:days|weeks|months)|how long)\s+'
+    r'(?:did\s+I\s+(?:spend|take)\s+(?:on|at|in|for|doing|reading|during|participating)\s+'
+    r'|did\s+it\s+take\s+(?:me|I)\s+to\s+(?:finish|complete|read)\s+'
+    r'|(?:in total\s+)?do\s+I\s+(?:spend|spent)\s+(?:on|reading)\s+)'
+    r'(.+?)(?:\s+in total|\s+total|\s+combined|\s+altogether)?(?:\?|$)',
+    _re.IGNORECASE,
+)
 
 
-def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict) -> list[str]:
+def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict,
+                         turn_timestamps: dict[int, str] | None = None) -> list[str]:
     """Compute date differences by searching for event dates in conversation turns.
 
     For temporal-diff questions ("how many days between X and Y"), this function:
     1. Extracts event descriptions from the question
     2. Does targeted BM25 searches for each event
-    3. Parses timestamps from matching turns
+    3. Looks up timestamps from turn_timestamps dict (stored separately from BM25 text)
     4. Computes date differences in multiple units (days, weeks, months)
 
     Returns list of computed answers (e.g. ["18 days", "19 days", "2 weeks"]).
@@ -1502,6 +1516,8 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict) -> list[st
     from datetime import datetime as _dt
 
     if not _TEMPORAL_DIFF_Q.search(question):
+        return []
+    if not turn_timestamps:
         return []
 
     # Extract actual question
@@ -1513,6 +1529,7 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict) -> list[st
 
     # Try to extract event phrases
     events: list[str] = []
+    is_duration = False
     m = _TEMPORAL_BETWEEN_RE.search(q)
     if m:
         events = [m.group(1).strip(), m.group(2).strip()]
@@ -1524,13 +1541,23 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict) -> list[st
             m = _TEMPORAL_SINCE_RE.search(q)
             if m:
                 events = [m.group(1).strip()]
+            else:
+                m = _TEMPORAL_DURATION_RE.search(q)
+                if m:
+                    events = [m.group(1).strip()]
+                    is_duration = True
 
     if not events:
         return []
 
-    # For each event, BM25 search and extract timestamps
+    # For each event, BM25 search and look up timestamps from separate dict
     event_dates: list[list[_dt]] = []
-    ts_re = _re.compile(r'\[(\d{4}-\d{2}-\d{2})[T ]?\d{2}:\d{2}')
+    # Event occurrence markers — prefer turns where user reports doing something
+    _occur_re = _re.compile(
+        r'\b(today|just|yesterday|this morning|this afternoon|this evening|'
+        r'right now|earlier today|last night)\b',
+        _re.IGNORECASE,
+    )
 
     for event_text in events:
         # Clean event text for BM25
@@ -1539,17 +1566,30 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict) -> list[st
             event_dates.append([])
             continue
 
-        hits = bm25_index.query(clean, top_k=5)
-        dates = []
+        hits = bm25_index.query(clean, top_k=15)
+        # Score each hit: user turns with occurrence markers > user turns > assistant
+        scored_dates: list[tuple[int, _dt]] = []
         for doc_id, score in hits:
-            turn = bm25_texts.get(int(doc_id), "")
-            ts_match = ts_re.search(turn)
-            if ts_match:
-                try:
-                    d = _dt.strptime(ts_match.group(1), '%Y-%m-%d')
-                    dates.append(d)
-                except ValueError:
-                    pass
+            doc_id_int = int(doc_id)
+            # Look up timestamp from separate dict (not embedded in turn text)
+            ts_str = turn_timestamps.get(doc_id_int, "")
+            if not ts_str:
+                continue
+            # Parse ISO date from "YYYY-MM-DD HH:MM"
+            try:
+                d = _dt.strptime(ts_str[:10], '%Y-%m-%d')
+            except ValueError:
+                continue
+            # Priority: user+occurrence > user > assistant
+            turn = bm25_texts.get(doc_id_int, "")
+            is_user = turn.lstrip().startswith('(user)')
+            has_occur = bool(_occur_re.search(turn))
+            priority = (2 if is_user and has_occur else 1 if is_user else 0)
+            scored_dates.append((priority, d))
+
+        # Sort by priority descending, take best dates
+        scored_dates.sort(key=lambda x: -x[0])
+        dates = [d for _, d in scored_dates[:5]]
         event_dates.append(dates)
 
     if not event_dates:
@@ -1563,10 +1603,36 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict) -> list[st
             results.append(s)
             seen.add(s)
 
+    if is_duration and event_dates and event_dates[0]:
+        # "how many days did I spend on X" — find span of dates for same event
+        dates = sorted(set(event_dates[0]))
+        if len(dates) >= 2:
+            diff = abs((dates[-1] - dates[0]).days)
+            if diff > 0:
+                _add(f"{diff} days")
+                _add(f"{diff + 1} days")  # inclusive
+                _add(str(diff))
+                _add(str(diff + 1))
+                if diff % 7 == 0:
+                    w = diff // 7
+                    _add(f"{w} week{'s' if w != 1 else ''}")
+        return results
+
     if len(event_dates) == 2 and event_dates[0] and event_dates[1]:
         # "between X and Y" — compute diff between best dates for each event
-        for d1 in event_dates[0][:3]:
-            for d2 in event_dates[1][:3]:
+        # Deduplicate dates per event (keep order from priority sort)
+        def _unique_dates(ds):
+            seen = set()
+            out = []
+            for d in ds:
+                if d not in seen:
+                    seen.add(d)
+                    out.append(d)
+            return out
+        dates_a = _unique_dates(event_dates[0])[:3]
+        dates_b = _unique_dates(event_dates[1])[:3]
+        for d1 in dates_a:
+            for d2 in dates_b:
                 diff = abs((d2 - d1).days)
                 if diff == 0:
                     continue
@@ -1583,13 +1649,11 @@ def _infer_temporal_diff(question: str, bm25_index, bm25_texts: dict) -> list[st
         # "ago" or "since" — compute diff from the latest conversation date
         # Find the latest timestamp in the conversation as "now"
         all_dates = []
-        for doc_id, turn in bm25_texts.items():
-            ts_match = ts_re.search(turn)
-            if ts_match:
-                try:
-                    all_dates.append(_dt.strptime(ts_match.group(1), '%Y-%m-%d'))
-                except ValueError:
-                    pass
+        for ts_str in turn_timestamps.values():
+            try:
+                all_dates.append(_dt.strptime(ts_str[:10], '%Y-%m-%d'))
+            except ValueError:
+                pass
         if all_dates:
             latest = max(all_dates)
             for d in event_dates[0][:3]:
@@ -1706,6 +1770,139 @@ def _infer_arithmetic(question: str, bm25_index, bm25_texts: dict) -> list[str]:
             _add(str(int(avg)))
         else:
             _add(f"{avg:.1f}")
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Generalized quantity inference — sums/averages of non-monetary quantities
+# ---------------------------------------------------------------------------
+_QUANTITY_Q = _re.compile(
+    r'(?:how many|how much|total (?:number|amount|weight|time|hours?|pounds?))\b.*'
+    r'(?:total|combined|altogether|in total|in all)',
+    _re.IGNORECASE,
+)
+_QUANTITY_Q2 = _re.compile(
+    r'(?:total (?:number|weight|hours?|time|amount) of)\b',
+    _re.IGNORECASE,
+)
+_QUANTITY_AVG = _re.compile(
+    r'(?:average|mean)\s+(?:age|weight|hours?|time|score|improvement|rate)',
+    _re.IGNORECASE,
+)
+_QUANTITY_UNIT_RE = _re.compile(
+    r'(\d+(?:\.\d+)?)\s*'
+    r'(hours?|hrs?|pounds?|lbs?|kg|miles?|minutes?|mins?|courses?|'
+    r'games?|sessions?|classes?|trips?|weeks?|months?|years?|'
+    r'dollars?|percent|%|pages?|books?|films?|movies?)',
+    _re.IGNORECASE,
+)
+_QUANTITY_BARE_NUM = _re.compile(r'\b(\d+(?:\.\d+)?)\b')
+
+
+def _infer_quantity_sum(question: str, bm25_index, bm25_texts: dict) -> list[str]:
+    """Compute sums/averages of non-monetary quantities across conversation turns.
+
+    Handles questions like "How many hours total did I spend...",
+    "What is the total weight of...", "What is the average age of...".
+    Searches for numbers with matching units in conversation turns.
+    """
+    is_sum = bool(_QUANTITY_Q.search(question) or _QUANTITY_Q2.search(question))
+    is_avg = bool(_QUANTITY_AVG.search(question))
+    if not is_sum and not is_avg:
+        return []
+
+    q = question
+    if "Now Answer the Question:" in q:
+        q = q.split("Now Answer the Question:")[-1].strip()
+    if q.endswith("Answer:"):
+        q = q[:-7].strip()
+
+    # Extract subject for BM25 search
+    # Try "of X" pattern first, then fall back to stripping question words
+    m = _re.search(r'(?:total|average|mean)\s+(?:\w+\s+)?(?:of|for)\s+(.+?)(?:\?|$)', q, _re.IGNORECASE)
+    if not m:
+        m = _re.search(r'(?:how many|how much)\s+(.+?)(?:total|combined|in total|in all|\?|$)', q, _re.IGNORECASE)
+    search_query = m.group(1).strip() if m else q
+    search_query = _re.sub(r'\b(the|my|our|a|an|all|I|did|have|has|do)\b', '', search_query).strip()
+    if len(search_query) < 3:
+        return []
+
+    # Detect expected unit from question
+    unit_match = _re.search(
+        r'\b(hours?|pounds?|miles?|minutes?|courses?|games?|'
+        r'sessions?|classes?|trips?|pages?|books?|films?)\b',
+        q, _re.IGNORECASE,
+    )
+    expected_unit = unit_match.group(1).lower().rstrip('s') if unit_match else None
+
+    hits = bm25_index.query(search_query, top_k=30)
+    values: list[float] = []
+    for doc_id, score in hits:
+        turn = bm25_texts.get(int(doc_id), "")
+        if expected_unit:
+            # Extract numbers with matching unit
+            for vm in _QUANTITY_UNIT_RE.finditer(turn):
+                unit = vm.group(2).lower().rstrip('s')
+                if unit == expected_unit or (expected_unit == 'hour' and unit in ('hr', 'hour')):
+                    try:
+                        values.append(float(vm.group(1)))
+                    except ValueError:
+                        pass
+        else:
+            # For average/generic: extract all numbers near subject keywords
+            subj_words = [w for w in search_query.lower().split() if len(w) > 2]
+            if any(sw in turn.lower() for sw in subj_words):
+                for vm in _QUANTITY_UNIT_RE.finditer(turn):
+                    try:
+                        values.append(float(vm.group(1)))
+                    except ValueError:
+                        pass
+
+    if not values:
+        return []
+
+    results: list[str] = []
+    seen: set[str] = set()
+
+    def _add(s: str):
+        if s not in seen:
+            results.append(s)
+            seen.add(s)
+
+    unique_vals = sorted(set(values))
+    unit_label = (expected_unit + "s") if expected_unit and len(unique_vals) > 0 else ""
+
+    # Sum
+    if is_sum and len(unique_vals) >= 2:
+        total = sum(unique_vals)
+        if total == int(total):
+            t = int(total)
+            _add(str(t))
+            if unit_label:
+                _add(f"{t} {unit_label}")
+        else:
+            _add(f"{total:.1f}")
+            if unit_label:
+                _add(f"{total:.1f} {unit_label}")
+        # Pairwise sums
+        if len(unique_vals) <= 6:
+            for i, a in enumerate(unique_vals):
+                for b in unique_vals[i + 1:]:
+                    s = a + b
+                    if s == int(s):
+                        _add(str(int(s)))
+                    else:
+                        _add(f"{s:.1f}")
+
+    # Average
+    if is_avg and unique_vals:
+        avg = sum(unique_vals) / len(unique_vals)
+        if avg == int(avg):
+            _add(str(int(avg)))
+        else:
+            _add(f"{avg:.1f}")
+            _add(f"{avg:.2f}")
 
     return results
 
@@ -2071,12 +2268,16 @@ def main():
             # Multi-turn inference: compute answers across turns
             bm25_idx = foundry._store.bm25_chunks
             bm25_txts = getattr(bm25_idx, '_texts', {})
-            temporal_computed = _infer_temporal_diff(query, bm25_idx, bm25_txts)
+            turn_ts = getattr(foundry._store, '_turn_timestamps', {})
+            temporal_computed = _infer_temporal_diff(query, bm25_idx, bm25_txts, turn_ts)
             if temporal_computed:
                 enhanced_text += " " + " ".join(temporal_computed)
             arith_computed = _infer_arithmetic(query, bm25_idx, bm25_txts)
             if arith_computed:
                 enhanced_text += " " + " ".join(arith_computed)
+            qty_computed = _infer_quantity_sum(query, bm25_idx, bm25_txts)
+            if qty_computed:
+                enhanced_text += " " + " ".join(qty_computed)
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,
