@@ -12,6 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import time
+import uuid
 from typing import Any, Optional
 
 from foundry.ingestion import (
@@ -29,6 +30,7 @@ from foundry.ingestion import (
     fact_from_triple,
     infer_type,
     parse_conversation,
+    segment_events,
     track_cooccurrences,
     verify_grounding,
 )
@@ -40,7 +42,7 @@ from foundry.retrieval import (
     RetrievalTrace,
     search_temporal as retrieval_search_temporal,
 )
-from foundry.storage import EntityGraph, EntityNode, Fact, FoundryStore, RawChunk, TemporalEvent, _normalize_name, _normalize_predicate
+from foundry.storage import EntityGraph, EntityNode, EventFrame, Fact, FoundryStore, RawChunk, TemporalEvent, _normalize_name, _normalize_predicate
 from foundry.writeback import SupersessionEngine
 
 import re as _re
@@ -428,6 +430,8 @@ class Foundry:
             report.cooccurrences += chunk_report.cooccurrences
             report.grounding_failures.extend(chunk_report.grounding_failures)
 
+        self._build_event_frames()
+
         self.rebuild_derived()
         self.rebuild_inferred(self.config.synonym_dict)
         grounded, total, failures = self.grounding_report()
@@ -450,6 +454,17 @@ class Foundry:
     ) -> IngestionReport:
         if chunk is None:
             raise TypeError("chunk cannot be None")
+        # Ensure the chunk's turn is in session context for gist lookup
+        known_turns = {n.turn_idx for n in self._session.turns}
+        if chunk.turn_idx not in known_turns:
+            self._session.turns.append(
+                ConversationNode(
+                    turn_idx=chunk.turn_idx,
+                    role=chunk.role,
+                    text=chunk.text,
+                    session_time=chunk.session_time,
+                )
+            )
         report = self._ingest_chunk_impl(
             chunk,
             triples=triples,
@@ -457,6 +472,7 @@ class Foundry:
             resolver=EntityResolver(self._store),
             existing_entities={entity.canonical for entity in self._store.entity_graph.all_entities()},
         )
+        self._build_event_frames(turn_indices=[chunk.turn_idx])
         self.rebuild_derived()
         self.rebuild_inferred(self.config.synonym_dict)
         grounded, total, failures = self.grounding_report()
@@ -704,6 +720,95 @@ class Foundry:
             for facts in entity.facts.values():
                 for fact in facts:
                     self._supersession.add_fact(fact)
+
+    def _build_event_frames(self, turn_indices: list[int] | None = None) -> None:
+        """Build EventFrames from the entity graph and add to the store.
+
+        Collects per-turn entity sets from the entity graph, segments turns
+        using ``segment_events()``, then creates doubly-linked EventFrame
+        objects with gist = first turn's text[:200].
+
+        If *turn_indices* is ``None``, all turns with entity mentions are
+        used.  When called from ``ingest_chunk()`` for a single chunk, pass
+        the chunk's ``[turn_idx]`` explicitly.
+        """
+        # Step 1: Build per-turn entity sets from entity graph
+        turn_entity_sets: dict[int, set[str]] = {}
+        for entity in self._store.entity_graph.all_entities():
+            for tidx in entity.mention_turns:
+                turn_entity_sets.setdefault(tidx, set()).add(entity.canonical)
+
+        if not turn_entity_sets:
+            return
+
+        # Determine which turns to segment
+        if turn_indices is not None:
+            ordered_turns = sorted(turn_indices)
+        else:
+            ordered_turns = sorted(turn_entity_sets.keys())
+
+        if not ordered_turns:
+            return
+
+        # Step 2: Segment turns into event groups
+        segments = segment_events(ordered_turns, turn_entity_sets)
+
+        if not segments:
+            return
+
+        # Build a lookup from turn_idx -> ConversationNode for gist/timestamp
+        turn_lookup: dict[int, ConversationNode] = {}
+        for node in self._session.turns:
+            turn_lookup[node.turn_idx] = node
+
+        # Step 3: Build frames with doubly-linked list pointers
+        prev_frame_id: str | None = None
+        for segment_turns in segments:
+            frame_id = str(uuid.uuid4())
+
+            # Collect entities for this segment using pre-built turn_entity_sets
+            frame_entities: set[str] = set()
+            for tidx in segment_turns:
+                frame_entities.update(turn_entity_sets.get(tidx, set()))
+
+            # Collect fact_ids for turns in this segment
+            segment_turn_set = set(segment_turns)
+            frame_fact_ids: list[str] = []
+            for entity in self._store.entity_graph.all_entities():
+                if entity.canonical not in frame_entities:
+                    continue
+                for pred_facts in entity.facts.values():
+                    for f in pred_facts:
+                        if f.turn_idx in segment_turn_set:
+                            frame_fact_ids.append(f.id)
+
+            # Gist: first turn's text[:200]
+            gist = ""
+            first_ts: datetime | None = None
+            first_turn_idx = segment_turns[0]
+            first_node = turn_lookup.get(first_turn_idx)
+            if first_node is not None:
+                gist = first_node.text[:200]
+                first_ts = first_node.session_time
+
+            frame = EventFrame(
+                id=frame_id,
+                turns=list(segment_turns),
+                timestamp=first_ts,
+                gist=gist,
+                entities=sorted(frame_entities),
+                fact_ids=frame_fact_ids,
+                prev=prev_frame_id,
+            )
+            self._store.event_frames.add(frame)
+
+            # Wire prev frame's next pointer back to this frame
+            if prev_frame_id is not None:
+                prev_frame = self._store.event_frames.get(prev_frame_id)
+                if prev_frame is not None:
+                    prev_frame.next = frame_id
+
+            prev_frame_id = frame_id
 
     def _ingest_chunk_impl(
         self,

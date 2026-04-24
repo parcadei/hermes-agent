@@ -366,6 +366,68 @@ def chunk_turns(turns: list[ConversationTurn], chunk_size: int = 512) -> list[Ra
     return chunks
 
 
+def segment_events(
+    turn_indices: list[int],
+    turn_entity_sets: dict[int, set[str]],
+    min_overlap: int = 1,
+) -> list[list[int]]:
+    """Group consecutive turns into event segments based on entity overlap.
+
+    Two consecutive turns stay in the same segment if they share at least
+    ``min_overlap`` entities with the **segment's entity union** (not just the
+    previous turn).  A topic shift (insufficient overlap) starts a new segment.
+
+    Turns with no extracted entities are attached to the previous segment
+    (they are continuations, not topic shifts).
+
+    Args:
+        turn_indices: Ordered list of turn indices.
+        turn_entity_sets: Mapping from turn index to set of entity canonicals
+            mentioned in that turn.
+        min_overlap: Minimum shared entities to stay in same segment.
+
+    Returns:
+        List of turn-index groups.  Each group is one event's turns.
+    """
+    if not turn_indices:
+        return []
+
+    segments: list[list[int]] = []
+    current_segment: list[int] = []
+    current_union: set[str] = set()
+
+    for idx in turn_indices:
+        entities = turn_entity_sets.get(idx, set())
+
+        if not current_segment:
+            # First turn always starts the first segment.
+            current_segment.append(idx)
+            current_union |= entities
+            continue
+
+        if not entities:
+            # No entities -- treat as continuation of the current segment.
+            current_segment.append(idx)
+            continue
+
+        overlap = len(current_union & entities)
+
+        if overlap >= min_overlap:
+            # Enough entity overlap -- same topic, extend segment.
+            current_segment.append(idx)
+            current_union |= entities
+        else:
+            # Topic shift -- finalize current segment, start new one.
+            segments.append(current_segment)
+            current_segment = [idx]
+            current_union = set(entities)
+
+    if current_segment:
+        segments.append(current_segment)
+
+    return segments
+
+
 def infer_type(entity: FacetEntity) -> Optional[str]:
     """Infer a normalized entity type from the `what` facet."""
 

@@ -316,6 +316,48 @@ class RawChunk:
 
 
 @dataclass
+class EventFrame:
+    """An episodic event frame binding turns, entities, and facts into a coherent episode."""
+
+    id: str
+    turns: list[int]
+    timestamp: Optional[datetime] = None
+    gist: str = ""
+    entities: list[str] = field(default_factory=list)
+    fact_ids: list[str] = field(default_factory=list)
+    prev: Optional[str] = None
+    next: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.timestamp = _parse_datetime(self.timestamp)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "turns": list(self.turns),
+            "timestamp": _serialize_datetime(self.timestamp),
+            "gist": self.gist,
+            "entities": list(self.entities),
+            "fact_ids": list(self.fact_ids),
+            "prev": self.prev,
+            "next": self.next,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EventFrame":
+        return cls(
+            id=payload["id"],
+            turns=list(payload["turns"]),
+            timestamp=_parse_datetime(payload.get("timestamp")),
+            gist=payload.get("gist", ""),
+            entities=list(payload.get("entities", [])),
+            fact_ids=list(payload.get("fact_ids", [])),
+            prev=payload.get("prev"),
+            next=payload.get("next"),
+        )
+
+
+@dataclass
 class TemporalEvent:
     """A temporally-grounded event with an Allen interval."""
 
@@ -1656,6 +1698,84 @@ class RawChunkStore:
         return store
 
 
+class EventFrameIndex:
+    """Index of event frames with turn-level and neighbor lookups."""
+
+    def __init__(self) -> None:
+        self._frames: dict[str, EventFrame] = {}
+        self._turn_to_frame: dict[int, str] = {}
+
+    def add(self, frame: EventFrame) -> None:
+        """Store a frame and index all its turns."""
+        self._frames[frame.id] = frame
+        for turn_idx in frame.turns:
+            self._turn_to_frame[turn_idx] = frame.id
+
+    def get(self, frame_id: str) -> Optional[EventFrame]:
+        """Retrieve a frame by its id, or None if not found."""
+        return self._frames.get(frame_id)
+
+    def get_by_turn(self, turn_idx: int) -> Optional[EventFrame]:
+        """Return the frame containing the given turn index, or None."""
+        frame_id = self._turn_to_frame.get(turn_idx)
+        if frame_id is None:
+            return None
+        return self._frames.get(frame_id)
+
+    def get_neighbors(self, frame_id: str, window: int = 1) -> list[EventFrame]:
+        """Follow prev/next pointers up to *window* steps in each direction.
+
+        Returns neighboring frames (excluding the center frame itself).
+        """
+        center = self._frames.get(frame_id)
+        if center is None:
+            return []
+
+        seen: set[str] = {frame_id}
+        result: list[EventFrame] = []
+
+        # Walk backward via prev
+        cur = center
+        for _ in range(window):
+            if cur.prev is None:
+                break
+            prev_frame = self._frames.get(cur.prev)
+            if prev_frame is None or prev_frame.id in seen:
+                break
+            seen.add(prev_frame.id)
+            result.append(prev_frame)
+            cur = prev_frame
+
+        # Walk forward via next
+        cur = center
+        for _ in range(window):
+            if cur.next is None:
+                break
+            next_frame = self._frames.get(cur.next)
+            if next_frame is None or next_frame.id in seen:
+                break
+            seen.add(next_frame.id)
+            result.append(next_frame)
+            cur = next_frame
+
+        return result
+
+    def __len__(self) -> int:
+        return len(self._frames)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "frames": [self._frames[fid].to_dict() for fid in sorted(self._frames)],
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EventFrameIndex":
+        index = cls()
+        for frame_data in payload.get("frames", []):
+            index.add(EventFrame.from_dict(frame_data))
+        return index
+
+
 class EntityGraph:
     """Mutable graph of entities keyed by canonical name."""
 
@@ -1777,6 +1897,7 @@ class FoundryStore:
     entity_graph: EntityGraph = field(default_factory=EntityGraph)
     inferred_graph: EntityGraph = field(default_factory=EntityGraph)
     derived: DerivedGraph = field(default_factory=DerivedGraph)
+    event_frames: EventFrameIndex = field(default_factory=EventFrameIndex)
 
     def _build_manifest(self) -> dict[str, Any]:
         return {
@@ -1904,6 +2025,7 @@ class FoundryStore:
             "entity_graph": self.entity_graph.to_dict(),
             "inferred_graph": self.inferred_graph.to_dict(),
             "derived": self.derived.to_dict(),
+            "event_frames": self.event_frames.to_dict(),
         }
 
     @classmethod
@@ -1925,6 +2047,7 @@ class FoundryStore:
         store.entity_graph = EntityGraph.from_dict(payload.get("entity_graph", {}))
         store.inferred_graph = EntityGraph.from_dict(payload.get("inferred_graph", {}))
         store.derived = DerivedGraph.from_dict(payload.get("derived", {}))
+        store.event_frames = EventFrameIndex.from_dict(payload.get("event_frames", {}))
         return store
 
     @staticmethod

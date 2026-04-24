@@ -259,6 +259,12 @@ def parse_args():
                         help="SentenceTransformer model for cosine search")
     parser.add_argument("--rerank_model", type=str, default="mixedbread-ai/mxbai-rerank-base-v1",
                         help="Cross-encoder model for reranking")
+    parser.add_argument("--contiguity_window", type=int, default=0,
+                        help="Temporal contiguity: expand each retrieved turn with ±N neighbors "
+                             "before reranking (EM-LLM style). 0=off, 1=±1 turns, 2=±2 turns.")
+    parser.add_argument("--event_frames", action="store_true",
+                        help="Use event-frame-based temporal contiguity instead of doc_id±N. "
+                             "Frames are built during ingestion via topic-shift segmentation.")
 
     # Faceted cache (pre-computed Qwen2.5-7B extractions)
     parser.add_argument("--faceted_cache", type=str, default=None,
@@ -287,6 +293,24 @@ def parse_args():
     parser.add_argument("--cot", action="store_true",
                         help="Use chain-of-thought generation: LLM reasons step-by-step, "
                              "then final answer is extracted.")
+
+    # Oracle retrieval (recursive memory oracle)
+    parser.add_argument("--use_oracle", action="store_true",
+                        help="Use recursive memory oracle for retrieval. "
+                             "Requires --faceted_cache (v9 format). "
+                             "Graph-based entity-aware retrieval with BM25 fallback.")
+
+    # Code oracle (SLM code generation for arithmetic questions)
+    parser.add_argument("--code_oracle", action="store_true",
+                        help="Use SLM code generation for computational questions "
+                             "(replaces regex-based _infer_* post-processing). "
+                             "Requires local LLM at --code_oracle_url.")
+    parser.add_argument("--code_oracle_url", type=str,
+                        default="http://127.0.0.1:1234/v1/chat/completions",
+                        help="URL for code oracle SLM")
+    parser.add_argument("--code_oracle_model", type=str,
+                        default="qwen2.5-3b-instruct",
+                        help="Model name for code oracle SLM")
 
     return parser.parse_args()
 
@@ -2253,6 +2277,20 @@ def main():
             else:
                 print(f"  Ingested in {ingest_time:.1f}s, {n_links} type hierarchy links")
 
+            # Build oracle store for NEI detection and/or oracle retrieval
+            if faceted_cache:
+                from foundry.eval.recursive_oracle import OracleStore
+                _oracle_store = OracleStore()
+                # Build chunk_hash → text mapping from this context's chunks
+                _oracle_chunks_text = {}
+                for chunk_text in chunks:
+                    h = hashlib.md5(chunk_text.encode()).hexdigest()
+                    _oracle_chunks_text[h] = chunk_text
+                # Ingest only the v9 entries for this context's chunks
+                ctx_v9 = {h: faceted_cache[h] for h in _oracle_chunks_text if h in faceted_cache}
+                _oracle_store.ingest_v9(ctx_v9, _oracle_chunks_text)
+                print(f"  Oracle store: {_oracle_store.stats()}")
+
             # Rebuild BM25 with turn-level granularity.
             raw_context = conversation_creator.contexts[context_idx]
             _rebuild_bm25_with_turns(foundry, raw_context)
@@ -2303,6 +2341,43 @@ def main():
                         for s in _trace.steps
                     ],
                 })
+            elif args.use_oracle:
+                # Oracle augments recall(): recall() retrieves, oracle enriches
+                from foundry.retrieval import recall
+                from foundry.eval.recursive_oracle import oracle_enrich
+                embed_fn = None
+                if '_embed_model' in dir():
+                    embed_fn = lambda text: _embed_model.encode(text, normalize_embeddings=True)
+                reranker = None
+                if args.rerank_model:
+                    from foundry.retrieval import CrossEncoderReranker
+                    if not hasattr(parse_args, '_reranker'):
+                        parse_args._reranker = CrossEncoderReranker(args.rerank_model, top_k=10)
+                    reranker = parse_args._reranker
+                params = decompose_recall_params(retrieval_query)
+                # Step 1: recall() does retrieval (BM25+cosine+rerank+aggregate+temporal)
+                evidence = recall(
+                    foundry._store,
+                    retrieval_query,
+                    entity=params["entity"],
+                    predicate=params["predicate"],
+                    time=params["time"],
+                    top_k=args.retrieve_top_k,
+                    char_budget=args.char_budget,
+                    embed_fn=embed_fn,
+                    reranker=reranker,
+                    contiguity_window=args.contiguity_window,
+                    use_event_frames=getattr(args, 'event_frames', False),
+                )
+                # Step 2: oracle enriches with structured graph context
+                evidence = oracle_enrich(
+                    _oracle_store,
+                    evidence,
+                    retrieval_query,
+                    entity=params["entity"],
+                    predicate=params["predicate"],
+                    char_budget=args.char_budget,
+                )
             elif args.use_recall:
                 from foundry.retrieval import recall
                 embed_fn = None
@@ -2325,6 +2400,8 @@ def main():
                     char_budget=args.char_budget,
                     embed_fn=embed_fn,
                     reranker=reranker,
+                    contiguity_window=args.contiguity_window,
+                    use_event_frames=getattr(args, 'event_frames', False),
                 )
             else:
                 # Direct BM25 with high top_k — bypasses AgenticRetriever
@@ -2401,6 +2478,7 @@ def main():
             bm25_idx = foundry._store.bm25_chunks
             bm25_txts = getattr(bm25_idx, '_texts', {})
             turn_ts = getattr(foundry._store, '_turn_timestamps', {})
+            # Regex inference first (trusted, hand-tuned)
             temporal_computed = _infer_temporal_diff(query, bm25_idx, bm25_txts, turn_ts)
             if temporal_computed:
                 enhanced_text += " " + " ".join(temporal_computed)
@@ -2410,6 +2488,16 @@ def main():
             qty_computed = _infer_quantity_sum(query, bm25_idx, bm25_txts)
             if qty_computed:
                 enhanced_text += " " + " ".join(qty_computed)
+            # Code oracle as FALLBACK only — fires when all regex paths return nothing
+            if getattr(args, 'code_oracle', False) and not (temporal_computed or arith_computed or qty_computed):
+                from foundry.eval.code_oracle import code_oracle_infer
+                oracle_computed = code_oracle_infer(
+                    query, evidence or "", turn_ts,
+                    api_url=args.code_oracle_url,
+                    model=args.code_oracle_model,
+                )
+                if oracle_computed:
+                    enhanced_text += " " + " ".join(oracle_computed)
             # Generate inclusive-day suffixes from computed temporal values.
             # _add_inclusive_day_suffix only scans first line (LLM answer),
             # so we directly generate the suffix from temporal_computed.
@@ -2437,6 +2525,17 @@ def main():
                                 inclusive_parts.append(f"{n} {unit}{ago}.")
                 if inclusive_parts:
                     enhanced_text += " " + " ".join(inclusive_parts)
+            # NEI detection via oracle entity knowledge (post-processing)
+            if faceted_cache and '_oracle_store' in dir():
+                from foundry.eval.recursive_oracle import oracle_nei_detect
+                _ctx_hashes = set(_oracle_chunks_text.keys()) if '_oracle_chunks_text' in dir() else None
+                is_nei, nei_reason = oracle_nei_detect(
+                    _oracle_store, query, answer_text, _ctx_hashes,
+                )
+                if is_nei:
+                    nei_text = f"The information provided is not enough. {nei_reason}"
+                    enhanced_text = nei_text + "\n" + enhanced_text
+
             output = {
                 "output": enhanced_text,
                 "parsed_output": enhanced_text,

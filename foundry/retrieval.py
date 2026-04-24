@@ -987,6 +987,8 @@ def recall(
     char_budget: int = 12000,
     embed_fn: Optional[Callable[[str], np.ndarray]] = None,
     reranker: Optional["CrossEncoderReranker"] = None,
+    contiguity_window: int = 0,
+    use_event_frames: bool = False,
 ) -> str:
     """Single retrieval function — the LLM fills entity/predicate/time,
     the system auto-configures which engines to use.
@@ -1015,6 +1017,9 @@ def recall(
         char_budget: Max total characters in returned evidence.
         embed_fn: Embedding function for cosine search.
         reranker: CrossEncoderReranker for cross-encoder reranking.
+        contiguity_window: Fallback doc_id +/- N expansion (old approach).
+        use_event_frames: If True and event frames exist, use episodic
+            frame boundaries for contiguity instead of doc_id +/- N.
 
     Returns:
         Evidence string (concatenated turn texts, separated by newlines).
@@ -1041,6 +1046,8 @@ def recall(
             evidence = _recall_retrieve(
                 store, query, top_k=top_k, char_budget=remaining,
                 embed_fn=embed_fn, reranker=reranker,
+                contiguity_window=contiguity_window,
+                use_event_frames=use_event_frames,
             )
             if evidence:
                 parts.append(evidence)
@@ -1078,6 +1085,8 @@ def recall(
             evidence = _recall_retrieve(
                 store, query, top_k=top_k, char_budget=remaining,
                 embed_fn=embed_fn, reranker=reranker,
+                contiguity_window=contiguity_window,
+                use_event_frames=use_event_frames,
             )
             if evidence:
                 parts.append(evidence)
@@ -1087,6 +1096,8 @@ def recall(
     return _recall_retrieve(
         store, query, top_k=top_k, char_budget=char_budget,
         embed_fn=embed_fn, reranker=reranker,
+        contiguity_window=contiguity_window,
+        use_event_frames=use_event_frames,
     )
 
 
@@ -1118,10 +1129,21 @@ def _recall_retrieve(
     char_budget: int = 12000,
     embed_fn: Optional[Callable[[str], np.ndarray]] = None,
     reranker: Optional["CrossEncoderReranker"] = None,
+    contiguity_window: int = 0,
+    use_event_frames: bool = False,
 ) -> str:
     """Core retrieval: BM25 + cosine RRF + cross-encoder rerank.
 
     Uses all available infrastructure automatically — no depth knob.
+
+    If ``use_event_frames`` is True and the store has populated event
+    frames, each retrieved turn is looked up in the EventFrameIndex and
+    turns from neighboring frames (prev/next) are added as bonus
+    candidates with attenuated score (score * 0.1).  This replaces the
+    naive doc_id +/- 1 contiguity approach with episodic boundaries.
+
+    If ``use_event_frames`` is False or no frames exist, falls back to
+    the ``contiguity_window`` doc_id +/- N approach when window > 0.
     """
     evidence_parts: list[str] = []
     seen_ids: set[int] = set()
@@ -1164,6 +1186,51 @@ def _recall_retrieve(
     # RRF merge (2-way: BM25 + cosine)
     merged = _rrf_merge([bm25_hits, cosine_hits]) if cosine_hits else bm25_hits
 
+    # Event-frame contiguity: use episodic boundaries instead of raw doc_id+/-1
+    _used_event_frames = False
+    if (
+        use_event_frames
+        and hasattr(store, "event_frames")
+        and len(store.event_frames) > 0
+        and merged
+    ):
+        all_doc_ids = set(bm25_texts.keys())
+        seen = {int(d) for d, _s in merged}
+        neighbors: list[tuple[int, float]] = []
+        for doc_id, score in merged[:top_k]:
+            doc_id = int(doc_id)
+            # Look up which event frame contains this turn
+            frame = store.event_frames.get_by_turn(doc_id)
+            if frame is None:
+                continue
+            # Get neighboring frames (prev/next)
+            neighbor_frames = store.event_frames.get_neighbors(frame.id, window=1)
+            for nf in neighbor_frames:
+                for turn_idx in nf.turns:
+                    if turn_idx in all_doc_ids and turn_idx not in seen:
+                        seen.add(turn_idx)
+                        neighbors.append((turn_idx, score * 0.1))
+        if neighbors:
+            merged = list(merged) + neighbors
+            _used_event_frames = True
+
+    # Fallback: temporal contiguity via doc_id +/- N
+    if not _used_event_frames and contiguity_window > 0 and merged:
+        all_doc_ids = set(bm25_texts.keys())
+        seen = {int(d) for d, _s in merged}
+        neighbors: list[tuple[int, float]] = []
+        for doc_id, score in merged[:top_k]:
+            doc_id = int(doc_id)
+            for offset in range(-contiguity_window, contiguity_window + 1):
+                if offset == 0:
+                    continue
+                neighbor = doc_id + offset
+                if neighbor in all_doc_ids and neighbor not in seen:
+                    seen.add(neighbor)
+                    neighbors.append((neighbor, score * 0.1))
+        if neighbors:
+            merged = list(merged) + neighbors
+
     # Cross-encoder rerank (if reranker available)
     if reranker is not None and merged:
         candidates = []
@@ -1178,8 +1245,10 @@ def _recall_retrieve(
                     break
             return "\n".join(evidence_parts)
 
-    # No reranker — use merged ranking directly
-    for doc_id, _score in merged[:top_k]:
+    # No reranker — use merged ranking directly.
+    # After contiguity expansion, merged may contain bonus candidates beyond
+    # top_k; emit all of them (char_budget in _add() bounds the output).
+    for doc_id, _score in merged:
         text = _full_text(int(doc_id))
         if not text.strip():
             continue
