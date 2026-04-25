@@ -198,6 +198,83 @@ def _rebuild_bm25_with_turns(foundry: "Foundry", raw_context) -> None:
     print(f"  Rebuilt BM25: {len(all_turns_raw)} parsed turns → {len(all_turns)} indexed turns")
 
 
+def _rebuild_bm25_from_sessions(foundry: "Foundry", lme_question: dict):
+    """Build turn-level BM25 directly from original LME haystack_sessions.
+
+    Unlike _rebuild_bm25_with_turns (which needs parse_chunk for the MABench
+    stringified format), this reads the structured session dicts directly.
+    """
+    from foundry.storage import BM25Index
+    import re as _local_re
+
+    all_turns: list[tuple[str, str]] = []  # (text, role)
+    turn_timestamps: dict[int, str] = {}
+
+    dates = lme_question.get("haystack_dates", [])
+    for sess_idx, sess in enumerate(lme_question["haystack_sessions"]):
+        # Get timestamp for this session
+        ts_iso = ""
+        if sess_idx < len(dates):
+            ts_iso = _local_re.sub(
+                r'(\d{4})/(\d{2})/(\d{2})\s*\([^)]+\)\s*',
+                r'\1-\2-\3 ', dates[sess_idx],
+            ).strip()
+
+        for turn in sess:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            if not content or not content.strip() or len(content.strip()) < 20:
+                continue
+            idx = len(all_turns)
+            if ts_iso:
+                turn_timestamps[idx] = ts_iso
+            role_tag = f"({role}) " if role != "continuation" else ""
+            all_turns.append((f"{role_tag}{content}", role))
+
+    if not all_turns:
+        print("  Skipping turn-level BM25: no turns from sessions")
+        return
+
+    print(f"  Turn-level BM25: {len(all_turns)} turns, {len(turn_timestamps)} with timestamps")
+
+    store = foundry._store
+
+    # Store turn chunks
+    for idx, (turn_text, role) in enumerate(all_turns):
+        turn_chunk = RawChunk(
+            chunk_idx=idx,
+            turn_idx=idx,
+            text=turn_text,
+            role=role,
+        )
+        store.chunks.store(turn_chunk)
+
+    # Realign entity mention_turns
+    entity_names = {}
+    for ent in store.entity_graph.all_entities():
+        entity_names[ent.canonical] = ent
+        for alias in ent.aliases:
+            entity_names[alias] = ent
+    if entity_names:
+        for ent in store.entity_graph.all_entities():
+            ent.mention_turns = set()
+        for idx, (turn_text, _role) in enumerate(all_turns):
+            turn_lower = turn_text.lower()
+            for name, ent in entity_names.items():
+                if name and len(name) > 2 and name in turn_lower:
+                    ent.mention_turns.add(idx)
+        aligned = sum(1 for e in store.entity_graph.all_entities() if e.mention_turns)
+        print(f"  Aligned {aligned}/{len(store.entity_graph)} entity mention_turns to BM25 indices")
+
+    # Build BM25
+    new_bm25 = BM25Index()
+    for idx, (turn_text, role) in enumerate(all_turns):
+        new_bm25.add(idx, turn_text)
+    store.bm25_chunks = new_bm25
+    store._turn_timestamps = turn_timestamps
+    print(f"  Rebuilt BM25: {len(all_turns)} turns indexed")
+
+
 def _embed_turns(foundry: "Foundry", embed_model: str) -> "Any":
     """Embed all turns in the store for cosine similarity search.
 
@@ -234,8 +311,8 @@ def parse_args():
     parser = ArgumentParser(description="Engram MABench evaluation runner")
 
     # Dataset
-    parser.add_argument("--dataset_config", type=str, required=True,
-                        help="Path to MABench dataset config YAML")
+    parser.add_argument("--dataset_config", type=str, required=False, default=None,
+                        help="Path to MABench dataset config YAML (required unless --longmemeval_json)")
     parser.add_argument("--chunk_size", type=int, default=512)
 
     # Engram config
@@ -300,6 +377,11 @@ def parse_args():
                              "Requires --faceted_cache (v9 format). "
                              "Graph-based entity-aware retrieval with BM25 fallback.")
 
+    # Original LongMemEval JSON (per-question haystacks, 500 questions)
+    parser.add_argument("--longmemeval_json", type=str, default=None,
+                        help="Path to original LongMemEval JSON (e.g. longmemeval_s). "
+                             "Each question has its own haystack. Bypasses ConversationCreator.")
+
     # Code oracle (SLM code generation for arithmetic questions)
     parser.add_argument("--code_oracle", action="store_true",
                         help="Use SLM code generation for computational questions "
@@ -313,6 +395,75 @@ def parse_args():
                         help="Model name for code oracle SLM")
 
     return parser.parse_args()
+
+
+# ---------------------------------------------------------------------------
+# Original LongMemEval loader (per-question haystacks)
+# ---------------------------------------------------------------------------
+
+def _load_longmemeval_json(
+    json_path: str,
+    chunk_size: int,
+    gen_max_len: int,
+    max_questions: int | None = None,
+) -> tuple[list[list[str]], list[list[tuple]], list[str]]:
+    """Load original LongMemEval JSON (per-question haystacks).
+
+    Returns (all_chunks, all_qa_pairs, raw_contexts) matching the format
+    expected by the main eval loop.  Each question becomes its own "context".
+    """
+    from utils.eval_other_utils import chunk_text_into_sentences
+
+    with open(json_path) as f:
+        questions = json.load(f)
+
+    if max_questions:
+        questions = questions[:max_questions]
+
+    all_chunks: list[list[str]] = []
+    all_qa_pairs: list[list[tuple]] = []
+    raw_contexts: list[str] = []
+
+    query_tmpl = (
+        "The history chats are between you and a user. "
+        "Based on the relevant chat history, answer the question as concisely "
+        "as you can, using a single phrase if possible. Do not make up an answer. "
+        "If the information is not available in the provided context, reply with "
+        "\"I don't have enough information to answer this question.\"\n"
+        "Now Answer the Question: {question}\nAnswer:"
+    )
+
+    for q in questions:
+        # Build context string from haystack sessions
+        plain_parts: list[str] = []
+        for sess in q["haystack_sessions"]:
+            for turn in sess:
+                role = turn.get("role", "user")
+                content = turn.get("content", "")
+                plain_parts.append(f"{role}: {content}")
+        plain_text = "\n".join(plain_parts)
+        chunks = chunk_text_into_sentences(plain_text, chunk_size=chunk_size)
+        all_chunks.append(chunks)
+
+        # Build query
+        formatted_query = query_tmpl.format(question=q["question"])
+        answer = q["answer"]
+        if not isinstance(answer, list):
+            answer = [answer]
+        qa_pair_id = q.get("question_id", None)
+        all_qa_pairs.append([(formatted_query, answer, qa_pair_id)])
+
+        # Store structured sessions for direct turn-level BM25 rebuild
+        # (parse_chunk can't handle this format — we build turns directly)
+        raw_contexts.append(q)
+
+    print(f"Loaded {len(questions)} questions from {json_path}")
+    print(f"  Question types: ", end="")
+    from collections import Counter as _Ctr
+    types = _Ctr(q["question_type"] for q in questions)
+    print(", ".join(f"{t}={c}" for t, c in sorted(types.items())))
+
+    return all_chunks, all_qa_pairs, raw_contexts
 
 
 # ---------------------------------------------------------------------------
@@ -2110,8 +2261,19 @@ def main():
     args = parse_args()
     start_time = time.time()
 
-    with open(args.dataset_config) as f:
-        dataset_config = yaml.safe_load(f)
+    if args.longmemeval_json:
+        dataset_config = {
+            "chunk_size": args.chunk_size,
+            "sub_dataset": "longmemeval_full",
+            "generation_max_length": 50,
+            "debug": False,
+            "dataset": "Accurate_Retrieval",
+        }
+    elif args.dataset_config:
+        with open(args.dataset_config) as f:
+            dataset_config = yaml.safe_load(f)
+    else:
+        raise ValueError("Either --dataset_config or --longmemeval_json is required")
 
     dataset_config["chunk_size"] = args.chunk_size
     sub_ds = dataset_config["sub_dataset"]
@@ -2151,10 +2313,19 @@ def main():
         reranker_model=None,  # Reranker loaded separately if depth >= 4
     )
 
-    # Load data
-    conversation_creator = ConversationCreator(agent_config, dataset_config)
-    all_chunks = conversation_creator.get_chunks()
-    all_qa_pairs = conversation_creator.get_query_and_answers()
+    # Load data — original LME JSON or MABench format
+    if args.longmemeval_json:
+        all_chunks, all_qa_pairs, _lme_raw_contexts = _load_longmemeval_json(
+            args.longmemeval_json, args.chunk_size, gen_max_len,
+            max_questions=args.max_contexts,
+        )
+        sub_ds = "longmemeval_full"
+        conversation_creator = None  # No ConversationCreator for original LME
+    else:
+        conversation_creator = ConversationCreator(agent_config, dataset_config)
+        all_chunks = conversation_creator.get_chunks()
+        all_qa_pairs = conversation_creator.get_query_and_answers()
+        _lme_raw_contexts = None
 
     total_queries = sum(len(qa) for qa in all_qa_pairs)
     print(f"Dataset: {sub_ds}")
@@ -2292,8 +2463,15 @@ def main():
                 print(f"  Oracle store: {_oracle_store.stats()}")
 
             # Rebuild BM25 with turn-level granularity.
-            raw_context = conversation_creator.contexts[context_idx]
-            _rebuild_bm25_with_turns(foundry, raw_context)
+            if _lme_raw_contexts is not None:
+                raw_context = _lme_raw_contexts[context_idx]
+                if isinstance(raw_context, dict) and "haystack_sessions" in raw_context:
+                    _rebuild_bm25_from_sessions(foundry, raw_context)
+                else:
+                    _rebuild_bm25_with_turns(foundry, raw_context)
+            else:
+                raw_context = conversation_creator.contexts[context_idx]
+                _rebuild_bm25_with_turns(foundry, raw_context)
 
             # Embed turns for cosine search in recall()
             if args.use_recall and args.embed_model:
@@ -2474,23 +2652,10 @@ def main():
             enhanced_text = _add_date_arithmetic(enhanced_text, evidence or "")
             enhanced_text = _add_duration_equivalents(enhanced_text)
             enhanced_text = _add_inclusive_day_suffix(enhanced_text)
-            # Multi-turn inference: compute answers across turns
-            bm25_idx = foundry._store.bm25_chunks
-            bm25_txts = getattr(bm25_idx, '_texts', {})
-            turn_ts = getattr(foundry._store, '_turn_timestamps', {})
-            # Regex inference first (trusted, hand-tuned)
-            temporal_computed = _infer_temporal_diff(query, bm25_idx, bm25_txts, turn_ts)
-            if temporal_computed:
-                enhanced_text += " " + " ".join(temporal_computed)
-            arith_computed = _infer_arithmetic(query, bm25_idx, bm25_txts)
-            if arith_computed:
-                enhanced_text += " " + " ".join(arith_computed)
-            qty_computed = _infer_quantity_sum(query, bm25_idx, bm25_txts)
-            if qty_computed:
-                enhanced_text += " " + " ".join(qty_computed)
-            # Code oracle as FALLBACK only — fires when all regex paths return nothing
-            if getattr(args, 'code_oracle', False) and not (temporal_computed or arith_computed or qty_computed):
+            # Code oracle: SLM generates Python from retrieved evidence → exec → answer
+            if getattr(args, 'code_oracle', False):
                 from foundry.eval.code_oracle import code_oracle_infer
+                turn_ts = getattr(foundry._store, '_turn_timestamps', {})
                 oracle_computed = code_oracle_infer(
                     query, evidence or "", turn_ts,
                     api_url=args.code_oracle_url,
@@ -2498,33 +2663,6 @@ def main():
                 )
                 if oracle_computed:
                     enhanced_text += " " + " ".join(oracle_computed)
-            # Generate inclusive-day suffixes from computed temporal values.
-            # _add_inclusive_day_suffix only scans first line (LLM answer),
-            # so we directly generate the suffix from temporal_computed.
-            if temporal_computed:
-                inclusive_parts: list[str] = []
-                for tc in temporal_computed:
-                    m_tc = _re.match(r'^(\d+)\s+(days?)(\s+ago)?$', tc, _re.IGNORECASE)
-                    if m_tc:
-                        n = int(m_tc.group(1))
-                        unit = m_tc.group(2)
-                        ago = m_tc.group(3) or ""  # preserves " ago" if present
-                        inclusive_parts.append(
-                            f"{n} {unit}{ago}. {n+1} {unit} (including the last day) is also acceptable."
-                        )
-                        # Standalone period-terminated for exact SubEM (e.g. gold "4 days.")
-                        inclusive_parts.append(f"{n+1} {unit}.")
-                        if ago:
-                            inclusive_parts.append(f"{n+1} {unit}{ago}.")
-                        if n > 1:
-                            inclusive_parts.append(
-                                f"{n-1} {unit}{ago}. {n} {unit} (including the last day) is also acceptable."
-                            )
-                            inclusive_parts.append(f"{n} {unit}.")
-                            if ago:
-                                inclusive_parts.append(f"{n} {unit}{ago}.")
-                if inclusive_parts:
-                    enhanced_text += " " + " ".join(inclusive_parts)
             # NEI detection via oracle entity knowledge (post-processing)
             if faceted_cache and '_oracle_store' in dir():
                 from foundry.eval.recursive_oracle import oracle_nei_detect
