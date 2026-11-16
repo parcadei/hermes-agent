@@ -43,8 +43,6 @@ def _no_auto_discovery(monkeypatch):
     async def _noop():
         return []
     monkeypatch.setattr("gateway.platforms.telegram.discover_fallback_ips", _noop)
-    # Mock HTTPXRequest so the builder chain doesn't fail
-    monkeypatch.setattr("gateway.platforms.telegram.HTTPXRequest", lambda **kwargs: MagicMock())
 
 
 @pytest.mark.asyncio
@@ -59,9 +57,9 @@ async def test_connect_rejects_same_host_token_lock(monkeypatch):
     ok = await adapter.connect()
 
     assert ok is False
-    assert adapter.fatal_error_code == "telegram-bot-token_lock"
+    assert adapter.fatal_error_code == "telegram_token_lock"
     assert adapter.has_fatal_error is True
-    assert "already in use" in adapter.fatal_error_message
+    assert "already using this Telegram bot token" in adapter.fatal_error_message
 
 
 @pytest.mark.asyncio
@@ -100,8 +98,6 @@ async def test_polling_conflict_retries_before_fatal(monkeypatch):
     )
     builder = MagicMock()
     builder.token.return_value = builder
-    builder.request.return_value = builder
-    builder.get_updates_request.return_value = builder
     builder.build.return_value = app
     monkeypatch.setattr("gateway.platforms.telegram.Application", SimpleNamespace(builder=MagicMock(return_value=builder)))
 
@@ -176,8 +172,6 @@ async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch):
     )
     builder = MagicMock()
     builder.token.return_value = builder
-    builder.request.return_value = builder
-    builder.get_updates_request.return_value = builder
     builder.build.return_value = app
     monkeypatch.setattr("gateway.platforms.telegram.Application", SimpleNamespace(builder=MagicMock(return_value=builder)))
 
@@ -222,8 +216,6 @@ async def test_connect_marks_retryable_fatal_error_for_startup_network_failure(m
 
     builder = MagicMock()
     builder.token.return_value = builder
-    builder.request.return_value = builder
-    builder.get_updates_request.return_value = builder
     app = SimpleNamespace(
         bot=SimpleNamespace(delete_webhook=AsyncMock(), set_my_commands=AsyncMock()),
         updater=SimpleNamespace(),
@@ -273,8 +265,6 @@ async def test_connect_clears_webhook_before_polling(monkeypatch):
     )
     builder = MagicMock()
     builder.token.return_value = builder
-    builder.request.return_value = builder
-    builder.get_updates_request.return_value = builder
     builder.build.return_value = app
     monkeypatch.setattr(
         "gateway.platforms.telegram.Application",

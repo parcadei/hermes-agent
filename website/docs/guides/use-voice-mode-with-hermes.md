@@ -145,7 +145,6 @@ ELEVENLABS_API_KEY=***
 - `neutts` → free local/on-device TTS
 - `elevenlabs` → best quality
 - `openai` → good middle ground
-- `mistral` → multilingual, native Opus
 
 ### If you use `hermes setup`
 
@@ -164,7 +163,6 @@ voice:
   record_key: "ctrl+b"
   max_recording_seconds: 120
   auto_tts: false
-  beep_enabled: true
   silence_threshold: 200
   silence_duration: 3.0
 

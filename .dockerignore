@@ -5,7 +5,6 @@
 
 # Dependencies
 node_modules
-.venv
 
 # CI/CD
 .github
@@ -14,6 +13,3 @@ node_modules
 .env
 
 *.md
-
-# Runtime data (bind-mounted at /opt/data; must not leak into build context)
-data/

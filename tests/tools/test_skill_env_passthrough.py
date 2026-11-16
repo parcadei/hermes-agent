@@ -7,17 +7,16 @@ from unittest.mock import patch
 
 import pytest
 
-import tools.env_passthrough as _ep_mod
-from tools.env_passthrough import clear_env_passthrough, is_env_passthrough
+from tools.env_passthrough import clear_env_passthrough, is_env_passthrough, reset_config_cache
 
 
 @pytest.fixture(autouse=True)
 def _clean_passthrough():
     clear_env_passthrough()
-    _ep_mod._config_passthrough = None
+    reset_config_cache()
     yield
     clear_env_passthrough()
-    _ep_mod._config_passthrough = None
+    reset_config_cache()
 
 
 def _create_skill(tmp_path, name, frontmatter_extra=""):

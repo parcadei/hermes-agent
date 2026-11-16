@@ -36,9 +36,9 @@ def generate_title(user_message: str, assistant_response: str, timeout: float = 
 
     try:
         response = call_llm(
-            task="title_generation",
+            task="compression",  # reuse compression task config (cheap/fast model)
             messages=messages,
-            max_tokens=500,
+            max_tokens=30,
             temperature=0.3,
             timeout=timeout,
         )

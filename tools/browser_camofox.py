@@ -54,15 +54,7 @@ def get_camofox_url() -> str:
 
 
 def is_camofox_mode() -> bool:
-    """True when Camofox backend is configured and no CDP override is active.
-
-    When the user has explicitly connected to a live Chrome instance via
-    ``/browser connect`` (which sets ``BROWSER_CDP_URL``), the CDP connection
-    takes priority over Camofox so the browser tools operate on the real
-    browser instead of being silently routed to the Camofox backend.
-    """
-    if os.getenv("BROWSER_CDP_URL", "").strip():
-        return False
+    """True when Camofox backend is configured."""
     return bool(get_camofox_url())
 
 
@@ -109,8 +101,7 @@ def _managed_persistence_enabled() -> bool:
     """
     try:
         camofox_cfg = load_config().get("browser", {}).get("camofox", {})
-    except Exception as exc:
-        logger.warning("managed_persistence check failed, defaulting to disabled: %s", exc)
+    except Exception:
         return False
     return bool(camofox_cfg.get("managed_persistence"))
 
@@ -179,22 +170,6 @@ def _drop_session(task_id: Optional[str]) -> Optional[Dict[str, Any]]:
     task_id = task_id or "default"
     with _sessions_lock:
         return _sessions.pop(task_id, None)
-
-
-def camofox_soft_cleanup(task_id: Optional[str] = None) -> bool:
-    """Release the in-memory session without destroying the server-side context.
-
-    When managed persistence is enabled the browser profile (and its cookies)
-    must survive across agent tasks.  This helper drops only the local tracking
-    entry and returns ``True``.  When managed persistence is *not* enabled it
-    does nothing and returns ``False`` so the caller can fall back to
-    :func:`camofox_close`.
-    """
-    if _managed_persistence_enabled():
-        _drop_session(task_id)
-        logger.debug("Camofox soft cleanup for task %s (managed persistence)", task_id)
-        return True
-    return False
 
 
 # ---------------------------------------------------------------------------
@@ -543,13 +518,11 @@ def camofox_vision(question: str, annotate: bool = False,
         )
 
         try:
+            from hermes_cli.config import load_config
             _cfg = load_config()
-            _vision_cfg = _cfg.get("auxiliary", {}).get("vision", {})
-            _vision_timeout = float(_vision_cfg.get("timeout", 120))
-            _vision_temperature = float(_vision_cfg.get("temperature", 0.1))
+            _vision_timeout = int(_cfg.get("auxiliary", {}).get("vision", {}).get("timeout", 120))
         except Exception:
-            _vision_timeout = 120.0
-            _vision_temperature = 0.1
+            _vision_timeout = 120
 
         response = call_llm(
             messages=[{
@@ -565,7 +538,6 @@ def camofox_vision(question: str, annotate: bool = False,
                 ],
             }],
             task="vision",
-            temperature=_vision_temperature,
             timeout=_vision_timeout,
         )
         analysis = (response.choices[0].message.content or "").strip() if response.choices else ""
@@ -600,4 +572,18 @@ def camofox_console(clear: bool = False, task_id: Optional[str] = None) -> str:
     })
 
 
+# ---------------------------------------------------------------------------
+# Cleanup
+# ---------------------------------------------------------------------------
 
+def cleanup_all_camofox_sessions() -> None:
+    """Close all active camofox sessions."""
+    with _sessions_lock:
+        sessions = list(_sessions.items())
+    for task_id, session in sessions:
+        try:
+            _delete(f"/sessions/{session['user_id']}")
+        except Exception:
+            pass
+    with _sessions_lock:
+        _sessions.clear()

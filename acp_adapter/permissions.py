@@ -63,9 +63,6 @@ def make_approval_callback(
             logger.warning("Permission request timed out or failed: %s", exc)
             return "deny"
 
-        if response is None:
-            return "deny"
-
         outcome = response.outcome
         if isinstance(outcome, AllowedOutcome):
             option_id = outcome.option_id

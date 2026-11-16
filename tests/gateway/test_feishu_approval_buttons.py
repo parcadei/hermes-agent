@@ -1,11 +1,12 @@
 """Tests for Feishu interactive card approval buttons."""
 
-import importlib.util
+import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
@@ -22,14 +23,14 @@ if _repo not in sys.path:
 # ---------------------------------------------------------------------------
 def _ensure_feishu_mocks():
     """Provide stubs for lark-oapi / aiohttp.web so the import succeeds."""
-    if importlib.util.find_spec("lark_oapi") is None and "lark_oapi" not in sys.modules:
+    if "lark_oapi" not in sys.modules:
         mod = MagicMock()
         for name in (
             "lark_oapi", "lark_oapi.api.im.v1",
             "lark_oapi.event", "lark_oapi.event.callback_type",
         ):
             sys.modules.setdefault(name, mod)
-    if importlib.util.find_spec("aiohttp") is None and "aiohttp" not in sys.modules:
+    if "aiohttp" not in sys.modules:
         aio = MagicMock()
         sys.modules.setdefault("aiohttp", aio)
         sys.modules.setdefault("aiohttp.web", aio.web)
@@ -38,7 +39,6 @@ def _ensure_feishu_mocks():
 _ensure_feishu_mocks()
 
 from gateway.config import PlatformConfig
-import gateway.platforms.feishu as feishu_module
 from gateway.platforms.feishu import FeishuAdapter
 
 
@@ -72,12 +72,6 @@ def _make_card_action_data(
             ),
         ),
     )
-
-
-def _close_submitted_coro(coro, _loop):
-    """Close scheduled coroutines in sync-handler tests to avoid unawaited warnings."""
-    coro.close()
-    return SimpleNamespace(add_done_callback=lambda *_args, **_kwargs: None)
 
 
 # ===========================================================================
@@ -209,14 +203,14 @@ class TestFeishuExecApproval:
 
 
 # ===========================================================================
-# _resolve_approval — approval state pop + gateway resolution
+# _handle_card_action_event — approval button clicks
 # ===========================================================================
 
-class TestResolveApproval:
-    """Test _resolve_approval pops state and calls resolve_gateway_approval."""
+class TestFeishuApprovalCallback:
+    """Test the approval intercept in _handle_card_action_event."""
 
     @pytest.mark.asyncio
-    async def test_resolves_once(self):
+    async def test_resolves_approval_on_click(self):
         adapter = _make_adapter()
         adapter._approval_state[1] = {
             "session_key": "agent:main:feishu:group:oc_12345",
@@ -224,14 +218,28 @@ class TestResolveApproval:
             "chat_id": "oc_12345",
         }
 
-        with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
-            await adapter._resolve_approval(1, "once", "Norbert")
+        data = _make_card_action_data(
+            action_value={"hermes_action": "approve_once", "approval_id": 1},
+        )
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_user1", "user_name": "Norbert", "user_id_alt": None},
+            ),
+            patch.object(adapter, "_update_approval_card", new_callable=AsyncMock) as mock_update,
+            patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve,
+        ):
+            await adapter._handle_card_action_event(data)
 
         mock_resolve.assert_called_once_with("agent:main:feishu:group:oc_12345", "once")
+        mock_update.assert_called_once_with("msg_001", "Approved once", "Norbert", "once")
+
+        # State should be cleaned up
         assert 1 not in adapter._approval_state
 
     @pytest.mark.asyncio
-    async def test_resolves_deny(self):
+    async def test_deny_button(self):
         adapter = _make_adapter()
         adapter._approval_state[2] = {
             "session_key": "some-session",
@@ -239,13 +247,26 @@ class TestResolveApproval:
             "chat_id": "oc_12345",
         }
 
-        with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
-            await adapter._resolve_approval(2, "deny", "Alice")
+        data = _make_card_action_data(
+            action_value={"hermes_action": "deny", "approval_id": 2},
+            token="tok_deny",
+        )
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_alice", "user_name": "Alice", "user_id_alt": None},
+            ),
+            patch.object(adapter, "_update_approval_card", new_callable=AsyncMock) as mock_update,
+            patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve,
+        ):
+            await adapter._handle_card_action_event(data)
 
         mock_resolve.assert_called_once_with("some-session", "deny")
+        mock_update.assert_called_once_with("msg_002", "Denied", "Alice", "deny")
 
     @pytest.mark.asyncio
-    async def test_resolves_session(self):
+    async def test_session_approval(self):
         adapter = _make_adapter()
         adapter._approval_state[3] = {
             "session_key": "sess-3",
@@ -253,13 +274,26 @@ class TestResolveApproval:
             "chat_id": "oc_99",
         }
 
-        with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
-            await adapter._resolve_approval(3, "session", "Bob")
+        data = _make_card_action_data(
+            action_value={"hermes_action": "approve_session", "approval_id": 3},
+            token="tok_ses",
+        )
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Bob", "user_id_alt": None},
+            ),
+            patch.object(adapter, "_update_approval_card", new_callable=AsyncMock) as mock_update,
+            patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve,
+        ):
+            await adapter._handle_card_action_event(data)
 
         mock_resolve.assert_called_once_with("sess-3", "session")
+        mock_update.assert_called_once_with("msg_003", "Approved for session", "Bob", "session")
 
     @pytest.mark.asyncio
-    async def test_resolves_always(self):
+    async def test_always_approval(self):
         adapter = _make_adapter()
         adapter._approval_state[4] = {
             "session_key": "sess-4",
@@ -267,29 +301,42 @@ class TestResolveApproval:
             "chat_id": "oc_55",
         }
 
-        with patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve:
-            await adapter._resolve_approval(4, "always", "Carol")
+        data = _make_card_action_data(
+            action_value={"hermes_action": "approve_always", "approval_id": 4},
+            token="tok_alw",
+        )
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Carol", "user_id_alt": None},
+            ),
+            patch.object(adapter, "_update_approval_card", new_callable=AsyncMock),
+            patch("tools.approval.resolve_gateway_approval", return_value=1) as mock_resolve,
+        ):
+            await adapter._handle_card_action_event(data)
 
         mock_resolve.assert_called_once_with("sess-4", "always")
 
     @pytest.mark.asyncio
     async def test_already_resolved_drops_silently(self):
         adapter = _make_adapter()
+        # No state for approval_id 99 — already resolved
+
+        data = _make_card_action_data(
+            action_value={"hermes_action": "approve_once", "approval_id": 99},
+            token="tok_gone",
+        )
 
         with patch("tools.approval.resolve_gateway_approval") as mock_resolve:
-            await adapter._resolve_approval(99, "once", "Nobody")
+            await adapter._handle_card_action_event(data)
 
+        # Should NOT resolve — already handled
         mock_resolve.assert_not_called()
 
-# ===========================================================================
-# _handle_card_action_event — non-approval card actions
-# ===========================================================================
-
-class TestNonApprovalCardAction:
-    """Non-approval card actions should still route as synthetic commands."""
-
     @pytest.mark.asyncio
-    async def test_routes_as_synthetic_command(self):
+    async def test_non_approval_actions_route_normally(self):
+        """Non-approval card actions should still become synthetic commands."""
         adapter = _make_adapter()
 
         data = _make_card_action_data(
@@ -304,141 +351,82 @@ class TestNonApprovalCardAction:
             ),
             patch.object(adapter, "get_chat_info", new_callable=AsyncMock, return_value={"name": "Test Chat"}),
             patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+            patch("tools.approval.resolve_gateway_approval") as mock_resolve,
         ):
             await adapter._handle_card_action_event(data)
 
+        # Should NOT resolve any approval
+        mock_resolve.assert_not_called()
+        # Should have routed as synthetic command
         mock_handle.assert_called_once()
         event = mock_handle.call_args[0][0]
         assert "/card button" in event.text
 
 
 # ===========================================================================
-# _on_card_action_trigger — inline card response for approval actions
+# _update_approval_card — card replacement after resolution
 # ===========================================================================
 
-class _FakeCallBackCard:
-    def __init__(self):
-        self.type = None
-        self.data = None
+class TestFeishuUpdateApprovalCard:
+    """Test the card update after approval resolution."""
 
-
-class _FakeP2Response:
-    def __init__(self):
-        self.card = None
-
-
-@pytest.fixture(autouse=False)
-def _patch_callback_card_types(monkeypatch):
-    """Provide real-ish P2CardActionTriggerResponse / CallBackCard for tests."""
-    monkeypatch.setattr(feishu_module, "P2CardActionTriggerResponse", _FakeP2Response)
-    monkeypatch.setattr(feishu_module, "CallBackCard", _FakeCallBackCard)
-
-
-class TestCardActionCallbackResponse:
-    """Test that _on_card_action_trigger returns updated card inline."""
-
-    def test_drops_action_when_loop_not_ready(self, _patch_callback_card_types):
+    @pytest.mark.asyncio
+    async def test_updates_card_on_approve(self):
         adapter = _make_adapter()
-        adapter._loop = None
-        data = _make_card_action_data({"hermes_action": "approve_once", "approval_id": 1})
 
-        with patch("asyncio.run_coroutine_threadsafe") as mock_submit:
-            response = adapter._on_card_action_trigger(data)
+        mock_update = AsyncMock()
+        adapter._client.im.v1.message.update = MagicMock()
 
-        assert response is not None
-        assert response.card is None
-        mock_submit.assert_not_called()
+        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
+            await adapter._update_approval_card(
+                "msg_001", "Approved once", "Norbert", "once"
+            )
 
-    def test_returns_card_for_approve_action(self, _patch_callback_card_types):
+        mock_thread.assert_called_once()
+        # Verify the update request was built
+        call_args = mock_thread.call_args
+        assert call_args[0][0] == adapter._client.im.v1.message.update
+
+    @pytest.mark.asyncio
+    async def test_updates_card_on_deny(self):
         adapter = _make_adapter()
-        adapter._loop = MagicMock()
-        adapter._loop.is_closed = MagicMock(return_value=False)
-        data = _make_card_action_data(
-            {"hermes_action": "approve_once", "approval_id": 1},
-            open_id="ou_bob",
-        )
-        adapter._sender_name_cache["ou_bob"] = ("Bob", 9999999999)
 
-        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
-            response = adapter._on_card_action_trigger(data)
+        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
+            await adapter._update_approval_card(
+                "msg_002", "Denied", "Alice", "deny"
+            )
 
-        assert response is not None
-        assert response.card is not None
-        assert response.card.type == "raw"
-        card = response.card.data
-        assert card["header"]["template"] == "green"
-        assert "Approved once" in card["header"]["title"]["content"]
-        assert "Bob" in card["elements"][0]["content"]
+        mock_thread.assert_called_once()
 
-    def test_returns_card_for_deny_action(self, _patch_callback_card_types):
+    @pytest.mark.asyncio
+    async def test_skips_update_when_not_connected(self):
         adapter = _make_adapter()
-        adapter._loop = MagicMock()
-        adapter._loop.is_closed = MagicMock(return_value=False)
-        data = _make_card_action_data(
-            {"hermes_action": "deny", "approval_id": 2},
-        )
+        adapter._client = None
 
-        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
-            response = adapter._on_card_action_trigger(data)
+        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
+            await adapter._update_approval_card(
+                "msg_001", "Approved", "Bob", "once"
+            )
 
-        assert response.card is not None
-        card = response.card.data
-        assert card["header"]["template"] == "red"
-        assert "Denied" in card["header"]["title"]["content"]
+        mock_thread.assert_not_called()
 
-    def test_ignores_missing_approval_id(self, _patch_callback_card_types):
+    @pytest.mark.asyncio
+    async def test_skips_update_when_no_message_id(self):
         adapter = _make_adapter()
-        adapter._loop = MagicMock()
-        adapter._loop.is_closed = MagicMock(return_value=False)
-        data = _make_card_action_data({"hermes_action": "approve_once"})
 
-        with patch("asyncio.run_coroutine_threadsafe") as mock_submit:
-            response = adapter._on_card_action_trigger(data)
+        with patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread:
+            await adapter._update_approval_card(
+                "", "Approved", "Bob", "once"
+            )
 
-        assert response is not None
-        assert response.card is None
-        mock_submit.assert_not_called()
+        mock_thread.assert_not_called()
 
-    def test_no_card_for_non_approval_action(self, _patch_callback_card_types):
+    @pytest.mark.asyncio
+    async def test_swallows_update_errors(self):
         adapter = _make_adapter()
-        adapter._loop = MagicMock()
-        adapter._loop.is_closed = MagicMock(return_value=False)
-        data = _make_card_action_data({"some_other": "value"})
 
-        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
-            response = adapter._on_card_action_trigger(data)
-
-        assert response is not None
-        assert response.card is None
-
-    def test_falls_back_to_open_id_when_name_not_cached(self, _patch_callback_card_types):
-        adapter = _make_adapter()
-        adapter._loop = MagicMock()
-        adapter._loop.is_closed = MagicMock(return_value=False)
-        data = _make_card_action_data(
-            {"hermes_action": "approve_session", "approval_id": 3},
-            open_id="ou_unknown",
-        )
-
-        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
-            response = adapter._on_card_action_trigger(data)
-
-        card = response.card.data
-        assert "ou_unknown" in card["elements"][0]["content"]
-
-    def test_ignores_expired_cached_name(self, _patch_callback_card_types):
-        adapter = _make_adapter()
-        adapter._loop = MagicMock()
-        adapter._loop.is_closed = MagicMock(return_value=False)
-        data = _make_card_action_data(
-            {"hermes_action": "approve_once", "approval_id": 4},
-            open_id="ou_expired",
-        )
-        adapter._sender_name_cache["ou_expired"] = ("Old Name", 1)
-
-        with patch("asyncio.run_coroutine_threadsafe", side_effect=_close_submitted_coro):
-            response = adapter._on_card_action_trigger(data)
-
-        card = response.card.data
-        assert "Old Name" not in card["elements"][0]["content"]
-        assert "ou_expired" in card["elements"][0]["content"]
+        with patch("asyncio.to_thread", new_callable=AsyncMock, side_effect=Exception("API error")):
+            # Should not raise
+            await adapter._update_approval_card(
+                "msg_001", "Approved", "Bob", "once"
+            )

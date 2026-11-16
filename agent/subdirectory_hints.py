@@ -159,10 +159,7 @@ class SubdirectoryHintTracker:
 
     def _is_valid_subdir(self, path: Path) -> bool:
         """Check if path is a valid directory to scan for hints."""
-        try:
-            if not path.is_dir():
-                return False
-        except OSError:
+        if not path.is_dir():
             return False
         if path in self._loaded_dirs:
             return False
@@ -175,10 +172,7 @@ class SubdirectoryHintTracker:
         found_hints = []
         for filename in _HINT_FILENAMES:
             hint_path = directory / filename
-            try:
-                if not hint_path.is_file():
-                    continue
-            except OSError:
+            if not hint_path.is_file():
                 continue
             try:
                 content = hint_path.read_text(encoding="utf-8").strip()

@@ -17,52 +17,24 @@ Connect Hermes to [WeCom](https://work.weixin.qq.com/) (企业微信), Tencent's
 
 ## Setup
 
-### Step 1: Create an AI Bot
-
-#### Recommended: Scan-to-Create (one command)
-
-```bash
-hermes gateway setup
-```
-
-Select **WeCom** and scan the QR code with your WeCom mobile app. Hermes will automatically create a bot application with the correct permissions and save the credentials.
-
-The setup wizard will:
-1. Display a QR code in your terminal
-2. Wait for you to scan it with the WeCom mobile app
-3. Automatically retrieve the Bot ID and Secret
-4. Guide you through access control configuration
-
-#### Alternative: Manual Setup
-
-If scan-to-create is not available, the wizard falls back to manual input:
+### 1. Create an AI Bot
 
 1. Log in to the [WeCom Admin Console](https://work.weixin.qq.com/wework_admin/frame)
 2. Navigate to **Applications** → **Create Application** → **AI Bot**
 3. Configure the bot name and description
 4. Copy the **Bot ID** and **Secret** from the credentials page
-5. Run `hermes gateway setup`, select **WeCom**, and enter the credentials when prompted
 
-:::warning
-Keep the Bot Secret private. Anyone with it can impersonate your bot.
-:::
+### 2. Configure Hermes
 
-### Step 2: Configure Hermes
-
-#### Option A: Interactive Setup (Recommended)
+Run the interactive setup:
 
 ```bash
 hermes gateway setup
 ```
 
-Select **WeCom** and follow the prompts. The wizard will guide you through:
-- Bot credentials (via QR scan or manual entry)
-- Access control settings (allowlist, pairing mode, or open access)
-- Home channel for notifications
+Select **WeCom** and enter your Bot ID and Secret.
 
-#### Option B: Manual Configuration
-
-Add the following to `~/.hermes/.env`:
+Or set environment variables in `~/.hermes/.env`:
 
 ```bash
 WECOM_BOT_ID=your-bot-id
@@ -75,7 +47,7 @@ WECOM_ALLOWED_USERS=user_id_1,user_id_2
 WECOM_HOME_CHANNEL=chat_id
 ```
 
-### Step 3: Start the gateway
+### 3. Start the gateway
 
 ```bash
 hermes gateway

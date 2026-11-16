@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from gateway.config import Platform, PlatformConfig
-from gateway.platforms.base import MessageEvent, MessageType, ProcessingOutcome
+from gateway.platforms.base import MessageEvent, MessageType
 from gateway.session import SessionSource
 
 
@@ -175,33 +175,33 @@ async def test_on_processing_start_handles_missing_ids(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_on_processing_complete_success(monkeypatch):
-    """Successful processing should set thumbs-up reaction."""
+    """Successful processing should set check mark reaction."""
     monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
     adapter = _make_adapter()
     event = _make_event()
 
-    await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+    await adapter.on_processing_complete(event, success=True)
 
     adapter._bot.set_message_reaction.assert_awaited_once_with(
         chat_id=123,
         message_id=456,
-        reaction="\U0001f44d",
+        reaction="\u2705",
     )
 
 
 @pytest.mark.asyncio
 async def test_on_processing_complete_failure(monkeypatch):
-    """Failed processing should set thumbs-down reaction."""
+    """Failed processing should set cross mark reaction."""
     monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
     adapter = _make_adapter()
     event = _make_event()
 
-    await adapter.on_processing_complete(event, ProcessingOutcome.FAILURE)
+    await adapter.on_processing_complete(event, success=False)
 
     adapter._bot.set_message_reaction.assert_awaited_once_with(
         chat_id=123,
         message_id=456,
-        reaction="\U0001f44e",
+        reaction="\u274c",
     )
 
 
@@ -212,19 +212,7 @@ async def test_on_processing_complete_skipped_when_disabled(monkeypatch):
     adapter = _make_adapter()
     event = _make_event()
 
-    await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
-
-    adapter._bot.set_message_reaction.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_on_processing_complete_cancelled_keeps_existing_reaction(monkeypatch):
-    """Expected cancellation should not replace the in-progress reaction."""
-    monkeypatch.setenv("TELEGRAM_REACTIONS", "true")
-    adapter = _make_adapter()
-    event = _make_event()
-
-    await adapter.on_processing_complete(event, ProcessingOutcome.CANCELLED)
+    await adapter.on_processing_complete(event, success=True)
 
     adapter._bot.set_message_reaction.assert_not_awaited()
 

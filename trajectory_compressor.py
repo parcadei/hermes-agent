@@ -40,43 +40,15 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-
-from utils import base_url_host_matches, base_url_hostname
 import fire
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn, TimeRemainingColumn
 from rich.console import Console
-from hermes_constants import OPENROUTER_BASE_URL, get_hermes_home
+from hermes_constants import OPENROUTER_BASE_URL
 from agent.retry_utils import jittered_backoff
 
-# Load .env from HERMES_HOME first, then project root as a dev fallback.
-from hermes_cli.env_loader import load_hermes_dotenv
-
-_hermes_home = get_hermes_home()
-_project_env = Path(__file__).parent / ".env"
-load_hermes_dotenv(hermes_home=_hermes_home, project_env=_project_env)
-
-
-def _effective_temperature_for_model(
-    model: str,
-    requested_temperature: float,
-    base_url: Optional[str] = None,
-) -> Optional[float]:
-    """Apply fixed model temperature contracts to direct client calls.
-
-    Returns ``None`` when the model manages temperature server-side (Kimi);
-    callers must omit the ``temperature`` kwarg entirely in that case.
-    """
-    try:
-        from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE
-    except Exception:
-        return requested_temperature
-
-    fixed_temperature = _fixed_temperature_for_model(model, base_url)
-    if fixed_temperature is OMIT_TEMPERATURE:
-        return None  # caller must omit temperature
-    if fixed_temperature is not None:
-        return fixed_temperature
-    return requested_temperature
+# Load environment variables
+from dotenv import load_dotenv
+load_dotenv()
 
 
 @dataclass
@@ -403,9 +375,8 @@ class TrajectoryCompressor:
                     f"Missing API key. Set {self.config.api_key_env} "
                     f"environment variable.")
             from openai import OpenAI
-            from agent.auxiliary_client import _to_openai_base_url
             self.client = OpenAI(
-                api_key=api_key, base_url=_to_openai_base_url(self.config.base_url))
+                api_key=api_key, base_url=self.config.base_url)
             # AsyncOpenAI is created lazily in _get_async_client() so it
             # binds to the current event loop — avoids "Event loop is closed"
             # when process_directory() is called multiple times (each call
@@ -424,39 +395,29 @@ class TrajectoryCompressor:
         avoiding "Event loop is closed" errors on repeated calls.
         """
         from openai import AsyncOpenAI
-        from agent.auxiliary_client import _to_openai_base_url
         # Always create a fresh client so it binds to the running loop.
         self.async_client = AsyncOpenAI(
             api_key=self._async_client_api_key,
-            base_url=_to_openai_base_url(self.config.base_url),
+            base_url=self.config.base_url,
         )
         return self.async_client
 
     def _detect_provider(self) -> str:
         """Detect the provider name from the configured base_url."""
-        url = self.config.base_url or ""
-        if base_url_host_matches(url, "openrouter.ai"):
+        url = (self.config.base_url or "").lower()
+        if "openrouter" in url:
             return "openrouter"
-        if base_url_host_matches(url, "nousresearch.com"):
+        if "nousresearch.com" in url:
             return "nous"
-        if (
-            base_url_hostname(url) == "chatgpt.com"
-            and "/backend-api/codex" in url.lower()
-        ):
+        if "chatgpt.com/backend-api/codex" in url:
             return "codex"
-        if base_url_host_matches(url, "z.ai"):
+        if "api.z.ai" in url:
             return "zai"
-        if (
-            base_url_host_matches(url, "moonshot.ai")
-            or base_url_host_matches(url, "moonshot.cn")
-            or base_url_host_matches(url, "api.kimi.com")
-        ):
+        if "moonshot.ai" in url or "api.kimi.com" in url:
             return "kimi-coding"
-        if base_url_host_matches(url, "arcee.ai"):
-            return "arcee"
-        if base_url_host_matches(url, "minimaxi.com"):
+        if "minimaxi.com" in url:
             return "minimax-cn"
-        if base_url_host_matches(url, "minimax.io"):
+        if "minimax.io" in url:
             return "minimax"
         # Unknown base_url — not a known provider
         return ""
@@ -599,11 +560,6 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
         for attempt in range(self.config.max_retries):
             try:
                 metrics.summarization_api_calls += 1
-                summary_temperature = _effective_temperature_for_model(
-                    self.config.summarization_model,
-                    self.config.temperature,
-                    self.config.base_url,
-                )
                 
                 if getattr(self, '_use_call_llm', False):
                     from agent.auxiliary_client import call_llm
@@ -611,18 +567,16 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                         provider=self._llm_provider,
                         model=self.config.summarization_model,
                         messages=[{"role": "user", "content": prompt}],
-                        temperature=summary_temperature,
+                        temperature=self.config.temperature,
                         max_tokens=self.config.summary_target_tokens * 2,
                     )
                 else:
-                    _create_kwargs = {
-                        "model": self.config.summarization_model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": self.config.summary_target_tokens * 2,
-                    }
-                    if summary_temperature is not None:
-                        _create_kwargs["temperature"] = summary_temperature
-                    response = self.client.chat.completions.create(**_create_kwargs)
+                    response = self.client.chat.completions.create(
+                        model=self.config.summarization_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=self.config.temperature,
+                        max_tokens=self.config.summary_target_tokens * 2,
+                    )
                 
                 summary = self._coerce_summary_content(response.choices[0].message.content)
                 return self._ensure_summary_prefix(summary)
@@ -668,11 +622,6 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
         for attempt in range(self.config.max_retries):
             try:
                 metrics.summarization_api_calls += 1
-                summary_temperature = _effective_temperature_for_model(
-                    self.config.summarization_model,
-                    self.config.temperature,
-                    self.config.base_url,
-                )
                 
                 if getattr(self, '_use_call_llm', False):
                     from agent.auxiliary_client import async_call_llm
@@ -680,18 +629,16 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
                         provider=self._llm_provider,
                         model=self.config.summarization_model,
                         messages=[{"role": "user", "content": prompt}],
-                        temperature=summary_temperature,
+                        temperature=self.config.temperature,
                         max_tokens=self.config.summary_target_tokens * 2,
                     )
                 else:
-                    _create_kwargs = {
-                        "model": self.config.summarization_model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": self.config.summary_target_tokens * 2,
-                    }
-                    if summary_temperature is not None:
-                        _create_kwargs["temperature"] = summary_temperature
-                    response = await self._get_async_client().chat.completions.create(**_create_kwargs)
+                    response = await self._get_async_client().chat.completions.create(
+                        model=self.config.summarization_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=self.config.temperature,
+                        max_tokens=self.config.summary_target_tokens * 2,
+                    )
                 
                 summary = self._coerce_summary_content(response.choices[0].message.content)
                 return self._ensure_summary_prefix(summary)
@@ -971,6 +918,68 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
             result["compression_metrics"] = metrics.to_dict()
         
         return result, metrics
+    
+    def process_file(
+        self, 
+        input_path: Path, 
+        output_path: Path,
+        progress_callback: Optional[Callable[[TrajectoryMetrics], None]] = None
+    ) -> List[TrajectoryMetrics]:
+        """
+        Process a single JSONL file.
+        
+        Args:
+            input_path: Path to input JSONL file
+            output_path: Path to output JSONL file
+            progress_callback: Optional callback called after each entry with its metrics
+            
+        Returns:
+            List of metrics for each trajectory
+        """
+        file_metrics = []
+        
+        # Read all entries
+        entries = []
+        with open(input_path, 'r', encoding='utf-8') as f:
+            for line_num, line in enumerate(f, 1):
+                line = line.strip()
+                if line:
+                    try:
+                        entries.append(json.loads(line))
+                    except json.JSONDecodeError as e:
+                        self.logger.warning(f"Skipping invalid JSON at {input_path}:{line_num}: {e}")
+        
+        # Process entries
+        processed_entries = []
+        for entry in entries:
+            try:
+                processed_entry, metrics = self.process_entry(entry)
+                processed_entries.append(processed_entry)
+                file_metrics.append(metrics)
+                self.aggregate_metrics.add_trajectory_metrics(metrics)
+                
+                # Call progress callback if provided
+                if progress_callback:
+                    progress_callback(metrics)
+                
+            except Exception as e:
+                self.logger.error(f"Error processing entry: {e}")
+                self.aggregate_metrics.trajectories_failed += 1
+                # Keep original entry on error
+                processed_entries.append(entry)
+                empty_metrics = TrajectoryMetrics()
+                file_metrics.append(empty_metrics)
+                
+                if progress_callback:
+                    progress_callback(empty_metrics)
+        
+        # Write output
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            for entry in processed_entries:
+                f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+        
+        return file_metrics
     
     def process_directory(self, input_dir: Path, output_dir: Path):
         """

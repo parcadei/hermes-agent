@@ -19,7 +19,7 @@ What makes Hermes different:
 
 - **Self-improving through skills** — Hermes learns from experience by saving reusable procedures as skills. When it solves a complex problem, discovers a workflow, or gets corrected, it can persist that knowledge as a skill document that loads into future sessions. Skills accumulate over time, making the agent better at your specific tasks and environment.
 - **Persistent memory across sessions** — remembers who you are, your preferences, environment details, and lessons learned. Pluggable memory backends (built-in, Honcho, Mem0, and more) let you choose how memory works.
-- **Multi-platform gateway** — the same agent runs on Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, and 10+ other platforms with full tool access, not just chat.
+- **Multi-platform gateway** — the same agent runs on Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, and 8+ other platforms with full tool access, not just chat.
 - **Provider-agnostic** — swap models and providers mid-workflow without changing anything else. Credential pools rotate across multiple API keys automatically.
 - **Profiles** — run multiple independent Hermes instances with isolated configs, sessions, skills, and memory.
 - **Extensible** — plugins, MCP servers, custom tools, webhook triggers, cron scheduling, and the full Python ecosystem.
@@ -148,7 +148,7 @@ hermes gateway status       Check status
 hermes gateway setup        Configure platforms
 ```
 
-Supported platforms: Telegram, Discord, Slack, WhatsApp, Signal, Email, SMS, Matrix, Mattermost, Home Assistant, DingTalk, Feishu, WeCom, BlueBubbles (iMessage), Weixin (WeChat), API Server, Webhooks. Open WebUI connects via the API Server adapter.
+Supported platforms: Telegram, Discord, Slack, WhatsApp, Signal, Email, SMS, Matrix, Mattermost, Home Assistant, DingTalk, Feishu, WeCom, API Server, Webhooks, Open WebUI.
 
 Platform docs: https://hermes-agent.nousresearch.com/docs/user-guide/messaging/
 
@@ -215,7 +215,7 @@ hermes insights [--days N]  Usage analytics
 hermes update               Update to latest version
 hermes pairing list/approve/revoke  DM authorization
 hermes plugins list/install/remove  Plugin management
-hermes honcho setup/status  Honcho memory integration (requires honcho plugin)
+hermes honcho setup/status  Honcho memory integration
 hermes memory setup/status/off  Memory provider config
 hermes completion bash|zsh  Shell completions
 hermes acp                  ACP server (IDE integration)
@@ -249,8 +249,9 @@ Type these during an interactive chat session.
 /config              Show config (CLI)
 /model [name]        Show or change model
 /provider            Show provider info
+/prompt [text]       View/set system prompt (CLI)
 /personality [name]  Set personality
-/reasoning [level]   Set reasoning (none|minimal|low|medium|high|xhigh|show|hide)
+/reasoning [level]   Set reasoning (none|low|medium|high|xhigh|show|hide)
 /verbose             Cycle: off → new → all → verbose
 /voice [on|off|tts]  Voice mode
 /yolo                Toggle approval bypass
@@ -267,28 +268,6 @@ Type these during an interactive chat session.
 /cron                Manage cron jobs (CLI)
 /reload-mcp          Reload MCP servers
 /plugins             List plugins (CLI)
-```
-
-### Gateway
-```
-/approve             Approve a pending command (gateway)
-/deny                Deny a pending command (gateway)
-/restart             Restart gateway (gateway)
-/sethome             Set current chat as home channel (gateway)
-/update              Update Hermes to latest (gateway)
-/platforms (/gateway) Show platform connection status (gateway)
-```
-
-### Utility
-```
-/branch (/fork)      Branch the current session
-/btw                 Ephemeral side question (doesn't interrupt main task)
-/fast                Toggle priority/fast processing
-/browser             Open CDP browser connection
-/history             Show conversation history (CLI)
-/save                Save conversation to file (CLI)
-/paste               Attach clipboard image (CLI)
-/image               Attach local image file (CLI)
 ```
 
 ### Info
@@ -313,7 +292,7 @@ Type these during an interactive chat session.
 ```
 ~/.hermes/config.yaml       Main configuration
 ~/.hermes/.env              API keys and secrets
-$HERMES_HOME/skills/        Installed skills
+~/.hermes/skills/           Installed skills
 ~/.hermes/sessions/         Session transcripts
 ~/.hermes/logs/             Gateway and error logs
 ~/.hermes/auth.json         OAuth tokens and credential pools
@@ -333,43 +312,37 @@ Edit with `hermes config edit` or `hermes config set section.key value`.
 | `terminal` | `backend` (local/docker/ssh/modal), `cwd`, `timeout` (180) |
 | `compression` | `enabled`, `threshold` (0.50), `target_ratio` (0.20) |
 | `display` | `skin`, `tool_progress`, `show_reasoning`, `show_cost` |
-| `stt` | `enabled`, `provider` (local/groq/openai/mistral) |
-| `tts` | `provider` (edge/elevenlabs/openai/minimax/mistral/neutts) |
+| `stt` | `enabled`, `provider` (local/groq/openai) |
+| `tts` | `provider` (edge/elevenlabs/openai/kokoro/fish) |
 | `memory` | `memory_enabled`, `user_profile_enabled`, `provider` |
 | `security` | `tirith_enabled`, `website_blocklist` |
-| `delegation` | `model`, `provider`, `base_url`, `api_key`, `max_iterations` (50), `reasoning_effort` |
+| `delegation` | `model`, `provider`, `max_iterations` (50) |
+| `smart_model_routing` | `enabled`, `cheap_model` |
 | `checkpoints` | `enabled`, `max_snapshots` (50) |
 
 Full config reference: https://hermes-agent.nousresearch.com/docs/user-guide/configuration
 
 ### Providers
 
-20+ providers supported. Set via `hermes model` or `hermes setup`.
+18 providers supported. Set via `hermes model` or `hermes setup`.
 
 | Provider | Auth | Key env var |
 |----------|------|-------------|
 | OpenRouter | API key | `OPENROUTER_API_KEY` |
 | Anthropic | API key | `ANTHROPIC_API_KEY` |
-| Nous Portal | OAuth | `hermes auth` |
-| OpenAI Codex | OAuth | `hermes auth` |
+| Nous Portal | OAuth | `hermes login --provider nous` |
+| OpenAI Codex | OAuth | `hermes login --provider openai-codex` |
 | GitHub Copilot | Token | `COPILOT_GITHUB_TOKEN` |
-| Google Gemini | API key | `GOOGLE_API_KEY` or `GEMINI_API_KEY` |
 | DeepSeek | API key | `DEEPSEEK_API_KEY` |
-| xAI / Grok | API key | `XAI_API_KEY` |
 | Hugging Face | Token | `HF_TOKEN` |
 | Z.AI / GLM | API key | `GLM_API_KEY` |
 | MiniMax | API key | `MINIMAX_API_KEY` |
-| MiniMax CN | API key | `MINIMAX_CN_API_KEY` |
 | Kimi / Moonshot | API key | `KIMI_API_KEY` |
 | Alibaba / DashScope | API key | `DASHSCOPE_API_KEY` |
-| Xiaomi MiMo | API key | `XIAOMI_API_KEY` |
 | Kilo Code | API key | `KILOCODE_API_KEY` |
-| AI Gateway (Vercel) | API key | `AI_GATEWAY_API_KEY` |
-| OpenCode Zen | API key | `OPENCODE_ZEN_API_KEY` |
-| OpenCode Go | API key | `OPENCODE_GO_API_KEY` |
-| Qwen OAuth | OAuth | `hermes login --provider qwen-oauth` |
 | Custom endpoint | Config | `model.base_url` + `model.api_key` in config.yaml |
-| GitHub Copilot ACP | External | `COPILOT_CLI_PATH` or Copilot CLI |
+
+Plus: AI Gateway, OpenCode Zen, OpenCode Go, MiniMax CN, GitHub Copilot ACP.
 
 Full provider docs: https://hermes-agent.nousresearch.com/docs/integrations/providers
 
@@ -393,10 +366,6 @@ Enable/disable via `hermes tools` (interactive) or `hermes tools enable/disable 
 | `delegation` | Subagent task delegation |
 | `cronjob` | Scheduled task management |
 | `clarify` | Ask user clarifying questions |
-| `messaging` | Cross-platform message sending |
-| `search` | Web search only (subset of `web`) |
-| `todo` | In-session task planning and tracking |
-| `rl` | Reinforcement learning tools (off by default) |
 | `moa` | Mixture of Agents (off by default) |
 | `homeassistant` | Smart home control (off by default) |
 
@@ -414,13 +383,12 @@ Provider priority (auto-detected):
 1. **Local faster-whisper** — free, no API key: `pip install faster-whisper`
 2. **Groq Whisper** — free tier: set `GROQ_API_KEY`
 3. **OpenAI Whisper** — paid: set `VOICE_TOOLS_OPENAI_KEY`
-4. **Mistral Voxtral** — set `MISTRAL_API_KEY`
 
 Config:
 ```yaml
 stt:
   enabled: true
-  provider: local        # local, groq, openai, mistral
+  provider: local        # local, groq, openai
   local:
     model: base          # tiny, base, small, medium, large-v3
 ```
@@ -432,9 +400,8 @@ stt:
 | Edge TTS | None | Yes (default) |
 | ElevenLabs | `ELEVENLABS_API_KEY` | Free tier |
 | OpenAI | `VOICE_TOOLS_OPENAI_KEY` | Paid |
-| MiniMax | `MINIMAX_API_KEY` | Paid |
-| Mistral (Voxtral) | `MISTRAL_API_KEY` | Paid |
-| NeuTTS (local) | None (`pip install neutts[all]` + `espeak-ng`) | Free |
+| Kokoro (local) | None | Free |
+| Fish Audio | `FISH_AUDIO_API_KEY` | Free tier |
 
 Voice commands: `/voice on` (voice-to-voice), `/voice tts` (always voice), `/voice off`.
 
@@ -526,7 +493,7 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 ### Voice not working
 1. Check `stt.enabled: true` in config.yaml
 2. Verify provider: `pip install faster-whisper` or set API key
-3. In gateway: `/restart`. In CLI: exit and relaunch.
+3. Restart gateway: `/restart`
 
 ### Tool not available
 1. `hermes tools` — check if toolset is enabled for your platform
@@ -537,11 +504,10 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 1. `hermes doctor` — check config and dependencies
 2. `hermes login` — re-authenticate OAuth providers
 3. Check `.env` has the right API key
-4. **Copilot 403**: `gh auth login` tokens do NOT work for Copilot API. You must use the Copilot-specific OAuth device code flow via `hermes model` → GitHub Copilot.
 
 ### Changes not taking effect
 - **Tools/skills:** `/reset` starts a new session with updated toolset
-- **Config changes:** In gateway: `/restart`. In CLI: exit and relaunch.
+- **Config changes:** `/restart` reloads gateway config
 - **Code changes:** Restart the CLI or gateway process
 
 ### Skills not showing
@@ -553,23 +519,6 @@ terminal(command="tmux new-session -d -s resumed 'hermes --resume 20260225_14305
 Check logs first:
 ```bash
 grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20
-```
-
-Common gateway problems:
-- **Gateway dies on SSH logout**: Enable linger: `sudo loginctl enable-linger $USER`
-- **Gateway dies on WSL2 close**: WSL2 requires `systemd=true` in `/etc/wsl.conf` for systemd services to work. Without it, gateway falls back to `nohup` (dies when session closes).
-- **Gateway crash loop**: Reset the failed state: `systemctl --user reset-failed hermes-gateway`
-
-### Platform-specific issues
-- **Discord bot silent**: Must enable **Message Content Intent** in Bot → Privileged Gateway Intents.
-- **Slack bot only works in DMs**: Must subscribe to `message.channels` event. Without it, the bot ignores public channels.
-- **Windows HTTP 400 "No models provided"**: Config file encoding issue (BOM). Ensure `config.yaml` is saved as UTF-8 without BOM.
-
-### Auxiliary models not working
-If `auxiliary` tasks (vision, compression, session_search) fail silently, the `auto` provider can't find a backend. Either set `OPENROUTER_API_KEY` or `GOOGLE_API_KEY`, or explicitly configure each auxiliary task's provider:
-```bash
-hermes config set auxiliary.vision.provider <your_provider>
-hermes config set auxiliary.vision.model <model_name>
 ```
 
 ---
@@ -609,7 +558,7 @@ hermes-agent/
 ├── toolsets.py           # Toolset definitions
 ├── cli.py                # Interactive CLI (HermesCLI)
 ├── hermes_state.py       # SQLite session store
-├── agent/                # Prompt builder, context compression, memory, model routing, credential pooling, skill dispatch
+├── agent/                # Prompt builder, compression, display, adapters
 ├── hermes_cli/           # CLI subcommands, config, setup, commands
 │   ├── commands.py       # Slash command registry (CommandDef)
 │   ├── config.py         # DEFAULT_CONFIG, env var definitions
@@ -649,9 +598,9 @@ registry.register(
 )
 ```
 
-**2. Add to `toolsets.py`** → `_HERMES_CORE_TOOLS` list.
+**2. Add import** in `model_tools.py` → `_discover_tools()` list.
 
-Auto-discovery: any `tools/*.py` file with a top-level `registry.register()` call is imported automatically — no manual list needed.
+**3. Add to `toolsets.py`** → `_HERMES_CORE_TOOLS` list.
 
 All handlers must return JSON strings. Use `get_hermes_home()` for paths, never hardcode `~/.hermes`.
 
@@ -678,6 +627,7 @@ run_conversation():
 ### Testing
 
 ```bash
+source venv/bin/activate  # or .venv/bin/activate
 python -m pytest tests/ -o 'addopts=' -q   # Full suite
 python -m pytest tests/tools/ -q            # Specific area
 ```

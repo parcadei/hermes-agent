@@ -49,8 +49,6 @@ class HermesToolCallParser(ToolCallParser):
                     continue
 
                 tc_data = json.loads(raw_json)
-                if "name" not in tc_data:
-                    continue
                 tool_calls.append(
                     ChatCompletionMessageToolCall(
                         id=f"call_{uuid.uuid4().hex[:8]}",

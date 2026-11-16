@@ -155,15 +155,6 @@ def _cmd_subscribe(args):
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
-    if getattr(args, "deliver_only", False):
-        if route["deliver"] == "log":
-            print(
-                "Error: --deliver-only requires --deliver to be a real target "
-                "(telegram, discord, slack, github_comment, etc.) — not 'log'."
-            )
-            return
-        route["deliver_only"] = True
-
     if args.deliver_chat_id:
         route["deliver_extra"] = {"chat_id": args.deliver_chat_id}
 
@@ -181,12 +172,9 @@ def _cmd_subscribe(args):
     else:
         print("  Events: (all)")
     print(f"  Deliver: {route['deliver']}")
-    if route.get("deliver_only"):
-        print("  Mode: direct delivery (no agent, zero LLM cost)")
     if route.get("prompt"):
         prompt_preview = route["prompt"][:80] + ("..." if len(route["prompt"]) > 80 else "")
-        label = "Message" if route.get("deliver_only") else "Prompt"
-        print(f"  {label}: {prompt_preview}")
+        print(f"  Prompt: {prompt_preview}")
     print(f"\n  Configure your service to POST to the URL above.")
     print(f"  Use the secret for HMAC-SHA256 signature validation.")
     print(f"  The gateway must be running to receive events (hermes gateway run).\n")
@@ -204,8 +192,6 @@ def _cmd_list(args):
     for name, route in subs.items():
         events = ", ".join(route.get("events", [])) or "(all)"
         deliver = route.get("deliver", "log")
-        if route.get("deliver_only"):
-            deliver = f"{deliver} (direct — no agent)"
         desc = route.get("description", "")
         print(f"  ◆ {name}")
         if desc:

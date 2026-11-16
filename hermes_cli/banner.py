@@ -5,6 +5,7 @@ Pure display functions with no HermesCLI state dependency.
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -89,6 +90,12 @@ HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀�
 [#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠳⠈⣡⠞⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]"""
 
+COMPACT_BANNER = """
+[bold #FFD700]╔══════════════════════════════════════════════════════════════╗[/]
+[bold #FFD700]║[/]  [#FFBF00]⚕ NOUS HERMES[/] [dim #B8860B]- AI Agent Framework[/]              [bold #FFD700]║[/]
+[bold #FFD700]║[/]  [#CD7F32]Messenger of the Digital Gods[/]    [dim #B8860B]Nous Research[/]   [bold #FFD700]║[/]
+[bold #FFD700]╚══════════════════════════════════════════════════════════════╝[/]
+"""
 
 
 # =========================================================================
@@ -288,16 +295,10 @@ def _format_context_length(tokens: int) -> str:
     """Format a token count for display (e.g. 128000 → '128K', 1048576 → '1M')."""
     if tokens >= 1_000_000:
         val = tokens / 1_000_000
-        rounded = round(val)
-        if abs(val - rounded) < 0.05:
-            return f"{rounded}M"
-        return f"{val:.1f}M"
+        return f"{val:g}M"
     elif tokens >= 1_000:
         val = tokens / 1_000
-        rounded = round(val)
-        if abs(val - rounded) < 0.05:
-            return f"{rounded}K"
-        return f"{val:.1f}K"
+        return f"{val:g}K"
     return str(tokens)
 
 

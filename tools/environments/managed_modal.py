@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from tools.environments.modal_utils import (
+from tools.environments.modal_common import (
     BaseModalExecutionEnvironment,
     ModalExecStart,
     PreparedModalExec,

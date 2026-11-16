@@ -29,7 +29,7 @@ def _make_runner():
 @pytest.mark.asyncio
 async def test_handle_message_does_not_priority_interrupt_photo_followup():
     runner = _make_runner()
-    source = SessionSource(platform=Platform.TELEGRAM, chat_id="12345", chat_type="dm", user_id="u1")
+    source = SessionSource(platform=Platform.TELEGRAM, chat_id="12345", chat_type="dm")
     session_key = build_session_key(source)
     running_agent = MagicMock()
     runner._running_agents[session_key] = running_agent

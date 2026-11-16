@@ -12,7 +12,7 @@ The messaging gateway is the long-running process that connects Hermes to 14+ ex
 
 | File | Purpose |
 |------|---------|
-| `gateway/run.py` | `GatewayRunner` — main loop, slash commands, message dispatch (~9,000 lines) |
+| `gateway/run.py` | `GatewayRunner` — main loop, slash commands, message dispatch (~7,500 lines) |
 | `gateway/session.py` | `SessionStore` — conversation persistence and session key construction |
 | `gateway/delivery.py` | Outbound message delivery to target platforms/channels |
 | `gateway/pairing.py` | DM pairing flow for user authorization |
@@ -27,25 +27,25 @@ The messaging gateway is the long-running process that connects Hermes to 14+ ex
 
 ```text
 ┌─────────────────────────────────────────────────┐
-│                  GatewayRunner                  │
-│                                                 │
+│                 GatewayRunner                     │
+│                                                   │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
-│  │ Telegram │  │ Discord  │  │  Slack   │       │
-│  │ Adapter  │  │ Adapter  │  │ Adapter  │       │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘       │
-│       │             │             │             │
-│       └─────────────┼─────────────┘             │
-│                     ▼                           │
-│              _handle_message()                  │
-│                     │                           │
-│         ┌───────────┼───────────┐               │
-│         ▼           ▼           ▼               │
-│  Slash command   AIAgent    Queue/BG            │
-│    dispatch      creation   sessions            │
-│                     │                           │
-│                     ▼                           │
-│                 SessionStore                    │
-│              (SQLite persistence)               │
+│  │ Telegram  │  │ Discord  │  │  Slack   │  ...  │
+│  │ Adapter   │  │ Adapter  │  │ Adapter  │       │
+│  └─────┬─────┘  └─────┬────┘  └─────┬────┘       │
+│        │              │              │             │
+│        └──────────────┼──────────────┘             │
+│                       ▼                            │
+│              _handle_message()                     │
+│                       │                            │
+│          ┌────────────┼────────────┐               │
+│          ▼            ▼            ▼               │
+│   Slash command   AIAgent      Queue/BG            │
+│    dispatch       creation     sessions            │
+│                       │                            │
+│                       ▼                            │
+│              SessionStore                          │
+│           (SQLite persistence)                     │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -153,16 +153,13 @@ gateway/platforms/
 ├── slack.py             # Slack Socket Mode
 ├── whatsapp.py          # WhatsApp Business Cloud API
 ├── signal.py            # Signal via signal-cli REST API
-├── matrix.py            # Matrix via mautrix (optional E2EE)
+├── matrix.py            # Matrix via matrix-nio (optional E2EE)
 ├── mattermost.py        # Mattermost WebSocket API
 ├── email.py             # Email via IMAP/SMTP
 ├── sms.py               # SMS via Twilio
 ├── dingtalk.py          # DingTalk WebSocket
 ├── feishu.py            # Feishu/Lark WebSocket or webhook
 ├── wecom.py             # WeCom (WeChat Work) callback
-├── weixin.py            # Weixin (personal WeChat) via iLink Bot API
-├── bluebubbles.py       # Apple iMessage via BlueBubbles macOS server
-├── qqbot.py             # QQ Bot (Tencent QQ) via Official API v2
 ├── webhook.py           # Inbound/outbound webhook adapter
 ├── api_server.py        # REST API server adapter
 └── homeassistant.py     # Home Assistant conversation integration

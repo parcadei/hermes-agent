@@ -23,6 +23,7 @@ Design:
 - Frozen snapshot pattern: system prompt is stable, tool responses show live state
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -33,17 +34,6 @@ from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Dict, Any, List, Optional
 
-# fcntl is Unix-only; on Windows use msvcrt for file locking
-msvcrt = None
-try:
-    import fcntl
-except ImportError:
-    fcntl = None
-    try:
-        import msvcrt
-    except ImportError:
-        pass
-
 logger = logging.getLogger(__name__)
 
 # Where memory files live — resolved dynamically so profile overrides
@@ -53,6 +43,11 @@ logger = logging.getLogger(__name__)
 def get_memory_dir() -> Path:
     """Return the profile-scoped memories directory."""
     return get_hermes_home() / "memories"
+
+# Backward-compatible alias — gateway/run.py imports this at runtime inside
+# a function body, so it gets the correct snapshot for that process.  New code
+# should prefer get_memory_dir().
+MEMORY_DIR = get_memory_dir()
 
 ENTRY_DELIMITER = "\n§\n"
 
@@ -149,31 +144,12 @@ class MemoryStore:
         """
         lock_path = path.with_suffix(path.suffix + ".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if fcntl is None and msvcrt is None:
-            yield
-            return
-
-        if msvcrt and (not lock_path.exists() or lock_path.stat().st_size == 0):
-            lock_path.write_text(" ", encoding="utf-8")
-
-        fd = open(lock_path, "r+" if msvcrt else "a+")
+        fd = open(lock_path, "w")
         try:
-            if fcntl:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            else:
-                fd.seek(0)
-                msvcrt.locking(fd.fileno(), msvcrt.LK_LOCK, 1)
+            fcntl.flock(fd, fcntl.LOCK_EX)
             yield
         finally:
-            if fcntl:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            elif msvcrt:
-                try:
-                    fd.seek(0)
-                    msvcrt.locking(fd.fileno(), msvcrt.LK_UNLCK, 1)
-                except (OSError, IOError):
-                    pass
+            fcntl.flock(fd, fcntl.LOCK_UN)
             fd.close()
 
     @staticmethod

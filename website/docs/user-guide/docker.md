@@ -35,38 +35,8 @@ docker run -d \
   --name hermes \
   --restart unless-stopped \
   -v ~/.hermes:/opt/data \
-  -p 8642:8642 \
   nousresearch/hermes-agent gateway run
 ```
-
-Port 8642 exposes the gateway's [OpenAI-compatible API server](./api-server.md) and health endpoint. It's optional if you only use chat platforms (Telegram, Discord, etc.), but required if you want the dashboard or external tools to reach the gateway.
-
-Opening any port on an internet facing machine is a security risk. You should not do it unless you understand the risks.
-
-## Running the dashboard
-
-The built-in web dashboard can run alongside the gateway as a separate container. 
-
-To run the dashboard as its own container, point it at the gateway's health endpoint so it can detect gateway status across containers:
-
-```sh
-docker run -d \
-  --name hermes-dashboard \
-  --restart unless-stopped \
-  -v ~/.hermes:/opt/data \
-  -p 9119:9119 \
-  -e GATEWAY_HEALTH_URL=http://$HOST_IP:8642 \
-  nousresearch/hermes-agent dashboard
-```
-
-Replace `$HOST_IP` with the IP address of the machine running the gateway container (e.g. `192.168.1.100`), or use a Docker network hostname if both containers share a network (see the [Compose example](#docker-compose-example) below).
-
-| Environment variable | Description | Default |
-|---------------------|-------------|---------|
-| `GATEWAY_HEALTH_URL` | Base URL of the gateway's API server, e.g. `http://gateway:8642` | *(unset — local PID check only)* |
-| `GATEWAY_HEALTH_TIMEOUT` | Health probe timeout in seconds | `3` |
-
-Without `GATEWAY_HEALTH_URL`, the dashboard falls back to local process detection — which only works when the gateway runs in the same container or on the same host.
 
 ## Running interactively (CLI chat)
 
@@ -76,12 +46,6 @@ To open an interactive chat session against a running data directory:
 docker run -it --rm \
   -v ~/.hermes:/opt/data \
   nousresearch/hermes-agent
-```
-
-Or if you have already opened a terminal in your running container (via Docker Desktop for instance), just run:
-
-```sh
-/opt/hermes/.venv/bin/hermes
 ```
 
 ## Persistent volumes
@@ -102,7 +66,7 @@ The `/opt/data` volume is the single source of truth for all Hermes state. It ma
 | `skins/` | Custom CLI skins |
 
 :::warning
-Never run two Hermes **gateway** containers against the same data directory simultaneously — session files and memory stores are not designed for concurrent write access. Running a dashboard container alongside the gateway is safe since the dashboard only reads data.
+Never run two Hermes containers against the same data directory simultaneously — session files and memory stores are not designed for concurrent access.
 :::
 
 ## Environment variable forwarding
@@ -121,21 +85,18 @@ Direct `-e` flags override values from `.env`. This is useful for CI/CD or secre
 
 ## Docker Compose example
 
-For persistent deployment with both the gateway and dashboard, a `docker-compose.yaml` is convenient:
+For persistent gateway deployment, a `docker-compose.yaml` is convenient:
 
 ```yaml
+version: "3.8"
 services:
   hermes:
     image: nousresearch/hermes-agent:latest
     container_name: hermes
     restart: unless-stopped
     command: gateway run
-    ports:
-      - "8642:8642"
     volumes:
       - ~/.hermes:/opt/data
-    networks:
-      - hermes-net
     # Uncomment to forward specific env vars instead of using .env file:
     # environment:
     #   - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
@@ -146,34 +107,9 @@ services:
         limits:
           memory: 4G
           cpus: "2.0"
-
-  dashboard:
-    image: nousresearch/hermes-agent:latest
-    container_name: hermes-dashboard
-    restart: unless-stopped
-    command: dashboard --host 0.0.0.0
-    ports:
-      - "9119:9119"
-    volumes:
-      - ~/.hermes:/opt/data
-    environment:
-      - GATEWAY_HEALTH_URL=http://hermes:8642
-    networks:
-      - hermes-net
-    depends_on:
-      - hermes
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
-
-networks:
-  hermes-net:
-    driver: bridge
 ```
 
-Start with `docker compose up -d` and view logs with `docker compose logs -f`.
+Start with `docker compose up -d` and view logs with `docker compose logs -f hermes`.
 
 ## Resource limits
 
@@ -283,6 +219,6 @@ docker restart hermes
 
 ```sh
 docker logs --tail 50 hermes          # Recent logs
-docker run -it --rm nousresearch/hermes-agent:latest version     # Verify version
+docker exec hermes hermes version     # Verify version
 docker stats hermes                    # Resource usage
 ```

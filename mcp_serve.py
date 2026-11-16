@@ -433,7 +433,7 @@ def create_mcp_server(event_bridge: Optional[EventBridge] = None) -> "FastMCP":
     if not _MCP_SERVER_AVAILABLE:
         raise ImportError(
             "MCP server requires the 'mcp' package. "
-            f"Install with: {sys.executable} -m pip install 'mcp'"
+            "Install with: pip install 'hermes-agent[mcp]'"
         )
 
     mcp = FastMCP(
@@ -838,7 +838,7 @@ def run_mcp_server(verbose: bool = False) -> None:
     if not _MCP_SERVER_AVAILABLE:
         print(
             "Error: MCP server requires the 'mcp' package.\n"
-            f"Install with: {sys.executable} -m pip install 'mcp'",
+            "Install with: pip install 'hermes-agent[mcp]'",
             file=sys.stderr,
         )
         sys.exit(1)

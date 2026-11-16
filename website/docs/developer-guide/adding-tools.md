@@ -14,12 +14,11 @@ Make it a **Tool** when it requires end-to-end integration with API keys, custom
 
 ## Overview
 
-Adding a tool touches **2 files**:
+Adding a tool touches **3 files**:
 
 1. **`tools/your_tool.py`** — handler, schema, check function, `registry.register()` call
 2. **`toolsets.py`** — add tool name to `_HERMES_CORE_TOOLS` (or a specific toolset)
-
-Any `tools/*.py` file with a top-level `registry.register()` call is auto-discovered at startup — no manual import list required.
+3. **`model_tools.py`** — add `"tools.your_tool"` to the `_discover_tools()` list
 
 ## Step 1: Create the Tool File
 
@@ -125,9 +124,19 @@ _HERMES_CORE_TOOLS = [
 },
 ```
 
-## ~~Step 3: Add Discovery Import~~ (No longer needed)
+## Step 3: Add Discovery Import
 
-Tool modules with a top-level `registry.register()` call are auto-discovered by `discover_builtin_tools()` in `tools/registry.py`. No manual import list to maintain — just create your file in `tools/` and it's picked up at startup.
+In `model_tools.py`, add the module to the `_discover_tools()` list:
+
+```python
+def _discover_tools():
+    _modules = [
+        ...
+        "tools.weather_tool",  # <-- add here
+    ]
+```
+
+This import triggers the `registry.register()` call at the bottom of your tool file.
 
 ## Async Handlers
 
