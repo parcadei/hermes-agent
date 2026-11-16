@@ -1,0 +1,248 @@
+root_span_id: cc529564-f441-4ece-b05a-63c1edd27c29
+turn_span_id: 
+session_id: cc529564-f441-4ece-b05a-63c1edd27c29
+---
+session: general
+date: 2026-04-29
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+# -- STATUSLINE (REQUIRED) ------------------------------------------------
+goal: Tested dual extraction (schema->deriver->observations) on ctx0 — all variants hurt SubEM. Identified correct test scale is LME-500.
+now: Test "search observations, serve turns" architecture on LME-500 where retrieval coverage is the actual bottleneck (79% failures = retrieval misses).
+test: "python3 -u foundry/eval/run_engram.py --longmemeval_json output/longmemeval_s.json --use_recall --retrieve_top_k 20 --event_frames --tag baseline_lme500"
+
+# -- MENTAL MODEL (REQUIRED) -----------------------------------------------
+mental_model: |
+  The dual extraction pipeline works: schema extraction (v9 cache from Qwen2.5-7B) feeds
+  a deriver (template or SLM like qwen2.5-3b) that produces NL observations. These are
+  structurally grounded (97.9% grounding rate) and semantically rich.
+
+  BUT observations HURT at ctx0 scale (1282 turns). BM25+cosine+reranker already finds
+  the right evidence in small haystacks. Adding observations either pollutes BM25 IDF
+  weights (counting Qs regress) or displaces real evidence in cosine ranking (5913 obs
+  vs 1282 turns = 82% of vector index is observations).
+
+  The REAL problem is LME-500 (56% SubEM, 280/500). 79% of failures there are retrieval
+  misses — BM25 top-20 can't find relevant turns in much larger haystacks. Observations
+  could bridge that gap by providing denser, more searchable summaries that point back
+  to source turns.
+
+  User's key insight: "same pipeline, better data" — the retrieval architecture shouldn't
+  change. Observations should serve as a better search index, not a separate retrieval tier.
+  Architecture: "search observations, serve turns" — use fact-dense observations as the
+  search surface but return original conversation turns as evidence for the LLM.
+
+  Code oracle is DEAD: 278/500 on LME-500 (vs 280/500 baseline). 0 improvements, 2
+  regressions from oracle appending text to already-correct answers.
+
+# -- CODEBASE STATE (REQUIRED) ---------------------------------------------
+codebase_state:
+  builds: true
+  tests_passing: 47/47
+  test_command: "python3 -m pytest foundry/tests/test_event_frames.py -q"
+  pre_existing_failures: []
+  uncommitted_changes: true
+  branch: worktree-engram-build
+  dirty_files:
+    - foundry/eval/run_engram.py
+    - foundry/eval/build_training_data.py (new)
+    - foundry/eval/consolidate_observations.py (new)
+    - foundry/retrieval.py
+  warnings: "clean"
+
+# -- WHAT WAS DONE ---------------------------------------------------------
+done_this_session:
+  - task: Confirmed code oracle DEAD on LME-500
+    files: [foundry/eval/run_engram.py]
+  - task: Built training data pipeline (clean v9 cache, generate observations, output JSONL)
+    files: [foundry/eval/build_training_data.py]
+  - task: Built observation consolidation module (cluster + representative selection)
+    files: [foundry/eval/consolidate_observations.py]
+  - task: Added dual extraction to eval harness (--dual_extraction, --deriver_url, --local_deriver, --consolidate)
+    files: [foundry/eval/run_engram.py]
+  - task: Ran 4 dual extraction experiments on ctx0 — all variants hurt SubEM
+    files: [foundry/eval/run_engram.py, foundry/retrieval.py]
+  - task: Modified retrieval to support observation doc_ids in _full_text() fallback
+    files: [foundry/retrieval.py]
+
+# -- DECISIONS -------------------------------------------------------------
+decisions:
+  - name: observations_vector_only
+    chose: Store observations in vector index only, not BM25
+    over: [observations in BM25, observations in both BM25+vector]
+    because: "Observations in BM25 dilute IDF weights — counting Q qi=39 regressed from 17->8 correct. Vector-only had fewer regressions (1 vs 3)."
+    constraint: BM25 integrity for counting/aggregation queries is non-negotiable
+
+  - name: test_on_lme500_not_ctx0
+    chose: Focus dual extraction testing on LME-500 scale
+    over: [continue optimizing ctx0, test on 5-ctx subset]
+    because: "At ctx0 scale (1282 turns), BM25 already finds the right evidence. Observations only add noise. At LME-500 scale (thousands of turns per question), 79% of failures are retrieval misses — observations could bridge that gap."
+    constraint: User directive to focus on the actual problem, not optimize where it's already good
+
+  - name: search_observations_serve_turns
+    chose: Use observations as search index, return raw turns as evidence
+    over: [separate retrieval tier, interleave observations in evidence, replace turns with observations]
+    because: "User insight: 'same pipeline, better data'. The LLM needs actual conversation as evidence, not reformulated facts. Observations are denser and more searchable but less useful as evidence."
+    constraint: Pipeline architecture stays the same, only the indexed data changes
+
+  - name: code_oracle_dead
+    chose: Abandon code oracle approach entirely
+    over: [improve oracle prompting, restrict oracle to specific question types]
+    because: "0 improvements on 500 questions. Oracle appends text that corrupts already-correct answers (Q101: overwrote '5 days' with refusal; Q459: added 'hiking' to trail name breaking SubEM)."
+    constraint: Zero positive signal means no path to improvement
+
+# -- FINDINGS --------------------------------------------------------------
+findings:
+  critical:
+    - "Dual extraction HURTS at ctx0 scale (all 4 variants: 45-46/60 vs 48/60 baseline). Do NOT test on ctx0 again."
+    - "5913 SLM observations vs 1282 turns = 82% of vector index is observations. This displacement ratio is the root cause of regressions."
+    - "Code oracle DEAD on LME-500: 278/500 (-2 vs baseline). Zero improvements across 500 questions."
+    - "LM Studio context overflow under concurrent load (2 processes hitting same model). Must run single process."
+  useful:
+    - "Template deriver ('The user X Y.') produces generic observations. SLM deriver (qwen2.5-3b) produces better NL but was WORSE on ctx0 eval (45/60 vs 46/60 for template)."
+    - "Schema truncation needed: some chunks have 73 entities. Max 15 entities + 15 relations before sending to SLM."
+    - "SLM outputs multiple JSON arrays — need re.finditer(r'\\[.*?\\]') parsing, not json.loads()."
+    - "Training data pipeline stats: 3200 chunks, 97.9% grounded, 200 hallucinations dropped, 401 paraphrases fixed."
+    - "Consolidation at 0.85 threshold only reduces 19% for template observations. May work better with SLM observations."
+  fyi:
+    - "Observation doc_ids start at 100_000 to avoid collision with turn indices."
+    - "store._observation_texts dict holds observation text keyed by doc_id."
+    - "Consolidation uses single-linkage union-find clustering on cosine similarity matrix."
+
+# -- APPROACHES ------------------------------------------------------------
+worked:
+  - "Vector-only observation storage (no BM25) reduces regressions from 3 to 1"
+  - "Schema truncation (15 ent + 15 rel) eliminates LM Studio 400 errors"
+  - "Multi-array JSON parsing handles SLM output format"
+  - "Training data grounding verification catches 97.9% of entities"
+
+failed:
+  - attempted: "Observations in BM25 index"
+    root_cause: "Observation text inflates document count, diluting IDF weights for factual terms. Counting queries lose precision because 'days' appears in both turns and observations."
+    avoid: "Never add derived/generated text to BM25 alongside source turns"
+    use_instead: "Vector-only storage for derived content"
+
+  - attempted: "SLM deriver on ctx0 eval"
+    root_cause: "5913 observations overwhelm 1282 turns in cosine index (82% observations). Even though SLM observations are higher quality NL, they still displace the real evidence the LLM needs."
+    avoid: "Testing observation impact at small haystack scale where retrieval already works"
+    use_instead: "Test on LME-500 where retrieval coverage is the bottleneck"
+
+  - attempted: "Code oracle on LME-500"
+    root_cause: "SLM can't generate useful code from noisy evidence in large haystacks. Oracle appends text that corrupts already-correct answers."
+    avoid: "Any code-generation approach for answer post-processing"
+    use_instead: "Focus on retrieval quality, not post-processing"
+
+  - attempted: "Consolidation via clustering (0.85 threshold)"
+    root_cause: "Template observations are too uniform ('The user X Y.') — only 19% reduction. Insufficient semantic diversity for clustering to help."
+    avoid: "Clustering template observations"
+    use_instead: "Cluster SLM observations which have more natural diversity"
+
+# -- TRAJECTORY ------------------------------------------------------------
+trajectory:
+  started_as: "Check LME-500 code oracle results and build training data pipeline"
+  evolved_to: "Test dual extraction on ctx0, then discovered it hurts at small scale"
+  scoped_to: "Architecture insight: observations help at LME-500 scale (retrieval coverage), not ctx0 (already good). Next: test 'search observations, serve turns' on LME-500."
+  user_approved_scope: true
+
+# -- USER INTENT -----------------------------------------------------------
+user_intent: |
+  The user wants a universal memory system that scales to large conversation histories.
+  The immediate bottleneck is retrieval coverage on LME-500 (56% SubEM). 79% of failures
+  are retrieval misses — BM25 top-20 can't find relevant turns in large haystacks.
+
+  The user's key architectural insight is "same pipeline, better data" — don't change
+  the retrieval architecture (BM25+cosine+reranker), just make the indexed data denser
+  and more searchable. Observations are the vehicle for this: search over fact-dense
+  observation text, but return the source turns as evidence.
+
+  The user is NOT interested in optimizing ctx0 further (81.7% is already excellent).
+  The user IS interested in closing the gap on LME-500 where the system drops to 56%.
+
+# -- HYPOTHESES ------------------------------------------------------------
+hypotheses:
+  - status: active
+    claim: "Observations will help retrieval coverage on LME-500 where BM25 top-20 misses relevant turns in large haystacks"
+    evidence:
+      - "79% of LME-500 failures are retrieval misses (BM25 top-20 insufficient)"
+      - "Observations condense 512-token chunks into 3-5 dense fact sentences"
+      - "Semantic search over observations could surface chunks that BM25 misses due to vocabulary mismatch"
+    next_test: "Run LME-500 eval with observations as search index, turns as evidence. Compare retrieval recall@20 against baseline."
+
+  - status: active
+    claim: "'Search observations, serve turns' architecture avoids evidence displacement problem"
+    evidence:
+      - "Current approach puts observations IN the evidence, displacing real turns"
+      - "User's insight: observations should be the search surface, not the evidence"
+      - "LLM needs actual conversation context, not reformulated facts"
+    next_test: "Implement pointer-based architecture: observation doc_id -> source turn IDs. BM25/cosine searches observations, evidence assembly pulls raw turns."
+
+  - status: confirmed
+    claim: "Observations hurt at ctx0 scale"
+    evidence:
+      - "4 experiments, all worse: 45-46/60 vs 48/60 baseline"
+      - "82% of vector index becomes observations, displacing real evidence"
+
+  - status: ruled_out
+    claim: "Code oracle can recover lost SubEM points"
+    evidence:
+      - "0/500 improvements on LME-500"
+      - "2 regressions from oracle corrupting correct answers"
+
+# -- BLOCKERS & QUESTIONS --------------------------------------------------
+blockers: []
+questions:
+  - "What's the right ratio of observations to turns in the vector index for LME-500 scale?"
+  - "Should observations replace turn embeddings entirely, or augment them?"
+  - "How to implement the pointer-based 'search observations, serve turns' architecture in recall()?"
+
+# -- NEXT STEPS ------------------------------------------------------------
+next:
+  - "Implement 'search observations, serve turns' in foundry/retrieval.py: observations as search index with pointers to source turn IDs, evidence assembly pulls raw turns"
+  - "Run LME-500 eval with new architecture: python3 -u foundry/eval/run_engram.py --longmemeval_json output/longmemeval_s.json --use_recall --retrieve_top_k 20 --event_frames --dual_extraction --local_deriver --tag obs_search_lme500"
+  - "If observations help LME-500: measure retrieval recall@20 improvement to quantify coverage gain"
+  - "If neutral/negative: try observation-only index (no turns in vector space at all) to eliminate displacement entirely"
+  - "Training data pipeline: rerun with SLM deriver single-process for all 3200 chunks"
+  - "Student model: LoRA fine-tune qwen2.5-1.5b on dual output (schema + observations) once architecture validated"
+
+# -- NEXT SESSION PROMPT (REQUIRED) ----------------------------------------
+next_session_prompt: |
+  Resume from handoff at `thoughts/shared/handoffs/general/2026-04-29_11-28_dual-extraction-scale-insight.yaml`.
+
+  We tested dual extraction (schema->deriver->NL observations) on ctx0 and it HURTS
+  (all 4 variants: 45-46/60 vs 48/60 baseline). Root cause: at ctx0 scale (1282 turns),
+  BM25 already finds the right evidence. Observations (5913) overwhelm turns in the
+  vector index (82% observations), displacing real evidence.
+
+  The key insight: observations should help at LME-500 scale (56% SubEM, 280/500) where
+  79% of failures are retrieval misses. BM25 top-20 can't find relevant turns in large
+  haystacks. Observations condense chunks into dense fact sentences that semantic search
+  can surface.
+
+  Architecture: "search observations, serve turns" — observations are the search index
+  (BM25 + cosine), but evidence assembly pulls the raw source turns, not the observations.
+  Each observation carries pointers to its source turn IDs.
+
+  Priority 1: Implement the pointer-based architecture in `foundry/retrieval.py:recall()`.
+  Currently `_inject_observations()` in `foundry/eval/run_engram.py` (L278-354) stores
+  observations with doc_ids >= 100_000. Modify so that when retrieval hits an observation
+  doc_id, it resolves to the source turn(s) and returns those as evidence.
+
+  Priority 2: Run LME-500 eval with new architecture against 280/500 baseline.
+  Command: `python3 -u foundry/eval/run_engram.py --longmemeval_json output/longmemeval_s.json --use_recall --retrieve_top_k 20 --event_frames --dual_extraction --local_deriver --tag obs_search_lme500`
+
+  Priority 3: If observations help, measure retrieval recall@20 improvement.
+
+  Config: `--use_recall --retrieve_top_k 20 --event_frames`. LME-500 dataset at
+  `output/longmemeval_s.json`. v9 faceted cache at `output/runpod_backup/msl_cache_v9_cs512.json`.
+
+# -- FILE MANIFEST ---------------------------------------------------------
+files:
+  created:
+    - foundry/eval/build_training_data.py
+    - foundry/eval/consolidate_observations.py
+    - thoughts/shared/handoffs/general/2026-04-25_dual-extraction-eval.md
+  modified:
+    - foundry/eval/run_engram.py
+    - foundry/retrieval.py

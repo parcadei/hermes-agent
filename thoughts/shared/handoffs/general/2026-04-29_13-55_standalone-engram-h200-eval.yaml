@@ -1,0 +1,154 @@
+root_span_id: cc529564-f441-4ece-b05a-63c1edd27c29
+turn_span_id: 
+session_id: cc529564-f441-4ece-b05a-63c1edd27c29
+---
+session: general
+date: 2026-04-29
+status: partial
+outcome: PARTIAL_PLUS
+---
+
+goal: Built standalone engram directory, generated fresh v9 cache on H200, kicked off LME-500 baseline eval
+now: Check LME-500 eval results (baseline_h200_lme500), compare against 280/500 (56%). Then test "search observations, serve turns" architecture.
+test: "cd ~/Desktop/engram && python3 -c \"import json; d=json.load(open('results/engram/$(ls -t results/engram/*baseline_h200*|head -1)')); print(f'SubEM: {d[\"overall_metrics\"][\"sub_em\"]}')\""
+
+mental_model: |
+  The engram memory system has been extracted into a standalone directory at
+  ~/Desktop/engram/ (3.6GB). It is fully self-contained — no dependency on
+  hermes-agent repo. All imports fixed and tested (47/47 tests pass).
+
+  Layout: foundry/ (core system), mabench/ (parser), eval/ (MemoryAgentBench
+  framework), data/ (caches + datasets), results/ (eval outputs), sessions/
+  (JSONL logs + auto-memory), proofs/ (Lean source, no .lake).
+
+  Fresh v9 cache generated on H200 in 44 min (was 4h on A40): 3200 chunks,
+  29209 entities, 33648 relations, 1716 temporal, 0 errors.
+  File: data/msl_cache_v9_h200.json
+
+  Import path setup: ENGRAM_ROOT env var or auto-detected from foundry/eval/.
+  _EVAL_PKG = engram/eval (was MemoryAgentBench), _MABENCH = engram/mabench
+  (was proofs/hermes-NLCDM/python/mabench). dotenv loads from engram/.env.
+
+  RunPod H200: root@103.196.86.160 -p 40960. Driver 570.195 = CUDA 12.8.
+  Needed torch 2.6.0 (not 2.11 which requires CUDA 13.0), vLLM 0.8.5,
+  transformers 4.57.6. Had to uninstall torch_c_dlpack_ext (ABI mismatch).
+  vLLM launch: --enable-prefix-caching (8K system prompt cached after 1st req).
+
+codebase_state:
+  builds: true
+  tests_passing: 47/47
+  test_command: "cd ~/Desktop/engram && python3 -m pytest foundry/tests/test_event_frames.py -q"
+  pre_existing_failures: []
+  uncommitted_changes: false
+  branch: standalone (no git yet)
+  dirty_files: []
+  warnings: "clean"
+
+done_this_session:
+  - task: Created standalone ~/Desktop/engram directory from hermes-agent repo
+    files: [~/Desktop/engram/]
+  - task: Fixed imports in run_engram.py, run_engram_fc.py, train_oracle.py for new layout
+    files: [foundry/eval/run_engram.py, foundry/eval/run_engram_fc.py, foundry/eval/train_oracle.py]
+  - task: Created eval/utils/__init__.py (was missing)
+    files: [eval/utils/__init__.py]
+  - task: Generated fresh v9 cache on H200 (44 min, 0 errors)
+    files: [data/msl_cache_v9_h200.json]
+  - task: Kicked off LME-500 baseline eval
+    files: [results/engram/]
+  - task: Created handoff from previous dual extraction eval session
+    files: [thoughts/shared/handoffs/general/2026-04-29_11-28_dual-extraction-scale-insight.yaml]
+
+decisions:
+  - name: standalone_directory
+    chose: Extract memory research into ~/Desktop/engram as flat sibling dirs
+    over: [git clone + submodule, symlinks, monorepo subfolder]
+    because: "User wanted clean separation from hermes-agent. Flat layout (foundry/, mabench/, eval/ as siblings) is simplest. No git overhead."
+
+  - name: h200_vllm_config
+    chose: vLLM 0.8.5 + torch 2.6.0 + transformers 4.57.6
+    over: [vLLM 0.20.0 (needed CUDA 13.0), upgrading driver (can't on RunPod)]
+    because: "RunPod H200 driver is 570.195 = CUDA 12.8 max. torch 2.11/vLLM 0.20 compiled for CUDA 13.0. Had to downgrade to compatible set."
+    constraint: "Can't upgrade CUDA driver inside RunPod container"
+
+findings:
+  critical:
+    - "RunPod H200 has CUDA 12.8 driver (570.195). torch 2.11/vLLM 0.20 need CUDA 13.0. Use torch 2.6.0 + vLLM 0.8.5."
+    - "torch_c_dlpack_ext causes ABI mismatch when torch is downgraded. Must uninstall it."
+    - "LME-500 eval is running as background process. Output at results/engram/*baseline_h200*"
+  useful:
+    - "H200 extraction rate: 1.2 chunks/s with 32 workers. 44 min for 3200 chunks (vs 4h on A40)."
+    - "Prefix caching helps but rate stays ~1.2/s — bottleneck is decode, not prefill."
+    - "eval/utils/__init__.py was missing in original MemoryAgentBench — created empty one."
+    - "multipass_cache_cs512.json is only 9.2MB (not 150MB as estimated). Compact format."
+
+worked:
+  - "Standalone directory with fixed imports — 47/47 tests pass"
+  - "vLLM 0.8.5 + torch 2.6.0 on H200 CUDA 12.8"
+  - "--enable-prefix-caching for the 8K v9 system prompt"
+
+failed:
+  - attempted: "vLLM 0.20.0 on RunPod H200"
+    root_cause: "Compiled for CUDA 13.0, driver only supports 12.8"
+    avoid: "Don't use latest vLLM on pods with older drivers"
+    use_instead: "pip install 'vllm>=0.7,<0.9' and let pip resolve compatible torch"
+
+  - attempted: "nohup with backgrounding over SSH"
+    root_cause: "SSH exits 255 when backgrounding — process may or may not survive"
+    avoid: "Don't rely on exit code from nohup over SSH"
+    use_instead: "Write a launcher script, nohup it, then check separately"
+
+hypotheses:
+  - status: active
+    claim: "H200 v9 cache produces same eval quality as A40 cache"
+    evidence:
+      - "Same model (Qwen2.5-7B), same prompt, same chunks"
+      - "29209 entities vs ~28K — slightly more, likely from fewer timeouts"
+    next_test: "Compare LME-500 SubEM: should be ~280/500 (56%)"
+
+blockers: []
+questions:
+  - "Does the H200 cache match the A40 baseline (280/500)?"
+  - "After baseline confirmed, ready to test 'search observations, serve turns' on LME-500"
+
+next:
+  - "Check LME-500 baseline results — look for *baseline_h200* in results/engram/"
+  - "If ~280/500: baseline confirmed. Proceed to observation experiments on LME-500."
+  - "Implement 'search observations, serve turns' in foundry/retrieval.py — observations as search index, raw turns as evidence"
+  - "Can shut down RunPod H200 — cache is local"
+
+next_session_prompt: |
+  Working directory: ~/Desktop/engram (standalone, no hermes-agent dependency).
+
+  An LME-500 eval is running (or recently finished). Check results:
+  ```
+  ls -t ~/Desktop/engram/results/engram/*baseline_h200* | head -1
+  ```
+  Then extract SubEM:
+  ```
+  python3 -c "import json; f=sorted(glob.glob('results/engram/*baseline_h200*'))[-1]; d=json.load(open(f)); print(f'SubEM: {d[\"overall_metrics\"][\"sub_em\"]}')"
+  ```
+  Expected: ~280/500 (56%), matching old A40 cache baseline.
+
+  If confirmed: next experiment is "search observations, serve turns" on LME-500.
+  Architecture: observations as BM25+cosine search surface, but evidence assembly
+  resolves observation doc_ids back to source turn IDs and serves raw turns to LLM.
+  See handoff at thoughts/shared/handoffs/general/2026-04-29_11-28_dual-extraction-scale-insight.yaml
+  for full context on why observations hurt at ctx0 but may help at LME-500 scale.
+
+  Key files: foundry/eval/run_engram.py (eval harness), foundry/retrieval.py (recall()),
+  data/msl_cache_v9_h200.json (fresh v9 cache from H200, 3200 chunks, 0 errors).
+
+  RunPod H200: root@103.196.86.160 -p 40960 (can shut down if cache downloaded).
+
+files:
+  created:
+    - ~/Desktop/engram/ (entire standalone directory)
+    - ~/Desktop/engram/eval/utils/__init__.py
+    - ~/Desktop/engram/data/msl_cache_v9_h200.json
+    - ~/Desktop/engram/pyproject.toml
+    - thoughts/shared/handoffs/general/2026-04-29_11-28_dual-extraction-scale-insight.yaml
+    - thoughts/shared/handoffs/general/2026-04-29_13-55_standalone-engram-h200-eval.yaml
+  modified:
+    - ~/Desktop/engram/foundry/eval/run_engram.py (import paths)
+    - ~/Desktop/engram/foundry/eval/run_engram_fc.py (import paths)
+    - ~/Desktop/engram/foundry/eval/train_oracle.py (import paths)

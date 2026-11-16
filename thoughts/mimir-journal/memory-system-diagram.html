@@ -1,0 +1,898 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Notebook: a Drop-in Memory Layer</title>
+<meta name="description" content="A hand-drawn explainer for a drop-in memory layer: recall() before the answer, remember() after, around any frozen LLM.">
+<meta name="color-scheme" content="light">
+<meta name="theme-color" content="#F4EEE0">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Kalam:wght@400;700&family=Caveat:wght@600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/roughjs@4.6.6/bundled/rough.js"></script>
+<style>
+:root{
+  /* paper + ink */
+  --paper:#F4EEE0; --paper-card:#FBF7ED; --paper-chip:#FCF9F1;
+  --ink:#302D28; --ink-soft:rgba(48,45,40,0.72); --ink-faint:rgba(48,45,40,0.52);
+  /* sticky palette — one saturation family, warm + desaturated */
+  --yellow:#EACF8E; --coral:#E3A491; --sage:#AAC49E;
+  --peri:#A5B9D8;  --lav:#C3ABD3;   --teal:#8CB9B0;
+  --marker:#F3DE93;
+  /* shadows are tinted to the paper hue, never neutral grey */
+  --shadow-rgb:174,161,133;
+  --sk-1:2px 3px 0 rgba(var(--shadow-rgb),0.42);
+  --sk-2:3px 4px 0 rgba(var(--shadow-rgb),0.45);
+  --sk-3:5px 7px 0 rgba(var(--shadow-rgb),0.40);
+  --sk-4:4px 5px 0 rgba(var(--shadow-rgb),0.46);
+  /* vertical rhythm */
+  --gap:20px; --sec:clamp(56px,6.5vw,92px); --measure:66ch;
+  --ease:cubic-bezier(0.2,0,0,1);
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+html{scroll-behavior:smooth}
+@media (prefers-reduced-motion: reduce){html{scroll-behavior:auto}}
+body{
+  background-color:var(--paper);
+  background-image:
+    radial-gradient(circle at 50% 34%, rgba(140,185,176,0.10), rgba(140,185,176,0) 62%),
+    radial-gradient(rgba(48,45,40,0.048) 1.3px, transparent 1.4px);
+  background-size:auto, 24px 24px;
+  color:var(--ink);
+  font-family:"Kalam","Caveat","Comic Neue","Segoe Print",ui-rounded,cursive,sans-serif;
+  letter-spacing:0.2px; line-height:1.42;
+  font-variant-numeric:lining-nums tabular-nums;
+  -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
+  text-rendering:optimizeLegibility;
+  padding:0 0 clamp(64px,8vw,104px);
+}
+.wrap{max-width:1520px;margin:0 auto;padding:0 clamp(18px,3vw,30px)}
+.mono{font-family:"Space Mono","JetBrains Mono","Fira Code",ui-monospace,"SFMono-Regular",monospace;letter-spacing:-0.01em;font-variant-numeric:tabular-nums}
+/* a call signature should never break mid-token in running prose */
+p .mono,.detail .mono,.pscn .mono{white-space:nowrap}
+.nb{white-space:nowrap}
+:focus-visible{outline:2.5px solid var(--ink);outline-offset:3px;border-radius:6px}
+
+/* ---- hero ---- */
+header.hero{text-align:center;padding:clamp(40px,6vw,72px) 8px clamp(10px,1.6vw,18px)}
+h1.title{
+  font-family:"Caveat","Kalam",cursive; font-weight:700;
+  font-size:clamp(40px,6.2vw,74px); line-height:0.95; letter-spacing:-0.005em;
+  margin:0 auto 14px; max-width:19ch; text-wrap:balance;
+}
+.tagline{
+  font-size:clamp(17px,2.05vw,22px); line-height:1.5;
+  max-width:56ch; margin:0 auto 16px; color:var(--ink);
+  text-wrap:pretty;
+}
+.onesent{
+  font-size:clamp(14.5px,1.6vw,17.5px); line-height:1.62;
+  max-width:var(--measure); margin:0 auto; color:var(--ink-soft);
+  text-wrap:pretty;
+}
+mark.hl{
+  background:linear-gradient(104deg, rgba(243,222,147,0) 0.5%, rgba(243,222,147,0.78) 3%, rgba(243,222,147,0.66) 96%, rgba(243,222,147,0) 99.5%);
+  padding:0 .14em; border-radius:3px; color:inherit;
+  box-decoration-break:clone; -webkit-box-decoration-break:clone;
+}
+/* eyebrow / small-caps section label */
+.eyebrow{
+  display:block; font-family:"Space Mono",ui-monospace,monospace;
+  font-size:11px; font-weight:700; letter-spacing:0.2em; text-transform:uppercase;
+  color:var(--ink-faint); text-align:center; margin:0 0 6px;
+}
+h2.section{
+  font-family:"Caveat","Kalam",cursive;font-weight:700;
+  font-size:clamp(30px,3.5vw,46px); line-height:1.02; letter-spacing:-0.005em;
+  margin:0 auto 8px; text-align:center; max-width:22ch; text-wrap:balance;
+}
+.sechead{margin:var(--sec) 0 0}
+.sub{
+  text-align:center; color:var(--ink-soft); line-height:1.55;
+  margin:0 auto clamp(22px,2.6vw,32px); max-width:62ch; font-size:16px;
+  text-wrap:pretty;
+}
+
+/* ---- diagram ---- */
+.board-frame{
+  position:relative;margin:clamp(10px,1.6vw,20px) auto 0;max-width:1500px;
+  background:rgba(140,185,176,0.05);
+  border-radius:26px;
+  padding:4px 0 2px;
+}
+svg#board{width:100%;height:auto;display:block;overflow:visible}
+.legend-inline{
+  display:flex;flex-wrap:wrap;gap:10px 22px;justify-content:center;
+  margin:clamp(14px,1.8vw,22px) auto 0;max-width:1080px;
+  font-size:14.5px;line-height:1.3;color:var(--ink-soft)
+}
+.legend-inline .k{display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
+.dot{
+  width:15px;height:15px;flex:none;border-radius:5px 4px 6px 3px;
+  border:1.6px solid var(--ink);display:inline-block;transform:rotate(-3deg);
+  box-shadow:1px 1.5px 0 rgba(var(--shadow-rgb),0.4);
+}
+.dashline{
+  width:26px;height:0;flex:none;border-top:2.5px dashed var(--ink);
+  display:inline-block;transform:translateY(-1px)
+}
+
+/* ---- generic sticky cards ---- */
+.grid{display:grid;gap:var(--gap)}
+.legend-grid{grid-template-columns:repeat(auto-fill,minmax(256px,1fr));max-width:1440px;margin:0 auto}
+.sticky{
+  --tilt:0deg;
+  border:1.5px solid var(--ink); border-radius:14px 11px 16px 9px;
+  padding:13px 15px 14px; position:relative;
+  box-shadow:var(--sk-2);
+  transform:rotate(var(--tilt));
+  transition:transform .22s var(--ease), box-shadow .22s var(--ease);
+}
+.sticky:nth-child(3n){--tilt:-1.1deg}
+.sticky:nth-child(3n+1){--tilt:0.9deg}
+.sticky:nth-child(3n+2){--tilt:-0.4deg}
+.sticky .term{font-weight:700;font-size:16px;line-height:1.28;margin-bottom:4px;text-wrap:balance}
+.sticky .def{font-size:14px;line-height:1.5;color:rgba(41,38,33,0.86);text-wrap:pretty}
+.sticky .term.mono,.sticky .term .mono{font-size:13.5px}
+.c-read{background:var(--peri)} .c-write{background:var(--coral)}
+.c-store{background:var(--sage)} .c-learn{background:var(--lav)}
+.c-scope{background:var(--teal)} .c-int{background:var(--yellow)}
+.c-paper{background:var(--paper-card)}
+
+/* hover lift: the card peels off the paper and its shadow grows, like a real
+   sticky note being nudged. Specificity is raised so it also beats .reveal.shown. */
+@media (hover:hover){
+  .lift:hover,
+  .js .reveal.shown.lift:hover{
+    transform:rotate(var(--tilt,0deg)) translate(-2px,-3px);
+    box-shadow:var(--sk-3);
+  }
+}
+.lift:focus-visible,
+.js .reveal.shown.lift:focus-visible{
+  transform:rotate(var(--tilt,0deg)) translate(-2px,-3px);
+  box-shadow:var(--sk-3);
+}
+
+/* invariants */
+/* sized so all five promises land on one row at desktop, not four plus an orphan */
+.inv-grid{grid-template-columns:repeat(auto-fit,minmax(232px,1fr));max-width:1340px;margin:0 auto}
+.inv{
+  font-size:16px;font-weight:700;line-height:1.42;min-height:104px;
+  display:flex;align-items:center;gap:10px;padding:15px 17px 16px;
+  background:var(--yellow);text-wrap:pretty;
+}
+.inv:nth-child(2){background:var(--sage)}
+.inv:nth-child(3){background:var(--coral)}
+.inv:nth-child(4){background:var(--peri)}
+.inv:nth-child(5){background:var(--lav)}
+.inv .num{
+  font-family:"Space Mono",ui-monospace,monospace;font-size:13px;font-weight:700;
+  flex:none;align-self:flex-start;margin-top:2px;
+  width:26px;height:26px;line-height:23px;text-align:center;
+  border:1.5px solid var(--ink);border-radius:50%;
+  background:rgba(252,249,241,0.62);font-variant-numeric:tabular-nums;
+}
+
+/* plug-in / code */
+.api-row{display:grid;grid-template-columns:1fr 1fr;gap:var(--gap);max-width:1120px;margin:0 auto clamp(20px,2.4vw,30px)}
+@media(max-width:760px){.api-row{grid-template-columns:1fr}.steps{grid-template-columns:1fr!important}.usecases{grid-template-columns:1fr!important}}
+.api{
+  --tilt:0deg;
+  background:var(--paper-card);border:1.5px solid var(--ink);
+  border-radius:23px 18px 22px 19px;padding:17px 19px 18px;
+  box-shadow:var(--sk-2);
+  transform:rotate(var(--tilt));
+  transition:transform .22s var(--ease), box-shadow .22s var(--ease);
+}
+.api:nth-child(1){--tilt:-0.5deg} .api:nth-child(2){--tilt:0.5deg}
+.api .fn{font-weight:700;font-size:18px;line-height:1.3}
+.api .fn .mono{font-size:15.5px}
+.api .when{
+  display:inline-block;font-family:"Space Mono",ui-monospace,monospace;
+  font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;
+  padding:3px 11px;border-radius:20px;border:1.5px solid var(--ink);margin:9px 0 10px;
+}
+.when.before{background:var(--peri)} .when.after{background:var(--coral)}
+.api .detail{font-size:14.5px;line-height:1.55;color:rgba(41,38,33,0.88);max-width:52ch;text-wrap:pretty}
+.codechip{
+  display:inline-block;background:var(--paper-chip);border:1.3px solid var(--ink);
+  border-radius:8px;padding:1px 8px;margin:1px 0;
+}
+.steps{display:grid;grid-template-columns:repeat(2,1fr);gap:var(--gap);max-width:1120px;margin:0 auto}
+.step{
+  --tilt:0deg;
+  background:var(--paper-card);border:1.5px solid var(--ink);
+  border-radius:22px 18px 24px 17px;padding:16px 17px 17px;
+  box-shadow:var(--sk-2);
+  transform:rotate(var(--tilt));
+  transition:transform .22s var(--ease), box-shadow .22s var(--ease);
+}
+.step:nth-child(odd){--tilt:-0.45deg} .step:nth-child(even){--tilt:0.45deg}
+.step h4{
+  font-family:"Caveat","Kalam",cursive;font-weight:700;font-size:25px;line-height:1.05;
+  margin:0 0 10px;display:flex;align-items:baseline;gap:9px;
+}
+.step h4 .n{
+  font-family:"Space Mono",ui-monospace,monospace;font-size:12px;font-weight:700;
+  flex:none;width:24px;height:24px;line-height:21px;text-align:center;
+  border:1.5px solid var(--ink);border-radius:50%;background:var(--yellow);
+  transform:translateY(-2px);font-variant-numeric:tabular-nums;
+}
+pre.code{
+  background:#2C2924;color:#F2EBDB;border-radius:8px;padding:12px 14px;margin:0 0 10px;
+  font-family:"Space Mono",ui-monospace,monospace;font-size:13px;line-height:1.62;
+  overflow-x:auto;border:1.5px solid var(--ink);
+  font-variant-numeric:tabular-nums;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,0.07), 2px 3px 0 rgba(var(--shadow-rgb),0.5);
+}
+pre.code .cm{color:#A79E8B} pre.code .st{color:#E7C98A} pre.code .kw{color:#E9A88F}
+.step .detail{font-size:14px;line-height:1.55;color:rgba(41,38,33,0.88);max-width:52ch;text-wrap:pretty}
+
+/* use cases */
+/* align-items:start so the shorter panel ends where its content ends instead of
+   stretching into a large empty box next to the taller one */
+.usecases{display:grid;grid-template-columns:1fr 1fr;gap:clamp(20px,2.4vw,28px);
+  max-width:1300px;margin:0 auto;align-items:start}
+.panel{
+  border:2px solid var(--ink);border-radius:26px 20px 28px 19px;
+  padding:20px 22px 22px;position:relative;box-shadow:var(--sk-4);
+}
+.panel.single{background:rgba(165,185,216,0.17)}
+.panel.mixed{background:rgba(195,171,211,0.16)}
+.panel .ptitle{
+  font-family:"Caveat","Kalam",cursive;font-weight:700;font-size:30px;
+  margin:0 0 4px;line-height:1.05;text-wrap:balance;
+}
+.panel .ptitle .kind{
+  font-family:"Space Mono",ui-monospace,monospace;font-size:11px;font-weight:700;
+  letter-spacing:0.18em;text-transform:uppercase;color:var(--ink-faint);
+  display:block;margin-bottom:3px;
+}
+.panel .pscn{font-size:14.5px;line-height:1.55;color:rgba(41,38,33,0.88);margin:0 0 16px;max-width:56ch;text-wrap:pretty}
+.scopebox{
+  border:1.6px solid var(--ink);border-radius:12px;padding:9px 13px;margin:0 0 12px;
+  font-weight:700;position:relative;background:var(--teal);
+  box-shadow:var(--sk-1);
+}
+.scopebox .tag{font-size:13px}
+.scope-stack{display:flex;flex-direction:column;gap:10px;margin:0 0 14px}
+.scope-stack .scopebox{margin:0;transform:rotate(-0.6deg)}
+.scope-stack .scopebox:nth-child(2){transform:rotate(0.7deg);background:#82B2A9}
+.scope-stack .scopebox:nth-child(3){transform:rotate(-0.3deg);background:#96C0B7}
+.userpill{
+  display:inline-block;background:var(--yellow);border:1.6px solid var(--ink);
+  border-radius:22px;padding:5px 15px;font-weight:700;font-size:14px;
+  margin:0 0 14px;transform:rotate(-1deg);box-shadow:var(--sk-1);
+}
+.walk{list-style:none;padding:0;margin:0;counter-reset:w}
+.walk li{
+  position:relative;padding:9px 0 10px 32px;font-size:14px;line-height:1.55;
+  border-bottom:1px dashed rgba(48,45,40,0.2);text-wrap:pretty;
+}
+.walk li:last-child{border-bottom:none;padding-bottom:2px}
+.walk li::before{
+  counter-increment:w;content:counter(w);position:absolute;left:0;top:9px;
+  width:22px;height:22px;border-radius:50%;border:1.5px solid var(--ink);
+  background:var(--paper-card);font-size:11.5px;font-weight:700;text-align:center;
+  line-height:20px;font-family:"Space Mono",ui-monospace,monospace;
+  font-variant-numeric:tabular-nums;
+}
+.walk li b{
+  font-family:"Space Mono",ui-monospace,monospace;font-size:12px;
+  background:var(--paper-chip);border:1px solid var(--ink);border-radius:6px;
+  padding:1px 5px;overflow-wrap:break-word;
+  box-decoration-break:clone; -webkit-box-decoration-break:clone;
+}
+.scopenote{
+  margin-top:16px;font-size:13.5px;line-height:1.55;
+  background:rgba(140,185,176,0.22);border:1.5px dashed var(--ink);
+  border-radius:14px;padding:12px 14px;text-wrap:pretty;
+}
+.who{max-width:1180px;margin:0 auto;display:grid;grid-template-columns:1fr 1fr;gap:var(--gap)}
+@media(max-width:760px){.who{grid-template-columns:1fr}}
+.who .sticky{background:var(--paper-card)}
+.who .sticky .def{font-size:14.5px}
+footer.foot{
+  text-align:center;margin:var(--sec) auto 0;max-width:70ch;
+  font-size:14px;line-height:1.6;color:var(--ink-faint);text-wrap:pretty;
+}
+.taxo{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin:10px auto 0;max-width:760px}
+.taxo .chip{background:var(--teal);border:1.5px solid var(--ink);border-radius:18px;padding:2px 11px;font-size:12.5px;font-weight:700}
+
+/* ---- staggered sketch-in reveal (JS-gated, reduced-motion safe) ---- */
+.js .reveal{opacity:0}
+@media (prefers-reduced-motion: no-preference){
+  .js .reveal{
+    transform:translateY(10px) rotate(var(--tilt,0deg)) scale(0.985);
+    transition:opacity .5s var(--ease), transform .5s var(--ease);
+    transition-delay:var(--d,0ms);
+  }
+  .js .reveal.shown{opacity:1;transform:translateY(0) rotate(var(--tilt,0deg)) scale(1)}
+  /* diagram groups fade in like ink hitting paper */
+  .js #board .rv{opacity:0;transition:opacity .45s var(--ease);transition-delay:var(--d,0ms)}
+  .js #board .rv.shown{opacity:1}
+}
+@media (prefers-reduced-motion: reduce){
+  .js .reveal{opacity:1}
+  .js #board .rv{opacity:1}
+  .sticky,.api,.step{transition:none}
+}
+</style>
+<script>document.documentElement.className+=" js";</script>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <h1 class="title reveal">The Notebook: a <span class="nb">Drop-in</span> Memory Layer</h1>
+    <p class="tagline reveal"><mark class="hl">Two calls</mark> around any LLM. <b>recall</b> before the answer, <b>remember</b> after. The model stays <mark class="hl">frozen</mark>; the notebook grows.</p>
+    <p class="onesent reveal">It's a notebook that lives <b>outside</b> the model: you <span class="mono">recall(query, scope)</span> to pull the right context in, then <span class="mono">remember(turn, scope)</span> to write the turn back, so any frozen LLM gains long-term, versioned, scoped memory without touching a single weight.</p>
+  </header>
+
+  <div class="board-frame">
+    <svg id="board" viewBox="0 0 1500 1055" role="img"
+      aria-label="A hand-drawn loop diagram of the memory system: recall runs before the frozen model and remember runs after, around a central notebook store, with a learning flywheel that tunes the extractor and retriever, and a scope tag applied to everything."></svg>
+  </div>
+
+  <div class="legend-inline" aria-label="Diagram colour key">
+    <span class="k"><span class="dot" style="background:var(--yellow)"></span> Integrator (your app + frozen LLM)</span>
+    <span class="k"><span class="dot" style="background:var(--peri)"></span> Read · recall path</span>
+    <span class="k"><span class="dot" style="background:var(--coral)"></span> Write · remember path</span>
+    <span class="k"><span class="dot" style="background:var(--sage)"></span> Store · the notebook</span>
+    <span class="k"><span class="dot" style="background:var(--lav)"></span> Learn · flywheel</span>
+    <span class="k"><span class="dot" style="background:var(--teal)"></span> Scope tag</span>
+    <span class="k"><span class="dashline" style="border-color:var(--lav)"></span> improvement signal (not data)</span>
+  </div>
+
+  <!-- ============ LEGEND ============ -->
+  <section class="sechead">
+    <span class="eyebrow">Vocabulary</span>
+    <h2 class="section">Little dictionary</h2>
+    <p class="sub">Every word on the board, in one line each.</p>
+  </section>
+  <div class="grid legend-grid" id="legend"></div>
+
+  <!-- ============ INVARIANTS ============ -->
+  <section class="sechead">
+    <h2 class="section">The 5 promises it always keeps</h2>
+    <p class="sub">The rules that never bend, no matter the app or the domain.</p>
+  </section>
+  <div class="grid inv-grid" id="invariants"></div>
+
+  <!-- ============ PLUG IT IN ============ -->
+  <section class="sechead">
+    <span class="eyebrow">The API</span>
+    <h2 class="section">Plug it in</h2>
+    <p class="sub">The whole API is <mark class="hl">two calls</mark>. Wrap them around your model and you're done.</p>
+  </section>
+
+  <div class="api-row">
+    <div class="api reveal lift" tabindex="0">
+      <div class="fn"><span class="mono">recall(query, scope) → context</span></div>
+      <span class="when before">Before the answer</span>
+      <div class="detail">Wide candidates → rerank → top-10 raw turns, best-first, plus PROFILE + SPINE, budget-capped. Carries an <mark class="hl">abstain</mark> signal so you know when it doesn't know.</div>
+    </div>
+    <div class="api reveal lift" tabindex="0">
+      <div class="fn"><span class="mono">remember(turn, scope) → ack</span></div>
+      <span class="when after">After the answer</span>
+      <div class="detail">Fire-and-forget: the extractor makes atomic facts, the bitemporal reconciler versions them (<span class="mono">ADD / UPDATE / DELETE / NOOP</span>), the index updates. Next recall sees it.</div>
+    </div>
+  </div>
+
+  <div class="steps" id="steps"></div>
+
+  <!-- ============ SINGLE vs MIXED ============ -->
+  <section class="sechead">
+    <h2 class="section">One scope, or many</h2>
+    <p class="sub">Same engine. <mark class="hl">Separate by scope tag, never a per-domain schema</mark>. Adding a domain is one new tag string.</p>
+  </section>
+  <div class="usecases" id="usecases"></div>
+
+  <!-- ============ WHO ============ -->
+  <section class="sechead">
+    <span class="eyebrow">Audience</span>
+    <h2 class="section">Who it's for</h2>
+    <p class="sub">Drop-in memory around any frozen LLM, single-purpose or multi-domain.</p>
+  </section>
+  <div class="who" id="who"></div>
+
+  <footer class="foot">
+    A notebook your model never edits · recall() before, remember() after · never hard-delete · serve raw turns · know when you don't know.
+  </footer>
+</div>
+
+<script id="diagram-script">
+(function(){
+"use strict";
+var P = {ink:"#302D28",paper:"#F4EEE0",card:"#FBF7ED",chip:"#FCF9F1",
+  yellow:"#EACF8E",coral:"#E3A491",sage:"#AAC49E",peri:"#A5B9D8",
+  lav:"#C3ABD3",teal:"#8CB9B0",marker:"#F3DE93",shadow:"#AEA185"};
+var GROUPFILL = {integrator:P.yellow,read:P.peri,write:P.coral,store:P.sage,learn:P.lav,scope:P.teal};
+
+/* ---------- grid ---------- */
+var MARGIN=60, COL_W=250, ROW_H=155, GAP=42, GAP_V=45;
+
+var NODES = [
+ {id:"app_llm", group:"integrator", col:1.9, row:0,   wCols:1.9, label:"Your App + Frozen LLM", sub:"the model never changes", frozen:true},
+ {id:"recall",  group:"read",  col:0.15, row:1, wCols:1.55, label:"recall(query, scope)", sub:"before the answer", mono:true, chip:"personal/atlas"},
+ {id:"retrieve",group:"read",  col:0.15, row:2, wCols:1.55, label:"Search + Rerank", sub:"BM25 ∪ vectors → top-10"},
+ {id:"gate",    group:"read",  col:0.15, row:3, wCols:1.55, label:"Know-When-Unsure Gate", sub:"answer · ask · escalate", mk:"abstain"},
+ {id:"assemble",group:"read",  col:0.15, row:4, wCols:1.55, label:"Assemble Context", sub:"profile + spine + raw turns", mk:"raw turns"},
+ {id:"index",   group:"store", col:2.1,  row:1.5, wCols:1.6, label:"Index", sub:"BM25 + embeddings"},
+ {id:"facts",   group:"store", col:2.1,  row:2.5, wCols:1.6, label:"Facts + Raw Turns", sub:"versioned, never deleted", mk:"never deleted", chip:"work/tldr", tomb:true},
+ {id:"spine",   group:"store", col:2.1,  row:3.5, wCols:1.6, label:"Spine + Profile", sub:"rolling summary + who-you-are", chip:"personal/guitar"},
+ {id:"remember",group:"write", col:4.1,  row:1, wCols:1.6, label:"remember(turn, scope)", sub:"after the answer", mono:true},
+ {id:"extract", group:"write", col:4.1,  row:2, wCols:1.6, label:"Extractor  ★", sub:"turn → atomic facts + keys", star:true, mk:"★"},
+ {id:"reconcile",group:"write",col:4.1,  row:3, wCols:1.6, label:"Bitemporal Reconciler", sub:"add · update · delete · noop"},
+ {id:"flywheel",group:"learn", col:1.9,  row:5, wCols:1.9, label:"Flywheel", sub:"usage + fixes tune extractor & retriever"},
+ {id:"scope",   group:"scope", col:0.15, row:5, wCols:1.55, label:"Scope Tag", sub:"lifecycle × domain, on everything"}
+];
+
+var EDGES = [
+ {from:"app_llm", to:"recall",   label:"before answer",       kind:"flow"},
+ {from:"recall",  to:"retrieve", label:"query + scope",       kind:"flow"},
+ {from:"index",   to:"retrieve", label:"candidates",          kind:"flow"},
+ {from:"retrieve",to:"gate",     label:"top-10 best-first",   kind:"flow"},
+ {from:"gate",    to:"assemble", label:"confident → answer",  kind:"flow"},
+ {from:"gate",    to:"app_llm",  label:"unsure → ask / escalate", kind:"optional", route:"curve", ctrl:[-60,60], from_pt:"lf", to_pt:"lf", lpt:[285,124]},
+ {from:"facts",   to:"assemble", label:"raw turns",           kind:"flow", corridor:84, lpt:[527,610]},
+ {from:"spine",   to:"assemble", label:"profile + spine",     kind:"flow", corridor:54, lpt:[500,708]},
+ {from:"assemble",to:"app_llm",  label:"context in (budget-capped)", kind:"flow", route:"riser", lpt:[660,196]},
+ {from:"app_llm", to:"remember", label:"after answer",        kind:"flow"},
+ {from:"remember",to:"extract",  label:"raw turn",            kind:"flow"},
+ {from:"extract", to:"reconcile",label:"atomic facts",        kind:"flow"},
+ {from:"reconcile",to:"facts",   label:"add / supersede /\ntombstone", kind:"flow"},
+ {from:"facts",   to:"index",    label:"index it",            kind:"flow"},
+ {from:"reconcile",to:"spine",   label:"roll up summary",     kind:"flow"},
+ {from:"app_llm", to:"flywheel", label:"usage + corrections", kind:"feedback", route:"curve", ctrl:[1395,505], from_pt:"rt", to_pt:"rt", lpt:[1058,790]},
+ {from:"flywheel",to:"extract",  label:"tune extractor",      kind:"feedback", route:"curve", ctrl:[1055,660], from_pt:"rt", to_pt:"lf", lpt:[1024,662]},
+ {from:"flywheel",to:"retrieve", label:"tune retriever",      kind:"feedback", route:"curve", ctrl:[490,640],  from_pt:"lf", to_pt:"rt", lpt:[514,812]},
+ {from:"scope",   to:"recall",   label:"tag",                 kind:"scope", route:"curve", ctrl:[-95,580], from_pt:"lf", to_pt:"lf", lpt:[52,797]},
+ {from:"scope",   to:"remember", label:"tag",                 kind:"scope", route:"under", gy:1010, gx:1000, to_pt:"lf", lpt:[620,1010]},
+ {from:"scope",   to:"spine",    label:"tag everything",      kind:"scope", route:"curve", ctrl:[540,830], from_pt:"rt", to_pt:"bot", lpt:[660,768]}
+];
+
+/* ---------- helpers ---------- */
+function seedFor(id){var h=0;for(var i=0;i<id.length;i++){h=(h*31+id.charCodeAt(i))>>>0;}return h%100000;}
+function rectOf(n){
+  var x=MARGIN+n.col*COL_W, y=MARGIN+n.row*ROW_H;
+  var w=n.wCols*COL_W-GAP, h=ROW_H-GAP_V;
+  return {x:x,y:y,w:w,h:h,cx:x+w/2,cy:y+h/2};
+}
+var RECT={}; NODES.forEach(function(n){RECT[n.id]=rectOf(n);});
+
+var SVGNS="http://www.w3.org/2000/svg";
+var svg=document.getElementById("board");
+var rc=rough.svg(svg);
+var gEdges=document.createElementNS(SVGNS,"g");
+var gNodes=document.createElementNS(SVGNS,"g");
+var gLabels=document.createElementNS(SVGNS,"g");
+svg.appendChild(gEdges); svg.appendChild(gNodes); svg.appendChild(gLabels);
+
+function el(name,attrs){var e=document.createElementNS(SVGNS,name);for(var k in attrs){e.setAttribute(k,attrs[k]);}return e;}
+function wrapText(text,maxChars){
+  var words=text.split(" "),lines=[],cur="";
+  for(var i=0;i<words.length;i++){
+    var t=(cur?cur+" ":"")+words[i];
+    if(t.length<=maxChars){cur=t;}else{if(cur)lines.push(cur);cur=words[i];}
+  }
+  if(cur)lines.push(cur);
+  return lines;
+}
+function addText(parent,x,y,lines,opts){
+  var t=el("text",{x:x,y:y,"text-anchor":opts.anchor||"middle",
+    "font-family":opts.mono?'"Space Mono",monospace':'"Kalam","Caveat",cursive',
+    "font-weight":opts.weight||400,"font-size":opts.size,fill:opts.fill||P.ink});
+  if(opts.ls!=null)t.setAttribute("letter-spacing",opts.ls);
+  for(var i=0;i<lines.length;i++){
+    var ts=el("tspan",{x:x,dy:(i===0?0:opts.size*1.16)});
+    ts.textContent=lines[i]; t.appendChild(ts);
+  }
+  parent.appendChild(t); return t;
+}
+
+/* ---------- node points ---------- */
+function ptSide(r,side){
+  switch(side){
+    case "top": return [r.cx,r.y];
+    case "bot": return [r.cx,r.y+r.h];
+    case "lf":  return [r.x,r.cy];
+    case "rt":  return [r.x+r.w,r.cy];
+  }
+}
+
+/* ---------- routing ---------- */
+function autoElbow(A,B){
+  var dx=B.cx-A.cx, dy=B.cy-A.cy, s,e,my,mx;
+  if(Math.abs(dy)>=Math.abs(dx)){
+    if(dy>0){s=[A.cx,A.y+A.h];e=[B.cx,B.y];}else{s=[A.cx,A.y];e=[B.cx,B.y+B.h];}
+    my=(s[1]+e[1])/2; return [s,[s[0],my],[e[0],my],e];
+  }else{
+    if(dx>0){s=[A.x+A.w,A.cy];e=[B.x,B.cy];}else{s=[A.x,A.cy];e=[B.x+B.w,B.cy];}
+    mx=(s[0]+e[0])/2; return [s,[mx,s[1]],[mx,e[1]],e];
+  }
+}
+function corridorRoute(A,B,off){ // A=store(left of gap), B=assemble(right col) enter from its right edge
+  var gx=B.x+B.w+off;
+  var s=[A.x,A.cy], e=[B.x+B.w, B.cy + (off>60?-18:22)];
+  return [s,[gx,s[1]],[gx,e[1]],e];
+}
+function underRoute(A,B,e){ // drop below the board, run along a clear gutter, rise into B's left edge
+  var s=[A.cx,A.y+A.h];
+  var en=ptSide(B,e.to_pt||"lf");
+  return [s,[s[0],e.gy],[e.gx,e.gy],[e.gx,en[1]],en];
+}
+function riserRoute(A,B){ // assemble -> app_llm up the center-left gap
+  var gx=A.x+A.w+125;
+  var s=[A.x+A.w,A.cy];
+  var eY=B.y+B.h, eX=B.cx-60;
+  return [s,[gx,A.cy],[gx,eY+9],[eX,eY+9],[eX,eY]];
+}
+
+/* ---------- draw arrowhead ---------- */
+function arrowHead(px,py,angle,color,seed,sw){
+  var len=14,spread=0.42;
+  var a1=angle+Math.PI-spread,a2=angle+Math.PI+spread;
+  var o={stroke:color,strokeWidth:(sw||2.4),roughness:1.2,bowing:0.4,seed:seed};
+  gEdges.appendChild(rc.line(px,py,px+len*Math.cos(a1),py+len*Math.sin(a1),o));
+  gEdges.appendChild(rc.line(px,py,px+len*Math.cos(a2),py+len*Math.sin(a2),o));
+}
+
+/* ---------- draw one edge ---------- */
+function drawEdge(e,i){
+  var A=RECT[e.from], B=RECT[e.to], seed=1000+i*7;
+  // solid "data" flows stay chunky + wobbly; dashed "signal" arcs are thinner and
+  // much calmer (low roughness/bowing) so a long arc reads as ONE continuous line.
+  var color=P.ink, sw=2.9, dash=null, rough=1.9, bow=1.7, chip="rgba(48,45,40,0.30)";
+  if(e.kind==="optional"){color="#6E655A"; sw=2.0; dash=[10,8]; rough=0.9; bow=0.5; chip="rgba(110,101,90,0.42)";}
+  if(e.kind==="feedback"){color="#A98DBD"; sw=2.1; dash=[11,9]; rough=0.8; bow=0.4; chip="rgba(169,141,189,0.62)";}
+  if(e.kind==="scope"){    color="#5E9A90"; sw=1.7; dash=[7,7];  rough=0.7; bow=0.3; chip="rgba(94,154,144,0.62)";}
+  var opt={stroke:color,strokeWidth:sw,roughness:rough,bowing:bow,seed:seed};
+  if(dash)opt.strokeLineDash=dash;
+
+  var endPt,angle,labelPt;
+
+  if(e.route==="curve"){
+    var s=ptSide(A,e.from_pt||"bot"), en=ptSide(B,e.to_pt||"top"), c=e.ctrl;
+    var d="M "+s[0]+" "+s[1]+" Q "+c[0]+" "+c[1]+" "+en[0]+" "+en[1];
+    gEdges.appendChild(rc.path(d,opt));
+    endPt=en; angle=Math.atan2(en[1]-c[1],en[0]-c[0]);
+    labelPt=e.lpt || [0.25*s[0]+0.5*c[0]+0.25*en[0], 0.25*s[1]+0.5*c[1]+0.25*en[1]];
+  }else{
+    var pts;
+    if(e.route==="riser")pts=riserRoute(A,B);
+    else if(e.route==="under")pts=underRoute(A,B,e);
+    else if(e.corridor)pts=corridorRoute(A,B,e.corridor);
+    else pts=autoElbow(A,B);
+    gEdges.appendChild(rc.linearPath(pts,opt));
+    var p2=pts[pts.length-1], p1=pts[pts.length-2];
+    endPt=p2; angle=Math.atan2(p2[1]-p1[1],p2[0]-p1[0]);
+    var mid=pts[Math.floor(pts.length/2)-1]||pts[1];
+    var mid2=pts[Math.floor(pts.length/2)]||pts[2];
+    labelPt=e.lpt || [(mid[0]+mid2[0])/2,(mid[1]+mid2[1])/2];
+  }
+  arrowHead(endPt[0],endPt[1],angle,color,seed,e.kind?2.0:2.5);
+
+  // Every edge label gets the SAME treatment: an opaque paper chip with a thin
+  // sketch outline, anchored on its own line. Drawn on the top layer so a chip
+  // always wins over a wire, never the other way round.
+  if(e.label){
+    var isMono=(e.kind==="scope");
+    var fs=isMono?11.5:12.5;
+    var lines=e.label.split("\n"), longest=0;
+    lines.forEach(function(s){if(s.length>longest)longest=s.length;});
+    var lh=fs*1.16;
+    var w=longest*fs*(isMono?0.63:0.5)+16, h=fs+11+(lines.length-1)*lh;
+    var lx=Math.round(labelPt[0]), ly=Math.round(labelPt[1]);
+    var tilt=((seed%14)/10-0.7).toFixed(2);
+    var lg=el("g",{transform:"rotate("+tilt+" "+lx+" "+ly+")"});
+    gLabels.appendChild(lg);
+    lg.appendChild(el("rect",{x:lx-w/2,y:ly-h/2,width:w,height:h,rx:7,fill:P.paper}));
+    lg.appendChild(rc.rectangle(lx-w/2,ly-h/2,w,h,{stroke:chip,strokeWidth:1.1,
+      roughness:1.5,bowing:1.1,fill:"none",seed:seed+31}));
+    var tf=P.ink;
+    if(e.kind==="scope")tf="#2C5A52";
+    else if(e.kind==="feedback")tf="#5B4270";
+    else if(e.kind==="optional")tf="#4A4239";
+    addText(lg,lx,ly+fs*0.36-(lines.length-1)*lh/2,lines,
+      {size:fs,weight:isMono?700:400,fill:tf,mono:isMono,ls:0});
+  }
+}
+
+/* ---------- draw one node ---------- */
+function drawNode(n){
+  var r=RECT[n.id], seed=seedFor(n.id);
+  var rot=((seedFor(n.id)%30)/10-1.5); // -1.5..+1.5
+  var g=el("g",{transform:"rotate("+rot.toFixed(2)+" "+r.cx+" "+r.cy+")","class":"rv"});
+  gNodes.appendChild(g);
+
+  // soft shadow, tinted to the paper hue rather than neutral grey
+  g.appendChild(el("rect",{x:r.x+4,y:r.y+5,width:r.w,height:r.h,rx:13,
+    fill:P.shadow,opacity:0.26}));
+
+  // marker highlight behind title (load-bearing word cards)
+  if(n.mk){
+    g.appendChild(el("rect",{x:r.x+r.w*0.16,y:r.y+r.h*0.30,width:r.w*0.68,height:26,rx:7,
+      fill:P.marker,opacity:0.42}));
+  }
+
+  // body rect
+  var fill = n.frozen ? P.card : GROUPFILL[n.group];
+  var fillStyle = (n.id==="flywheel"||n.id==="facts") ? "hachure" : "solid";
+  var bodyOpt={fill:fill,fillStyle:fillStyle,fillWeight:(fillStyle==="hachure"?1.8:1),
+    hachureAngle:-42,hachureGap:8,stroke:P.ink,
+    strokeWidth:n.frozen?2.2:1.6,roughness:1.8,bowing:1.4,seed:seed};
+  g.appendChild(rc.rectangle(r.x,r.y,r.w,r.h,bodyOpt));
+  if(n.frozen){ // double outline snap for "locked" feel
+    g.appendChild(rc.rectangle(r.x+4,r.y+4,r.w-8,r.h-8,{stroke:P.ink,strokeWidth:1,
+      roughness:2.2,bowing:1.2,fill:"none",seed:seed+3}));
+  }
+
+  // title
+  var titleSize = n.mono?15.5:18, titleFont=n.mono;
+  var maxChars=Math.floor(r.w*0.90/(titleSize*(n.mono?0.62:0.55)));
+  var tl=wrapText(n.label,maxChars);
+  if(tl.length>2){titleSize=16;maxChars=Math.floor(r.w*0.90/(titleSize*0.55));tl=wrapText(n.label,maxChars);}
+  var titleY=r.cy - (tl.length-1)*titleSize*0.58 - 4;
+  // mono nodes: render title inside a code chip
+  if(n.mono){
+    var chW=Math.min(r.w-22, n.label.length*titleSize*0.62+20), chH=titleSize+13;
+    var chX=r.cx-chW/2, chY=titleY-titleSize-3;
+    g.appendChild(el("rect",{x:chX,y:chY,width:chW,height:chH,rx:8,fill:P.chip}));
+    g.appendChild(rc.rectangle(chX,chY,chW,chH,{stroke:P.ink,strokeWidth:1.2,
+      roughness:1.3,bowing:0.8,fill:"none",seed:seed+17}));
+  }
+  addText(g,r.cx,titleY,tl,{size:titleSize,weight:700,mono:titleFont,fill:P.ink});
+
+  // sublabel
+  var subSize=13, subMax=Math.floor(r.w*0.92/(subSize*0.52));
+  var sl=wrapText(n.sub,subMax);
+  var subY=titleY + tl.length*titleSize*0.95 + 7;
+  addText(g,r.cx,subY,sl,{size:subSize,weight:400,fill:"#4A4239"});
+
+  // frozen snowflake + curled corner
+  if(n.frozen){
+    addText(g,r.x+r.w-20,r.y+24,["❄"],{size:20,weight:700,fill:P.ink});
+    g.appendChild(rc.path("M "+(r.x+r.w-16)+" "+(r.y+r.h)+" q 16 -2 16 -16",
+      {stroke:P.ink,strokeWidth:1.4,roughness:1.6,fill:"none",seed:seed+9}));
+  }
+  // extractor star / folded corner
+  if(n.star){
+    g.appendChild(rc.path("M "+(r.x+r.w-16)+" "+(r.y+r.h)+" q 16 -2 16 -16",
+      {stroke:P.ink,strokeWidth:1.4,roughness:1.6,fill:"none",seed:seed+9}));
+    addText(g,r.x+16,r.y+r.h-9,["THE lever"],{size:11,weight:700,fill:P.ink,anchor:"start"});
+  }
+  // tombstone doodle on facts
+  if(n.tomb){
+    var tx=r.x+16,ty=r.y+r.h-10;
+    g.appendChild(rc.path("M "+tx+" "+ty+" v -12 q 0 -8 8 -8 q 8 0 8 8 v 12 z",
+      {stroke:P.ink,strokeWidth:1.2,roughness:1.5,fill:"#efe6d2",fillStyle:"solid",seed:seed+5}));
+    addText(g,tx+8,ty-6,["†"],{size:11,weight:700,fill:P.ink});
+  }
+  // scope chip (teal flag on corner)
+  if(n.chip){
+    // optically inset from the right edge so the flag never pokes into a neighbour
+    var cw=n.chip.length*7.4+16, cx=r.x+r.w-cw-10, cy=r.y-12;
+    g.appendChild(rc.rectangle(cx,cy,cw,21,{fill:P.teal,fillStyle:"solid",
+      stroke:P.ink,strokeWidth:1.2,roughness:1.5,seed:seed+7}));
+    addText(g,cx+cw/2,cy+14.5,[n.chip],{size:11,weight:700,mono:true,fill:"#243F3A",ls:0});
+  }
+}
+
+/* ---------- title banner on board ---------- */
+function banner(){
+  // big highlight caption under the two-call band
+  addText(gNodes, RECT.app_llm.cx, RECT.app_llm.y-20,
+    ["the whole API = these two calls"],
+    {size:22,weight:700,fill:P.ink});
+  gNodes.insertBefore(el("rect",{x:RECT.app_llm.cx-165,y:RECT.app_llm.y-40,width:330,height:26,rx:8,
+    fill:P.marker,opacity:0.4}), gNodes.firstChild);
+
+  // group frame headers (torn tape) — three columns
+  drawFrame(32, 175, 424, 648, P.peri, "READ · before", 118);
+  drawFrame(560, 240, 408, 542, P.sage, "STORE · the notebook", 700);
+  drawFrame(1072, 175, 404, 472, P.coral, "WRITE · after", 1230);
+}
+function drawFrame(x,y,w,h,accent,title,tapeX){
+  gEdges.insertBefore(rc.rectangle(x,y,w,h,{stroke:accent,strokeWidth:2.6,roughness:2.0,
+    bowing:1.3,fill:"none",seed:seedFor(title)}), gEdges.firstChild);
+  // torn tape strip — width tracks the title so no label pokes out of its tape,
+  // and the text rides INSIDE the rotated group so tape + type stay in register.
+  var tw=Math.round(title.length*8.2+28), th=30;
+  var tg=el("g",{transform:"rotate(-2 "+tapeX+" "+y+")"});
+  gNodes.appendChild(tg);
+  tg.appendChild(el("rect",{x:tapeX-tw/2+3,y:y-th/2+3,width:tw,height:th,rx:3,
+    fill:P.shadow,opacity:0.24}));
+  tg.appendChild(rc.rectangle(tapeX-tw/2,y-th/2,tw,th,{fill:accent,fillStyle:"solid",
+    stroke:P.ink,strokeWidth:1.2,roughness:1.7,seed:seedFor(title)+2}));
+  addText(tg,tapeX,y+5,[title],{size:15,weight:700,fill:P.ink});
+}
+
+/* ---------- render ---------- */
+banner();
+EDGES.forEach(drawEdge);
+NODES.forEach(drawNode);
+
+/* the scope caption sits ABOVE its box (the band below row 5 carries the scope wire);
+   the flywheel caption sits below, clear of both the wire and the tag chips */
+addText(gNodes, RECT.flywheel.cx, RECT.flywheel.y+RECT.flywheel.h+30,
+  ["tunes the extractor + retriever, NOT the model weights"],
+  {size:14,weight:700,fill:P.ink});
+addText(gNodes, RECT.scope.cx, RECT.scope.y-18,
+  ["SCOPE = lifecycle (working→durable) × domain-path"],
+  {size:12.5,weight:400,fill:"#4A4239"});
+
+/* ============ populate HTML sections from data ============ */
+var LEGEND=[
+ ["recall(query, scope)","The before-call: ask memory for what's relevant before the LLM answers.","read",1],
+ ["remember(turn, scope)","The after-call: hand a finished turn to memory so it gets stored.","write",1],
+ ["Frozen LLM","Any base model you plug in. Its weights are never changed by memory.","int",0],
+ ["Extractor","A small fine-tuned model that turns a raw turn into atomic facts.","write",0],
+ ["Atomic fact","One small, self-contained statement pulled from a turn.","write",0],
+ ["Question keys (Doc2Query)","Auto-generated questions a fact can answer, so it's easier to find later.","write",0],
+ ["Static vs dynamic tag","Marks whether a fact is stable (birthday) or changes over time (current job).","write",0],
+ ["Bitemporal reconciler","Decides what a new fact does to old ones, tracking when it was true vs when we learned it.","write",0],
+ ["ADD / UPDATE / DELETE / NOOP","The four reconciler moves: new fact, supersede an old one, retire one, or change nothing.","write",1],
+ ["Version chain","Superseded facts aren't erased. Each links forward to what replaced it.","store",0],
+ ["Tombstone","A 'deleted' marker that hides a fact from answers but keeps it in history.","store",0],
+ ["Index (BM25 + embeddings)","Two lookups, keyword and meaning, that make facts and turns findable.","store",0],
+ ["BM25","Classic keyword search: matches the actual words.","read",0],
+ ["Embeddings / dense","Vector search: matches the meaning, not just the words.","read",0],
+ ["Rerank","A scorer that reorders the wide candidate list into best-first.","read",0],
+ ["Confidence / abstention gate","The 'know when unsure' check: answer, ask a clarifying question, or escalate.","read",0],
+ ["Raw turns","The original conversation text, served as the evidence behind an answer.","store",0],
+ ["Spine","A rolling summary of the story so far.","store",0],
+ ["Profile","What we know about the user: static traits plus dynamic state.","store",0],
+ ["Scope","A tag with two axes: lifecycle (working→task→session→durable) and domain-path (work/tldr, personal/guitar).","scope",0],
+ ["Flywheel","The learning loop: usage and corrections tune the extractor and retriever, never the base model.","learn",0],
+ ["Append-only log","An immutable record of everything that happened, underneath the facts and turns.","store",0]
+];
+var cmap={read:"c-read",write:"c-write",store:"c-store",learn:"c-learn",scope:"c-scope",int:"c-int"};
+var lg=document.getElementById("legend");
+LEGEND.forEach(function(x){
+  var d=document.createElement("div"); d.className="sticky lift reveal "+cmap[x[2]];
+  d.tabIndex=0;
+  var term=x[3]?'<span class="term mono">'+x[0]+'</span>':'<span class="term">'+x[0]+'</span>';
+  d.innerHTML=term+'<div class="def">'+x[1]+'</div>'; lg.appendChild(d);
+});
+
+var INV=[
+ "Never hard-delete. Tombstone plus version chain, so every fact keeps its history.",
+ "Serve raw turns as the evidence, never summaries.",
+ "Separate by scope tag, never a per-domain schema. One engine, more tags.",
+ "Know when you don't know. The gate can answer, ask, or escalate.",
+ "The base model stays frozen. Only the notebook, extractor, and retriever learn."
+];
+var iv=document.getElementById("invariants");
+INV.forEach(function(t,i){
+  var d=document.createElement("div"); d.className="sticky inv lift reveal";
+  d.tabIndex=0;
+  d.innerHTML='<span class="num" aria-hidden="true">'+(i+1)+'</span><span>'+t+'</span>'; iv.appendChild(d);
+});
+
+var STEPS=[
+ ["Point it at a store",'mem = <span class="kw">Memory</span>(store=<span class="st">"./notebook.db"</span>)',
+  "One file holds it all: log, versioned facts, raw turns, spine, profile. Nothing to model; no schema to design."],
+ ["Recall BEFORE you answer",'ctx = mem.<span class="kw">recall</span>(query=user_msg, scope=<span class="st">"personal/atlas"</span>)\n<span class="kw">if</span> ctx.abstain:\n    <span class="kw">return</span> ask_clarifying(ctx.hint)',
+  "You get the top-10 raw turns + profile + spine, budget-capped. Low confidence? It says so instead of bluffing."],
+ ["Answer with YOUR model",'answer = <span class="kw">your_llm</span>(system + ctx.text + user_msg)',
+  "The base model stays frozen. The notebook is just extra context you paste in, so it works with any LLM."],
+ ["Remember AFTER you answer",'mem.<span class="kw">remember</span>(turn=[user_msg, answer], scope=<span class="st">"personal/atlas"</span>)\n<span class="cm"># scope is a plain string: "work/tldr", "personal/guitar", ...</span>',
+  "Fire-and-forget. Facts get extracted and version-chained; nothing is ever hard-deleted. Add a new domain = write a new tag."]
+];
+var st=document.getElementById("steps");
+STEPS.forEach(function(s,i){
+  var d=document.createElement("div"); d.className="step lift reveal";
+  d.tabIndex=0;
+  d.innerHTML='<h4><span class="n" aria-hidden="true">'+(i+1)+'</span>'+s[0]+'</h4>'
+    +'<pre class="code">'+s[1]+'</pre><div class="detail">'+s[2]+'</div>';
+  st.appendChild(d);
+});
+
+var SINGLE={
+ title:"Your coding buddy that never forgets",
+ scn:"One scope, one project. A personal coding assistant that remembers the decisions you made days ago, and why, by wrapping your frozen LLM with two calls.",
+ walk:[
+  'MON. You say: "Use Postgres, not Mongo." Right after the model replies, your app fires <b>remember(turn, scope="personal/atlas")</b>.',
+  'WRITE. The extractor pulls one atomic fact (DB = Postgres · reason = "Mongo burned us"), tags it durable, the reconciler ADDs it. The raw turn is saved as the evidence.',
+  'THU. You ask: "why did we skip Mongo again?" BEFORE answering, <b>recall(query, scope="personal/atlas")</b> gathers candidates (BM25 ∪ dense), reranks, hands back the top turns best-first.',
+  'ANSWER. The confidence gate says "solid match," so it replies by quoting your actual Monday words: the raw turn, not a fuzzy summary.',
+  'FRI. "Switch to Postgres 16, use JSONB." The reconciler runs UPDATE: supersede + version-chain the old fact, never hard-delete. Ask "what did we pick first?" and the tombstoned original still answers.'
+ ]
+};
+var MIXED={
+ title:"One you, many worlds",
+ scn:"Same person, many domains (work/tldr, work/medical, personal/guitar) under one memory. Retrieval is default-scoped, so domains never bleed; cross-scope links happen only when you ask.",
+ walk:[
+  'THREE-IN-ONE. <b>remember(turn, scope="work/tldr")</b> logs a code decision · <b>scope="work/medical"</b> logs a penicillin allergy · <b>scope="personal/guitar"</b> logs "F chord still buzzes."',
+  'DEFAULT-SCOPED. Your guitar app calls <b>recall(query, scope="personal/guitar")</b>. It only sees guitar rows. Your allergy and code bugs never leak in.',
+  'SAME AT WORK. <b>recall(..., scope="work/tldr")</b> is just as blinkered: no guitar, no clinic. Each domain gets its own clean top-10.',
+  'CROSS-SCOPE, ON PURPOSE. "book studio time, but avoid my clinic days" → an explicit query over personal/guitar + work/medical. Links are opt-in, never automatic.',
+  'PER-SCOPE MEMORY. Each scope keeps its own rolling SPINE + PROFILE, so "where were we?" summarizes practice in guitar, and the sprint in work/tldr.'
+ ],
+ note:"Same engine, more tags, no new schema. A scope is just two tags on each row: a lifecycle axis (working → task → session → durable) and a domain path (e.g. work/tldr). Adding \"personal/cooking\" tomorrow = one new tag string. No migration, no per-domain ontology, no second database."
+};
+function walkHTML(arr){return arr.map(function(w){return "<li>"+w+"</li>";}).join("");}
+var uc=document.getElementById("usecases");
+var pS=document.createElement("div"); pS.className="panel single reveal";
+pS.innerHTML='<div class="ptitle"><span class="kind">Single scope</span>'+SINGLE.title+'</div><p class="pscn">'+SINGLE.scn+'</p>'
+ +'<div class="scopebox"><span class="tag mono">scope: personal/atlas</span></div>'
+ +'<ol class="walk">'+walkHTML(SINGLE.walk)+'</ol>';
+uc.appendChild(pS);
+var pM=document.createElement("div"); pM.className="panel mixed reveal";
+pM.innerHTML='<div class="ptitle"><span class="kind">Mixed scopes</span>'+MIXED.title+'</div><p class="pscn">'+MIXED.scn+'</p>'
+ +'<div class="userpill">👤 one user &nbsp;→&nbsp; one memory</div>'
+ +'<div class="scope-stack">'
+ +'<div class="scopebox"><span class="tag mono">scope: work/tldr</span></div>'
+ +'<div class="scopebox"><span class="tag mono">scope: work/medical</span></div>'
+ +'<div class="scopebox"><span class="tag mono">scope: personal/guitar</span></div>'
+ +'</div>'
+ +'<ol class="walk">'+walkHTML(MIXED.walk)+'</ol>'
+ +'<div class="scopenote"><b>Separate by tag, not schema:</b> '+MIXED.note+'</div>';
+uc.appendChild(pM);
+
+var WHO=[
+ "Devs adding memory to a single-purpose assistant (one user, one project) who don't want to stand up a whole vector-DB pipeline.",
+ "Teams running one agent across many domains who need clean scope separation, not one giant leaky context window.",
+ "Anyone who wants two-call memory: recall() before the model speaks, remember() after. Drop-in around any frozen LLM, no fine-tuning.",
+ "Builders burned by summarize-everything RAG who want raw-turn evidence, versioned facts, and an honest \"I don't know\" abstain signal.",
+ "Products that need an audit trail: append-only log, never-hard-delete, valid-time vs transaction-time built in."
+];
+var who=document.getElementById("who");
+WHO.forEach(function(t){
+  var d=document.createElement("div"); d.className="sticky lift reveal"; d.tabIndex=0;
+  d.innerHTML='<div class="def">'+t+'</div>'; who.appendChild(d);
+});
+
+/* ============ staggered sketch-in reveal ============
+   Gated behind the .js class (no-JS shows everything), and fully skipped when the
+   visitor asks for reduced motion — in that case we just mark everything shown. */
+(function(){
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var groups = [
+    Array.prototype.slice.call(document.querySelectorAll("#board .rv")),
+    Array.prototype.slice.call(document.querySelectorAll(".reveal"))
+  ];
+  var all = groups[0].concat(groups[1]);
+  if(reduce || !("IntersectionObserver" in window)){
+    all.forEach(function(n){n.classList.add("shown");});
+    return;
+  }
+  // The diagram is one composition: stagger its boxes by reading order, not by
+  // individual intersection, so the loop draws itself left-to-right, top-to-bottom.
+  var board=document.getElementById("board");
+  var boardIO=new IntersectionObserver(function(es,o){
+    es.forEach(function(e){
+      if(!e.isIntersecting)return;
+      groups[0].forEach(function(n,i){
+        n.style.setProperty("--d",(i*55)+"ms");
+        n.classList.add("shown");
+      });
+      o.unobserve(e.target);
+    });
+  },{threshold:0.08});
+  if(board)boardIO.observe(board);
+
+  // Cards stagger as a wave, ~65ms apart, capped so a big grid never crawls.
+  var cardIO=new IntersectionObserver(function(es,o){
+    var batch=0;
+    es.forEach(function(e){
+      if(!e.isIntersecting)return;
+      e.target.style.setProperty("--d",(Math.min(batch++,7)*65)+"ms");
+      e.target.classList.add("shown");
+      o.unobserve(e.target);
+    });
+  },{threshold:0.12,rootMargin:"0px 0px -8% 0px"});
+  groups[1].forEach(function(n){cardIO.observe(n);});
+
+  // Safety net: anything still hidden after 2.5s (e.g. an observer that never
+  // fired because the element was already scrolled past) is revealed outright.
+  setTimeout(function(){all.forEach(function(n){n.classList.add("shown");});},2500);
+})();
+})();
+</script>
+</body>
+</html>

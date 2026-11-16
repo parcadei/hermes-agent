@@ -5,6 +5,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from tools.skill_manager_tool import (
     _validate_name,
     _validate_category,
@@ -330,6 +332,25 @@ word word
             result = _patch_skill("nonexistent", "old", "new")
         assert result["success"] is False
 
+    def test_patch_supporting_file_symlink_escape_blocked(self, tmp_path):
+        outside_file = tmp_path / "outside.txt"
+        outside_file.write_text("old text here")
+
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            link = tmp_path / "my-skill" / "references" / "evil.md"
+            link.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                link.symlink_to(outside_file)
+            except OSError:
+                pytest.skip("Symlinks not supported")
+
+            result = _patch_skill("my-skill", "old text", "new text", file_path="references/evil.md")
+
+        assert result["success"] is False
+        assert "escapes" in result["error"].lower()
+        assert outside_file.read_text() == "old text here"
+
 
 class TestDeleteSkill:
     def test_delete_existing(self, tmp_path):
@@ -375,6 +396,25 @@ class TestWriteFile:
             result = _write_file("my-skill", "secret/evil.py", "malicious")
         assert result["success"] is False
 
+    def test_write_symlink_escape_blocked(self, tmp_path):
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            link = tmp_path / "my-skill" / "references" / "escape"
+            link.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                link.symlink_to(outside_dir, target_is_directory=True)
+            except OSError:
+                pytest.skip("Symlinks not supported")
+
+            result = _write_file("my-skill", "references/escape/owned.md", "malicious")
+
+        assert result["success"] is False
+        assert "escapes" in result["error"].lower()
+        assert not (outside_dir / "owned.md").exists()
+
 
 class TestRemoveFile:
     def test_remove_existing_file(self, tmp_path):
@@ -390,6 +430,27 @@ class TestRemoveFile:
             _create_skill("my-skill", VALID_SKILL_CONTENT)
             result = _remove_file("my-skill", "references/nope.md")
         assert result["success"] is False
+
+    def test_remove_symlink_escape_blocked(self, tmp_path):
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        outside_file = outside_dir / "keep.txt"
+        outside_file.write_text("content")
+
+        with _skill_dir(tmp_path):
+            _create_skill("my-skill", VALID_SKILL_CONTENT)
+            link = tmp_path / "my-skill" / "references" / "escape"
+            link.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                link.symlink_to(outside_dir, target_is_directory=True)
+            except OSError:
+                pytest.skip("Symlinks not supported")
+
+            result = _remove_file("my-skill", "references/escape/keep.txt")
+
+        assert result["success"] is False
+        assert "escapes" in result["error"].lower()
+        assert outside_file.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -423,3 +484,85 @@ class TestSkillManageDispatcher:
             raw = skill_manage(action="create", name="test-skill", content=VALID_SKILL_CONTENT)
         result = json.loads(raw)
         assert result["success"] is True
+
+
+class TestSecurityScanGate:
+    """_security_scan_skill is gated by skills.guard_agent_created config flag."""
+
+    def test_scan_noop_when_flag_off(self, tmp_path):
+        """Default config (flag off) short-circuits before running scan_skill."""
+        from tools.skill_manager_tool import _security_scan_skill
+
+        with patch("tools.skill_manager_tool._guard_agent_created_enabled", return_value=False), \
+             patch("tools.skill_manager_tool.scan_skill") as mock_scan:
+            result = _security_scan_skill(tmp_path)
+
+        assert result is None
+        mock_scan.assert_not_called()  # scan never ran
+
+    def test_scan_runs_when_flag_on(self, tmp_path):
+        """When flag is on, scan_skill is invoked and its verdict is honored."""
+        from tools.skill_manager_tool import _security_scan_skill
+        from tools.skills_guard import ScanResult
+
+        # Fake a safe scan result — caller should return None (allow)
+        fake_result = ScanResult(
+            skill_name="test",
+            source="agent-created",
+            trust_level="agent-created",
+            verdict="safe",
+            findings=[],
+            summary="ok",
+        )
+        with patch("tools.skill_manager_tool._guard_agent_created_enabled", return_value=True), \
+             patch("tools.skill_manager_tool.scan_skill", return_value=fake_result) as mock_scan:
+            result = _security_scan_skill(tmp_path)
+
+        assert result is None
+        mock_scan.assert_called_once()
+
+    def test_scan_blocks_dangerous_when_flag_on(self, tmp_path):
+        """Dangerous verdict + flag on → returns an error string for the agent."""
+        from tools.skill_manager_tool import _security_scan_skill
+        from tools.skills_guard import ScanResult, Finding
+
+        finding = Finding(
+            pattern_id="test", severity="critical", category="exfiltration",
+            file="SKILL.md", line=1, match="curl $TOKEN", description="test",
+        )
+        fake_result = ScanResult(
+            skill_name="test",
+            source="agent-created",
+            trust_level="agent-created",
+            verdict="dangerous",
+            findings=[finding],
+            summary="dangerous",
+        )
+        with patch("tools.skill_manager_tool._guard_agent_created_enabled", return_value=True), \
+             patch("tools.skill_manager_tool.scan_skill", return_value=fake_result):
+            result = _security_scan_skill(tmp_path)
+
+        assert result is not None
+        assert "Security scan blocked" in result
+
+    def test_guard_flag_reads_config_default_false(self):
+        """_guard_agent_created_enabled returns False when config doesn't set it."""
+        from tools.skill_manager_tool import _guard_agent_created_enabled
+
+        with patch("hermes_cli.config.load_config", return_value={"skills": {}}):
+            assert _guard_agent_created_enabled() is False
+
+    def test_guard_flag_reads_config_when_set(self):
+        """_guard_agent_created_enabled returns True when user explicitly enables."""
+        from tools.skill_manager_tool import _guard_agent_created_enabled
+
+        with patch("hermes_cli.config.load_config",
+                   return_value={"skills": {"guard_agent_created": True}}):
+            assert _guard_agent_created_enabled() is True
+
+    def test_guard_flag_handles_config_error(self):
+        """If load_config raises, _guard_agent_created_enabled defaults to False (fail-safe off)."""
+        from tools.skill_manager_tool import _guard_agent_created_enabled
+
+        with patch("hermes_cli.config.load_config", side_effect=RuntimeError("boom")):
+            assert _guard_agent_created_enabled() is False

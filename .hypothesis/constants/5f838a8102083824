@@ -1,4 +1,0 @@
-# file: /Users/cosimo/.hermes/hermes-agent/.claude/worktrees/engram-build/foundry/ontology.py
-# hypothesis_version: 6.151.9
-
-['%B %Y', '%B %d, %Y', '%Y-%m-%d', '%Y/%m/%d', '%b %Y', '%b %d, %Y', ',', 'BUILTIN_INTERFACES', 'Cardinality', 'EntityType', 'Facet', 'GroundingLayer', 'Interface', 'LinkType', 'PropertyType', 'ValueType', '\\1', '\\b(?:and|or)\\b', '_', 'boolean', 'date', 'derived', 'duration', 'enum', 'false', 'frequency', 'how', 'ies', 'infer_property_type', 'inferred', 'list', 'locatable', 'many_to_many', 'many_to_one', 'no', 'numeric', 'one_to_many', 'one_to_one', 'person', 'quantified', 'quantity', 'rated', 'recurring', 's', 'sentiment', 'ses', 'ss', 'stated', 'status', 'string', 'temporal', 'true', 'us', 'what', 'when', 'where', 'who', 'xes', 'y', 'yes', 'zes']

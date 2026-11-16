@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
+from agent.codex_responses_adapter import _chat_messages_to_responses_input, _normalize_codex_response, _preflight_codex_input_items
 
 sys.modules.setdefault("fire", types.SimpleNamespace(Fire=lambda *a, **k: None))
 sys.modules.setdefault("firecrawl", types.SimpleNamespace(Firecrawl=object))
@@ -44,11 +45,11 @@ class _FakeOpenAI:
         pass
 
 
-def _make_agent(monkeypatch, provider, api_mode="chat_completions", base_url="https://openrouter.ai/api/v1"):
+def _make_agent(monkeypatch, provider, api_mode="chat_completions", base_url="https://openrouter.ai/api/v1", model=None):
     monkeypatch.setattr("run_agent.get_tool_definitions", lambda **kw: _tool_defs("web_search", "terminal"))
     monkeypatch.setattr("run_agent.check_toolset_requirements", lambda: {})
     monkeypatch.setattr("run_agent.OpenAI", _FakeOpenAI)
-    return AIAgent(
+    kwargs = dict(
         api_key="test-key",
         base_url=base_url,
         provider=provider,
@@ -58,6 +59,12 @@ def _make_agent(monkeypatch, provider, api_mode="chat_completions", base_url="ht
         skip_context_files=True,
         skip_memory=True,
     )
+    if model:
+        kwargs["model"] = model
+    base_url="https://openrouter.ai/api/v1",
+    api_key="test-key",
+    base_url="https://openrouter.ai/api/v1",
+    return AIAgent(**kwargs)
 
 
 # ── _build_api_kwargs tests ─────────────────────────────────────────────────
@@ -225,9 +232,46 @@ class TestDeveloperRoleSwap:
         assert kwargs["messages"][0]["role"] == "developer"
 
 
+class TestBuildApiKwargsChatCompletionsServiceTier:
+    """service_tier via request_overrides works on the chat_completions path."""
+
+    def test_includes_service_tier_via_request_overrides(self, monkeypatch):
+        agent = _make_agent(monkeypatch, "openrouter")
+        agent.model = "gpt-4.1"
+        agent.request_overrides = {"service_tier": "priority"}
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert kwargs["service_tier"] == "priority"
+
+    def test_no_service_tier_when_overrides_empty(self, monkeypatch):
+        agent = _make_agent(monkeypatch, "openrouter")
+        agent.model = "gpt-4.1"
+        agent.request_overrides = {}
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert "service_tier" not in kwargs
+
+
+class TestBuildApiKwargsKimiNoTemperatureOverride:
+    def test_kimi_for_coding_omits_temperature(self, monkeypatch):
+        """Temperature should NOT be set client-side for Kimi models.
+
+        The Kimi gateway selects the correct temperature server-side.
+        """
+        agent = _make_agent(
+            monkeypatch,
+            "kimi-coding",
+            base_url="https://api.kimi.com/coding/v1",
+            model="kimi-for-coding",
+        )
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert "temperature" not in kwargs
+
+
 class TestBuildApiKwargsAIGateway:
     def test_uses_chat_completions_format(self, monkeypatch):
-        agent = _make_agent(monkeypatch, "ai-gateway", base_url="https://ai-gateway.vercel.sh/v1")
+        agent = _make_agent(monkeypatch, "ai-gateway", base_url="https://ai-gateway.vercel.sh/v1", model="gpt-4o")
         messages = [{"role": "user", "content": "hi"}]
         kwargs = agent._build_api_kwargs(messages)
         assert "messages" in kwargs
@@ -235,7 +279,7 @@ class TestBuildApiKwargsAIGateway:
         assert kwargs["messages"][-1]["content"] == "hi"
 
     def test_no_responses_api_fields(self, monkeypatch):
-        agent = _make_agent(monkeypatch, "ai-gateway", base_url="https://ai-gateway.vercel.sh/v1")
+        agent = _make_agent(monkeypatch, "ai-gateway", base_url="https://ai-gateway.vercel.sh/v1", model="gpt-4o")
         messages = [{"role": "user", "content": "hi"}]
         kwargs = agent._build_api_kwargs(messages)
         assert "input" not in kwargs
@@ -243,7 +287,7 @@ class TestBuildApiKwargsAIGateway:
         assert "store" not in kwargs
 
     def test_includes_reasoning_in_extra_body(self, monkeypatch):
-        agent = _make_agent(monkeypatch, "ai-gateway", base_url="https://ai-gateway.vercel.sh/v1")
+        agent = _make_agent(monkeypatch, "ai-gateway", base_url="https://ai-gateway.vercel.sh/v1", model="gpt-4o")
         messages = [{"role": "user", "content": "hi"}]
         kwargs = agent._build_api_kwargs(messages)
         extra = kwargs.get("extra_body", {})
@@ -251,7 +295,7 @@ class TestBuildApiKwargsAIGateway:
         assert extra["reasoning"]["enabled"] is True
 
     def test_includes_tools(self, monkeypatch):
-        agent = _make_agent(monkeypatch, "ai-gateway", base_url="https://ai-gateway.vercel.sh/v1")
+        agent = _make_agent(monkeypatch, "ai-gateway", base_url="https://ai-gateway.vercel.sh/v1", model="gpt-4o")
         messages = [{"role": "user", "content": "hi"}]
         kwargs = agent._build_api_kwargs(messages)
         assert "tools" in kwargs
@@ -356,6 +400,25 @@ class TestBuildApiKwargsCodex:
         assert "reasoning" in kwargs
         assert kwargs["reasoning"]["effort"] == "medium"
 
+    def test_includes_service_tier_via_request_overrides(self, monkeypatch):
+        agent = _make_agent(monkeypatch, "openai-codex", api_mode="codex_responses",
+                            base_url="https://chatgpt.com/backend-api/codex")
+        agent.model = "gpt-5.4"
+        agent.service_tier = "priority"
+        agent.request_overrides = {"service_tier": "priority"}
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert kwargs["service_tier"] == "priority"
+
+    def test_omits_max_output_tokens_for_codex_backend(self, monkeypatch):
+        agent = _make_agent(monkeypatch, "openai-codex", api_mode="codex_responses",
+                            base_url="https://chatgpt.com/backend-api/codex")
+        agent.model = "gpt-5.4"
+        agent.max_tokens = 20
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert "max_output_tokens" not in kwargs
+
     def test_includes_encrypted_content_in_include(self, monkeypatch):
         agent = _make_agent(monkeypatch, "openai-codex", api_mode="codex_responses",
                             base_url="https://chatgpt.com/backend-api/codex")
@@ -384,7 +447,7 @@ class TestChatMessagesToResponsesInput:
         agent = _make_agent(monkeypatch, "openai-codex", api_mode="codex_responses",
                             base_url="https://chatgpt.com/backend-api/codex")
         messages = [{"role": "user", "content": "hello"}]
-        items = agent._chat_messages_to_responses_input(messages)
+        items = _chat_messages_to_responses_input(messages)
         assert items == [{"role": "user", "content": "hello"}]
 
     def test_system_messages_filtered(self, monkeypatch):
@@ -394,7 +457,7 @@ class TestChatMessagesToResponsesInput:
             {"role": "system", "content": "be helpful"},
             {"role": "user", "content": "hello"},
         ]
-        items = agent._chat_messages_to_responses_input(messages)
+        items = _chat_messages_to_responses_input(messages)
         assert len(items) == 1
         assert items[0]["role"] == "user"
 
@@ -410,7 +473,7 @@ class TestChatMessagesToResponsesInput:
                 "function": {"name": "web_search", "arguments": '{"query": "test"}'},
             }],
         }]
-        items = agent._chat_messages_to_responses_input(messages)
+        items = _chat_messages_to_responses_input(messages)
         fc_items = [i for i in items if i.get("type") == "function_call"]
         assert len(fc_items) == 1
         assert fc_items[0]["name"] == "web_search"
@@ -420,7 +483,7 @@ class TestChatMessagesToResponsesInput:
         agent = _make_agent(monkeypatch, "openai-codex", api_mode="codex_responses",
                             base_url="https://chatgpt.com/backend-api/codex")
         messages = [{"role": "tool", "tool_call_id": "call_abc", "content": "result here"}]
-        items = agent._chat_messages_to_responses_input(messages)
+        items = _chat_messages_to_responses_input(messages)
         assert items[0]["type"] == "function_call_output"
         assert items[0]["call_id"] == "call_abc"
         assert items[0]["output"] == "result here"
@@ -440,7 +503,7 @@ class TestChatMessagesToResponsesInput:
             },
             {"role": "user", "content": "continue"},
         ]
-        items = agent._chat_messages_to_responses_input(messages)
+        items = _chat_messages_to_responses_input(messages)
         reasoning_items = [i for i in items if i.get("type") == "reasoning"]
         assert len(reasoning_items) == 1
         assert reasoning_items[0]["encrypted_content"] == "gAAAA_test_blob"
@@ -453,7 +516,7 @@ class TestChatMessagesToResponsesInput:
             {"role": "assistant", "content": "hi"},
             {"role": "user", "content": "hello"},
         ]
-        items = agent._chat_messages_to_responses_input(messages)
+        items = _chat_messages_to_responses_input(messages)
         reasoning_items = [i for i in items if i.get("type") == "reasoning"]
         assert len(reasoning_items) == 0
 
@@ -477,7 +540,7 @@ class TestNormalizeCodexResponse:
             ],
             status="completed",
         )
-        msg, reason = agent._normalize_codex_response(response)
+        msg, reason = _normalize_codex_response(response)
         assert msg.content == "Hello!"
         assert reason == "stop"
 
@@ -495,7 +558,7 @@ class TestNormalizeCodexResponse:
             ],
             status="completed",
         )
-        msg, reason = agent._normalize_codex_response(response)
+        msg, reason = _normalize_codex_response(response)
         assert msg.content == "42"
         assert "math" in msg.reasoning
         assert reason == "stop"
@@ -514,7 +577,7 @@ class TestNormalizeCodexResponse:
             ],
             status="completed",
         )
-        msg, reason = agent._normalize_codex_response(response)
+        msg, reason = _normalize_codex_response(response)
         assert msg.codex_reasoning_items is not None
         assert len(msg.codex_reasoning_items) == 1
         assert msg.codex_reasoning_items[0]["encrypted_content"] == "gAAAA_secret_blob_123"
@@ -530,7 +593,7 @@ class TestNormalizeCodexResponse:
             ],
             status="completed",
         )
-        msg, reason = agent._normalize_codex_response(response)
+        msg, reason = _normalize_codex_response(response)
         assert msg.codex_reasoning_items is None
 
     def test_tool_calls_extracted(self, monkeypatch):
@@ -543,7 +606,7 @@ class TestNormalizeCodexResponse:
             ],
             status="completed",
         )
-        msg, reason = agent._normalize_codex_response(response)
+        msg, reason = _normalize_codex_response(response)
         assert reason == "tool_calls"
         assert len(msg.tool_calls) == 1
         assert msg.tool_calls[0].function.name == "web_search"
@@ -759,11 +822,14 @@ class TestCodexReasoningPreflight:
              "summary": [{"type": "summary_text", "text": "Thinking about it"}]},
             {"role": "assistant", "content": "hi there"},
         ]
-        normalized = agent._preflight_codex_input_items(raw_input)
+        normalized = _preflight_codex_input_items(raw_input)
         reasoning_items = [i for i in normalized if i.get("type") == "reasoning"]
         assert len(reasoning_items) == 1
         assert reasoning_items[0]["encrypted_content"] == "abc123encrypted"
-        assert reasoning_items[0]["id"] == "r_001"
+        # Note: "id" is intentionally excluded from normalized output —
+        # with store=False the API returns 404 on server-side id resolution.
+        # The id is only used for local deduplication via seen_ids.
+        assert "id" not in reasoning_items[0]
         assert reasoning_items[0]["summary"] == [{"type": "summary_text", "text": "Thinking about it"}]
 
     def test_reasoning_item_without_id(self, monkeypatch):
@@ -772,7 +838,7 @@ class TestCodexReasoningPreflight:
         raw_input = [
             {"type": "reasoning", "encrypted_content": "abc123"},
         ]
-        normalized = agent._preflight_codex_input_items(raw_input)
+        normalized = _preflight_codex_input_items(raw_input)
         assert len(normalized) == 1
         assert "id" not in normalized[0]
         assert normalized[0]["summary"] == []  # default empty summary
@@ -784,7 +850,7 @@ class TestCodexReasoningPreflight:
             {"type": "reasoning", "encrypted_content": ""},
             {"role": "user", "content": "hello"},
         ]
-        normalized = agent._preflight_codex_input_items(raw_input)
+        normalized = _preflight_codex_input_items(raw_input)
         reasoning_items = [i for i in normalized if i.get("type") == "reasoning"]
         assert len(reasoning_items) == 0
 
@@ -803,7 +869,7 @@ class TestCodexReasoningPreflight:
             },
             {"role": "user", "content": "follow up"},
         ]
-        items = agent._chat_messages_to_responses_input(messages)
+        items = _chat_messages_to_responses_input(messages)
         reasoning_items = [i for i in items if isinstance(i, dict) and i.get("type") == "reasoning"]
         assert len(reasoning_items) == 1
         assert reasoning_items[0]["encrypted_content"] == "enc123"
